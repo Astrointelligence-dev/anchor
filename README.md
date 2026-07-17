@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/artcgranja/anchor/main/docs/docs/assets/logo-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/artcgranja/anchor/main/docs/docs/assets/logo-light.svg">
-    <img src="https://raw.githubusercontent.com/artcgranja/anchor/main/docs/docs/assets/logo-light.svg" alt="anchor" width="280">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Astrointelligence-dev/anchor/main/docs/docs/assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Astrointelligence-dev/anchor/main/docs/docs/assets/logo-light.svg">
+    <img src="https://raw.githubusercontent.com/Astrointelligence-dev/anchor/main/docs/docs/assets/logo-light.svg" alt="anchor" width="280">
   </picture>
 </p>
 
@@ -11,19 +11,19 @@
 </p>
 
 <p align="center">
-  <a href="https://artcgranja.github.io/anchor/">Docs</a> ·
-  <a href="https://artcgranja.github.io/anchor/getting-started/quickstart/">Quickstart</a> ·
-  <a href="https://artcgranja.github.io/anchor/cookbook/">Cookbook</a> ·
-  <a href="https://artcgranja.github.io/anchor/api/">API Reference</a> ·
-  <a href="https://github.com/artcgranja/anchor/issues">Issues</a>
+  <a href="https://astrointelligence-dev.github.io/anchor/">Docs</a> ·
+  <a href="https://astrointelligence-dev.github.io/anchor/getting-started/quickstart/">Quickstart</a> ·
+  <a href="https://astrointelligence-dev.github.io/anchor/cookbook/">Cookbook</a> ·
+  <a href="https://astrointelligence-dev.github.io/anchor/api/">API Reference</a> ·
+  <a href="https://github.com/Astrointelligence-dev/anchor/issues">Issues</a>
 </p>
 
 <p align="center">
   <a href="https://pypi.org/project/astro-anchor/"><img src="https://img.shields.io/pypi/v/astro-anchor?color=3b82f6&style=flat-square" alt="PyPI"></a>
   <a href="https://pypi.org/project/astro-anchor/"><img src="https://img.shields.io/pypi/dm/astro-anchor?color=64748b&style=flat-square" alt="Downloads"></a>
   <a href="https://pypi.org/project/astro-anchor/"><img src="https://img.shields.io/pypi/pyversions/astro-anchor?color=6B8E6B&style=flat-square" alt="Python"></a>
-  <a href="https://github.com/artcgranja/anchor/blob/main/LICENSE"><img src="https://img.shields.io/github/license/artcgranja/anchor?color=64748b&style=flat-square" alt="License"></a>
-  <a href="https://github.com/artcgranja/anchor"><img src="https://img.shields.io/github/stars/artcgranja/anchor?style=flat-square&color=3b82f6" alt="Stars"></a>
+  <a href="https://github.com/Astrointelligence-dev/anchor/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Astrointelligence-dev/anchor?color=64748b&style=flat-square" alt="License"></a>
+  <a href="https://github.com/Astrointelligence-dev/anchor"><img src="https://img.shields.io/github/stars/Astrointelligence-dev/anchor?style=flat-square&color=3b82f6" alt="Stars"></a>
 </p>
 
 ---
@@ -216,7 +216,7 @@ Three presets available: `default_chat_budget` (conversational), `default_rag_bu
 ## Development
 
 ```bash
-git clone https://github.com/artcgranja/anchor.git
+git clone https://github.com/Astrointelligence-dev/anchor.git
 cd anchor
 uv sync
 uv run pytest     # 2000+ tests
@@ -225,7 +225,7 @@ uv run ruff check src/ tests/
 
 ## Roadmap
 
-- **v0.1.0** (current) — Hybrid RAG, Memory, Pipeline, Formatters, Async, Decorator API, Agent Framework, [Full docs](https://artcgranja.github.io/anchor/)
+- **v0.1.0** (current) — Hybrid RAG, Memory, Pipeline, Formatters, Async, Decorator API, Agent Framework, [Full docs](https://astrointelligence-dev.github.io/anchor/)
 - **v0.2.0** — MCP Bridge, progressive summarization, persistent storage backends
 - **v0.3.0** — GraphRAG, multi-modal context, LangChain/LlamaIndex adapters
 - **v1.0.0** — Production-grade APIs, plugin ecosystem
