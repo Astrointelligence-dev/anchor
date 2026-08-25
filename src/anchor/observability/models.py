@@ -20,6 +20,7 @@ class SpanKind(StrEnum):
     MEMORY = "memory"
     INGESTION = "ingestion"
     QUERY_TRANSFORM = "query_transform"
+    TOOL = "tool"
 
 
 class Span(BaseModel):

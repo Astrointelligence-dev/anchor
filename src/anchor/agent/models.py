@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -28,6 +28,9 @@ class AgentTool(BaseModel):
     input_schema: dict[str, Any]
     fn: Callable[..., str]
     input_model: type[BaseModel] | None = None
+    timeout: float | None = None
+    defer_loading: bool = False
+    input_examples: tuple[dict[str, Any], ...] = ()
 
     def to_tool_schema(self) -> ToolSchema:
         """Convert to provider-agnostic ToolSchema."""
@@ -37,6 +40,7 @@ class AgentTool(BaseModel):
             name=self.name,
             description=self.description,
             input_schema=self.input_schema,
+            input_examples=self.input_examples,
         )
 
     def validate_input(self, tool_input: dict[str, Any]) -> tuple[bool, str]:
@@ -99,3 +103,38 @@ class AgentTool(BaseModel):
                 )
 
         return True, ""
+
+
+class RoundUsage(BaseModel, frozen=True):
+    """Per-round token accounting for one iteration of the tool loop.
+
+    ``prompt_tokens``/``completion_tokens`` come from provider-reported
+    usage (0 when the provider does not report usage on the stream).
+    ``tool_schema_tokens`` and ``tool_result_tokens`` are counted with
+    the agent's tokenizer.
+    """
+
+    round: int
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    tool_schema_tokens: int = 0
+    tool_result_tokens: int = 0
+
+
+class TurnDiagnostics(BaseModel, frozen=True):
+    """Accounting and outcome for one full ``chat()``/``achat()`` turn."""
+
+    rounds: tuple[RoundUsage, ...] = ()
+    stopped_by: Literal["stop", "max_rounds", "max_tokens"] = "stop"
+
+    @property
+    def total_prompt_tokens(self) -> int:
+        return sum(r.prompt_tokens for r in self.rounds)
+
+    @property
+    def total_completion_tokens(self) -> int:
+        return sum(r.completion_tokens for r in self.rounds)
+
+    @property
+    def total_tool_result_tokens(self) -> int:
+        return sum(r.tool_result_tokens for r in self.rounds)

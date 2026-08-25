@@ -2,6 +2,7 @@
 
 Agent:
     Agent, AgentTool, tool, Skill, SkillRegistry,
+    SubagentDefinition, HookResult, AgentCallback, RoundUsage, TurnDiagnostics,
     memory_skill, memory_tools, rag_skill, rag_tools
 
 Core Pipeline:
@@ -118,9 +119,14 @@ from importlib.metadata import PackageNotFoundError, version
 
 from anchor.agent import (
     Agent,
+    AgentCallback,
     AgentTool,
+    HookResult,
+    RoundUsage,
     Skill,
     SkillRegistry,
+    SubagentDefinition,
+    TurnDiagnostics,
     memory_skill,
     memory_tools,
     rag_skill,
@@ -406,10 +412,15 @@ __all__ = [
     "ABTestResult",
     "ABTestRunner",
     "Agent",
+    "AgentCallback",
     "AgentTool",
     "AuthenticationError",
+    "HookResult",
     "AggregatedMetrics",
     "AnthropicFormatter",
+    "RoundUsage",
+    "SubagentDefinition",
+    "TurnDiagnostics",
     "AstroContextError",
     "AsyncCohereReranker",
     "AsyncCompactionStrategy",

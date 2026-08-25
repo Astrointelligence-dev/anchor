@@ -77,13 +77,13 @@ Details: retrieval analysis §4–§10. Every change here gates on the golden-se
 
 Details: gap analysis §2–§5, §8. Independent of phases 2–3.
 
-- [ ] Deduplicate `chat`/`achat` (~70 duplicated lines, `agent.py:388-454` vs `:496-562`) — precondition for everything below
-- [ ] Tool errors forwarded to the model with diagnostic text (today `"Error: tool 'name' failed."`, `agent.py:236`); per-tool timeout; parallel execution of independent calls in `_arun_tools` (`asyncio.gather`)
-- [ ] Pre/post tool-call hooks (approval seam, observability wiring)
-- [ ] Budget integration: real tokenizer (replace whitespace counter, `agent.py:38`), `SourceType.TOOL` items for tool schemas, `TokenBudget` attached, rounds 2..N accounted
-- [ ] Subagents: `agent-as-tool` primitive — clean pipeline, restricted tools, JSON-schema condensed return (implements MULTI_AGENT.md: isolation + asymmetric returns)
-- [ ] Deferred tool loading + tool-search meta-tool for large tool counts; `input_examples` on `AgentTool`/`ToolSchema`
-- [ ] Round-limit signalling (loop currently falls off `max_rounds` silently)
+- [x] Deduplicate `chat`/`achat` (~70 duplicated lines, `agent.py:388-454` vs `:496-562`) — precondition for everything below
+- [x] Tool errors forwarded to the model with diagnostic text (today `"Error: tool 'name' failed."`, `agent.py:236`); per-tool timeout; parallel execution of independent calls in `_arun_tools` (`asyncio.gather`)
+- [x] Pre/post tool-call hooks (approval seam, observability wiring)
+- [x] Budget integration: real tokenizer (replace whitespace counter, `agent.py:38`), `SourceType.TOOL` items for tool schemas, `TokenBudget` attached, rounds 2..N accounted
+- [x] Subagents: `agent-as-tool` primitive — clean pipeline, restricted tools, JSON-schema condensed return (implements MULTI_AGENT.md: isolation + asymmetric returns)
+- [x] Deferred tool loading + tool-search meta-tool for large tool counts; `input_examples` on `AgentTool`/`ToolSchema`
+- [x] Round-limit signalling (loop currently falls off `max_rounds` silently)
 
 **Done when:** a 2-level agent (orchestrator + subagent) runs a task with per-round token accounting visible in diagnostics.
 
@@ -102,6 +102,9 @@ Details: gap analysis §2–§5, §8. Independent of phases 2–3.
 ---
 
 ## Review log
+
+### Phase 4 — shipped 2026-08-25
+All 7 items landed. Design decisions (Arthur, 2026-08-25): subagent API = `as_tool()` primitive **and** declarative `with_subagents` + `task` meta-tool from day one; structured returns via prompt-schema + Pydantic validation + 1 self-contained retry (no provider `tool_choice` — deferred to Phase 5); hooks = veto (pre can deny/rewrite, post can replace) + observer callbacks. Evidence: 2641 passed / 3 skipped (baseline 2613); new suites `tests/test_agent/test_phase4_loop.py` (16) and `tests/test_agent/test_subagents.py` (12), incl. the done-when E2E (orchestrator + subagent with per-round accounting via `Agent.last_turn`); `FakeLLMProvider` extended to record per-call `messages`/`tools`. Deviations: (a) **final-round tool calls are not executed** (results could never reach the model) and a wrap-up notice is injected one round before the limit — `test_max_rounds_stops_loop` updated to the new contract; (b) sync tools have no timeout enforcement (needs a worker thread; `ponytail:` comment marks the upgrade path) — timeouts apply to async callers (MCP/subagents); (c) budget = `with_budget` (pipeline) + loop-level `TurnDiagnostics`/`RoundUsage` accounting (provider usage + tokenizer-counted schemas/results); no hard cap enforcement in the loop yet, and rounds 2..N deliberately stay on the append-only cache-stable path (the plan's allowed alternative) with accounting making the cost visible; (d) deferred loading is the client-side `search_tools` meta-tool — the Anthropic server-native Tool Search (now GA) is Phase 5; (e) pre-hook exceptions fail **closed** (deny with reason). Bonus root-cause fix found by the new message-level tests: **agent without memory never sent the user message** (formatter emits no conversation; a real API call would 400) — `_prepare_turn` now guarantees it. Bonus: `is_error` now forwarded on Anthropic `tool_result` blocks; dedup removed the chat/achat C901 complexity warnings.
 
 ### Phase 3 — shipped 2026-08-25
 All 7 items landed. Evidence: 2613 passed / 3 skipped; new suites `tests/test_ingestion/test_phase3_quality.py` (14), `tests/test_evaluation/test_golden.py` (5), `tests/test_storage/test_sqlite/test_vec_store.py` (8, incl. a Portuguese-stemming BM25 test), CLI suite rewritten against the real commands (11); CLI verified E2E by hand (index a mixed-corpus dir, query returns the right doc offline). Deviations: (a) FTS5 single-file hybrid deferred — bm25s (in-memory, memory-mappable) covers sparse and the CLI rebuilds it from the context store at query time; revisit if corpora outgrow that; (b) tokenizer-encoding parameterization was already present (`TiktokenCounter(encoding_name=...)`) — no change needed; (c) golden-set gating is infrastructure + tests here; the actual 50-200-query golden set is corpus-specific and must be authored per project; (d) `FixedSizeChunker` keeps 512/50 defaults (parent/child sizing depends on them), only the ingester default `RecursiveCharacterChunker` moved to 384/0.

@@ -222,6 +222,66 @@ class TracingCallback:
             self._metrics_collector.flush()
 
 
+class TracingAgentCallback:
+    """An ``AgentCallback`` that records one span per tool execution.
+
+    Attach with ``agent.with_callbacks([TracingAgentCallback(...)])``.
+    Spans are exported on completion, mirroring ``TracingCallback``.
+    """
+
+    __slots__ = ("_exporters", "_tool_spans", "_trace", "_tracer")
+
+    def __init__(
+        self,
+        tracer: Tracer | None = None,
+        exporters: list[SpanExporter] | None = None,
+    ) -> None:
+        self._tracer = tracer or Tracer()
+        self._exporters: list[SpanExporter] = exporters or []
+        self._trace: TraceRecord | None = None
+        self._tool_spans: dict[str, Span] = {}
+
+    @property
+    def tracer(self) -> Tracer:
+        """The underlying tracer instance."""
+        return self._tracer
+
+    def on_tool_start(self, name: str, tool_input: dict[str, object]) -> None:
+        if self._trace is None:
+            self._trace = self._tracer.start_trace(name="agent.tools")
+        self._tool_spans[name] = self._tracer.start_span(
+            trace_id=self._trace.trace_id,
+            name=f"tool.{name}",
+            kind=SpanKind.TOOL,
+            attributes={"tool_input_keys": sorted(tool_input)},
+        )
+
+    def on_tool_end(
+        self, name: str, tool_input: dict[str, object], result: str,
+    ) -> None:
+        self._finish(name, status="ok", attributes={"result_chars": len(result)})
+
+    def on_tool_error(
+        self, name: str, tool_input: dict[str, object], error: str,
+    ) -> None:
+        self._finish(name, status="error", attributes={"error": error})
+
+    def _finish(
+        self, name: str, *, status: str, attributes: dict[str, object],
+    ) -> None:
+        # ponytail: spans keyed by tool name — parallel calls to the SAME tool
+        # share one span; key by call id if that ever matters.
+        span = self._tool_spans.pop(name, None)
+        if span is None:
+            return
+        completed = self._tracer.end_span(span, status=status, attributes=attributes)
+        for exporter in self._exporters:
+            try:
+                exporter.export([completed])
+            except Exception:
+                logger.exception("Span exporter failed")
+
+
 def _infer_span_kind(step_name: str) -> SpanKind:
     """Infer the ``SpanKind`` from a step name using simple heuristics.
 

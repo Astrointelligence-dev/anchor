@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Subagents (MULTI_AGENT.md implemented)**: `Agent.as_tool(name, description, output_model=..., max_output_retries=...)` wraps any agent as an orchestrator tool with a clean context (the `task` string is the only channel in), condensed structured returns (schema instruction + Pydantic validation + one self-contained retry on invalid JSON), and a registration-time no-nesting guard; declarative layer via `Agent.with_subagents([SubagentDefinition(...)])` + a single `task(agent_name, task)` meta-tool with a cache-stable discovery listing in the system prompt; parallel subagent spawns compose with concurrent tool execution in `achat`
+- Pre/post tool hooks: `Agent.with_hooks(pre_tool_use=[...], post_tool_use=[...])` — pre-hooks can deny (reason is fed back to the model as an `is_error` tool result) or rewrite input, post-hooks can replace output; a raising pre-hook fails closed (call denied)
+- Observer callbacks: `Agent.with_callbacks([...])` with `AgentCallback` protocol (`on_round_start/end`, `on_tool_start/end/error`), fire-and-forget via the shared `fire_callbacks`; `TracingAgentCallback` + `SpanKind.TOOL` wire tool execution into observability
+- Per-round token accounting: `Agent.last_turn` (`TurnDiagnostics`) records per-round provider usage, tool-schema tokens, tool-result tokens, and `stopped_by` (`stop`/`max_rounds`/`max_tokens`); `Agent.with_budget(TokenBudget)` attaches a budget to the context pipeline
+- Deferred tool loading: `AgentTool(defer_loading=True)` keeps a tool's schema out of the prompt until the auto-registered `search_tools` meta-tool (keyword/regex over names+descriptions) loads it — loaded tools stay loaded for the session
+- `input_examples` on `AgentTool`/`ToolSchema`, forwarded by the Anthropic provider (GA field)
+- Per-tool timeouts: `AgentTool(timeout=...)` / `Agent(tool_timeout=...)`, enforced with `asyncio.wait_for` on async tool callers (MCP, subagents); a timeout becomes an `is_error` tool result the model sees
 - Golden-set eval harness (`anchor.evaluation.golden`): `GoldenCase` JSONL loading, `evaluate_retriever`, `assert_metric_floor` — the CI-gate primitive for retrieval changes; `RetrievalMetricsCalculator` now supports graded NDCG via `{id: grade}` relevance maps
 - `SqliteVecVectorStore` (`[sqlite-vec]` extra): real KNN inside SQLite via the vec0 virtual table (C cosine distance, declared dimensions, `where` pre-filtering through rowid IN) — replaces the full-scan Python cosine path for local persistence
 - `MarkdownHeaderChunker`: structure-aware chunking — splits at headings, stamps each chunk with its `H1 > H2` path in metadata and (by default) in content
@@ -48,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README sections for Priority System (1--10 scale) and Token Budgets
 
 ### Changed
+- `Agent.chat`/`achat` share one loop body (turn preparation, round assembly, chunk ingestion, accounting) instead of ~70 duplicated lines; `achat` now executes independent tool calls concurrently (`asyncio.gather`, order-preserving, all results in one message)
+- Tool errors are forwarded to the model with diagnostics (`Error: tool 'x' failed: RuntimeError: boom`) and `is_error=True` — previously a bare `"Error: tool 'name' failed."`; the Anthropic provider now sets `is_error` on `tool_result` blocks (previously dropped)
+- Round-limit signalling: one round before `max_rounds` the agent injects a final-round notice so the model wraps up instead of being cut off; tool calls made on the final round are **not executed** (their results could never reach the model); the outcome is visible as `last_turn.stopped_by == "max_rounds"` instead of a silent stop
+- `Agent` default tokenizer: tiktoken-backed when installed (whitespace-word fallback otherwise) — token accounting and the skill-listing cap now use real counts; `Agent(tokenizer=...)` accepts any `Tokenizer`
 - BM25 backend: **bm25s** (numpy sparse scoring, up to 500x faster, Lucene-variant correctness) with Snowball stemming + stopwords via `SparseRetriever(language=...)` — Portuguese finally stems (`correndo` matches `correr`); rank_bm25 remains the fallback and the path for custom `tokenize_fn`; the `bm25` extra now ships `bm25s + PyStemmer`
 - Chunking defaults: `RecursiveCharacterChunker` 512/50 → **384/0** per Chroma's chunking evaluation (recursive at 200-400 tokens, zero overlap, within ~2 recall points of semantic chunking)
 - Chunker sizing loops are O(n) (per-word token counts) instead of re-encoding the growing chunk per word (O(n²)); exact for whitespace tokenizers, approximate for BPE
@@ -70,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ScoreReranker` (dead duplicate of `CrossEncoderReranker` implementing the wrong protocol)
 
 ### Fixed
+- **Agent without memory never sent the user's message**: the formatter emits no conversation when no memory is attached, so `chat("...")` produced a system-only request (a real API call would 400); the turn now guarantees the user message is present
 - **Reranker `top_k` sentinel bug**: passing `top_k=10` explicitly was indistinguishable from the default and silently discarded in all five rerankers; the pipeline `reranker_step` default hit this on every run
 - `RecursiveCharacterChunker` applied overlap at every recursion level, duplicating overlap text in nested sub-chunks; overlap is now applied exactly once over the final chunk list
 - `SqliteVectorStore` unpacked stored embeddings using the *query* vector's dimension — a query/stored dimension mismatch silently mis-unpacked or crashed with `struct.error`; the dimension now derives from the stored blob and mismatches raise a clear `ValueError`

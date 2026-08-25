@@ -13,10 +13,8 @@ from anchor.llm.models import (
     Message,
     StopReason,
     StreamChunk,
-    ToolCall,
     ToolCallDelta,
     ToolSchema,
-    Usage,
 )
 from anchor.memory.manager import MemoryManager
 from anchor.storage.json_memory_store import InMemoryEntryStore
@@ -68,11 +66,17 @@ def _tool_use_response(
 
 
 class FakeLLMProvider:
-    """Mock LLMProvider that returns canned StreamChunk sequences."""
+    """Mock LLMProvider that returns canned StreamChunk sequences.
+
+    Records the ``messages`` and ``tools`` passed to each call in
+    ``seen_messages`` / ``seen_tools`` for loop-level assertions.
+    """
 
     def __init__(self, responses: list[list[StreamChunk]]) -> None:
         self._responses = responses
         self._call_index = 0
+        self.seen_messages: list[list[Message]] = []
+        self.seen_tools: list[list[ToolSchema] | None] = []
 
     @property
     def model_id(self) -> str:
@@ -90,6 +94,8 @@ class FakeLLMProvider:
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> Iterator[StreamChunk]:
+        self.seen_messages.append(list(messages))
+        self.seen_tools.append(tools)
         if self._call_index < len(self._responses):
             chunks = self._responses[self._call_index]
             self._call_index += 1
@@ -105,6 +111,8 @@ class FakeLLMProvider:
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
+        self.seen_messages.append(list(messages))
+        self.seen_tools.append(tools)
         if self._call_index < len(self._responses):
             chunks = self._responses[self._call_index]
             self._call_index += 1
@@ -253,7 +261,11 @@ def test_max_rounds_stops_loop():
     agent = _make_agent(responses, tools=[tool], max_rounds=3)
     list(agent.chat("Go"))
 
-    assert call_count[0] == 3
+    # Rounds 0 and 1 execute tools; the final round's calls are not
+    # executed (their results would never reach the model).
+    assert call_count[0] == 2
+    assert agent.last_turn is not None
+    assert agent.last_turn.stopped_by == "max_rounds"
 
 
 def test_unknown_tool_returns_error():

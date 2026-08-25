@@ -11,7 +11,8 @@ when you actually try to use the provider).
 from __future__ import annotations
 
 import os
-from typing import Any, AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 from anchor.llm.base import BaseLLMProvider
 from anchor.llm.errors import (
@@ -265,18 +266,14 @@ class AnthropicProvider(BaseLLMProvider):
             if msg.role == Role.TOOL:
                 # Tool result → user message with tool_result content block
                 if msg.tool_result is not None:
-                    converted.append(
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": msg.tool_result.tool_call_id,
-                                    "content": msg.tool_result.content,
-                                }
-                            ],
-                        }
-                    )
+                    block: dict[str, Any] = {
+                        "type": "tool_result",
+                        "tool_use_id": msg.tool_result.tool_call_id,
+                        "content": msg.tool_result.content,
+                    }
+                    if msg.tool_result.is_error:
+                        block["is_error"] = True
+                    converted.append({"role": "user", "content": [block]})
                 continue
 
             if msg.role == Role.ASSISTANT and msg.tool_calls:
@@ -341,11 +338,14 @@ class AnthropicProvider(BaseLLMProvider):
 
     def _convert_tool(self, tool: ToolSchema) -> dict[str, Any]:
         """Convert a ToolSchema to Anthropic tool definition format."""
-        return {
+        converted: dict[str, Any] = {
             "name": tool.name,
             "description": tool.description,
             "input_schema": tool.input_schema,
         }
+        if tool.input_examples:
+            converted["input_examples"] = list(tool.input_examples)
+        return converted
 
     # ------------------------------------------------------------------
     # Response parsing

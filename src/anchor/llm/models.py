@@ -109,3 +109,4 @@ class ToolSchema(BaseModel, frozen=True):
     name: str
     description: str
     input_schema: dict[str, Any]
+    input_examples: tuple[dict[str, Any], ...] = ()

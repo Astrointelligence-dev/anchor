@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
+from anchor._callbacks import fire_callbacks
 from anchor.formatters.anthropic import AnthropicFormatter
 from anchor.llm.base import LLMProvider
 from anchor.llm.models import (
@@ -18,28 +22,45 @@ from anchor.llm.models import (
     ToolCall,
     ToolCallDelta,
     ToolResult,
+    ToolSchema,
 )
 from anchor.llm.registry import create_provider
 from anchor.memory.manager import MemoryManager
+from anchor.models.budget import TokenBudget
 from anchor.models.context import ContextResult
 from anchor.pipeline.pipeline import ContextPipeline
+from anchor.protocols.tokenizer import Tokenizer
 
-from .models import AgentTool
+from .hooks import AgentCallback, PostToolHook, PreToolHook
+from .models import AgentTool, RoundUsage, TurnDiagnostics
 from .skills.activate import _make_activate_skill_tool
 from .skills.models import Skill
 from .skills.registry import SkillRegistry
 from .skills.resources import _make_read_skill_file_tool, _make_run_skill_script_tool
+from .subagent import (
+    SubagentDefinition,
+    _is_subagent_tool,
+    _make_subagent_tool,
+    _make_task_tool,
+    _subagent_listing,
+)
+from .tool_search import _make_search_tools_tool
 
 logger = logging.getLogger(__name__)
 
 # Maximum character length for tool input/result recorded in memory.
 _TOOL_MEMORY_TRUNCATE = 200
 
+_FINAL_ROUND_NOTICE = (
+    "[system] Final round: the tool budget is exhausted. Respond with "
+    "your best final answer now — do not call tools."
+)
+
 
 class _WhitespaceTokenizer:
     """Minimal tokenizer that counts whitespace-separated words.
 
-    Used internally by Agent to avoid tiktoken's network dependency.
+    Fallback when tiktoken (an optional extra) is unavailable.
     """
 
     __slots__ = ()
@@ -51,6 +72,35 @@ class _WhitespaceTokenizer:
 
     def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
         return " ".join(text.split()[:max_tokens])
+
+
+def _default_tokenizer() -> Tokenizer:
+    """Real tokenizer when tiktoken is installed, whitespace fallback otherwise."""
+    try:
+        from anchor.tokens.counter import get_default_counter
+
+        return get_default_counter()
+    except Exception:  # tiktoken missing or encoding data unavailable
+        return _WhitespaceTokenizer()
+
+
+class _RoundState:
+    """Mutable accumulation state for one streamed round."""
+
+    __slots__ = (
+        "accumulators",
+        "completion_tokens",
+        "prompt_tokens",
+        "stop_reason",
+        "text",
+    )
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.accumulators: dict[int, dict[str, Any]] = {}
+        self.stop_reason: StopReason | None = None
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
 
 
 class Agent:
@@ -74,8 +124,11 @@ class Agent:
 
     __slots__ = (
         "_activate_tool",
+        "_agent_callbacks",
         "_allow_skill_scripts",
+        "_deferred_loaded",
         "_last_result",
+        "_last_turn",
         "_llm",
         "_max_response_tokens",
         "_max_rounds",
@@ -84,10 +137,17 @@ class Agent:
         "_mcp_tools",
         "_memory",
         "_pipeline",
+        "_post_hooks",
+        "_pre_hooks",
         "_read_file_tool",
         "_script_tool",
+        "_search_tool",
         "_skill_registry",
+        "_subagents",
         "_system_prompt",
+        "_task_tool",
+        "_tokenizer",
+        "_tool_timeout",
         "_tools",
     )
 
@@ -102,6 +162,8 @@ class Agent:
         max_response_tokens: int = 1024,
         max_rounds: int = 10,
         allow_skill_scripts: bool = False,
+        tool_timeout: float | None = None,
+        tokenizer: Tokenizer | None = None,
     ) -> None:
         if llm is not None:
             self._llm: LLMProvider = llm
@@ -114,6 +176,7 @@ class Agent:
         self._tools: list[AgentTool] = []
         self._memory: MemoryManager | None = None
         self._last_result: ContextResult | None = None
+        self._last_turn: TurnDiagnostics | None = None
         self._skill_registry = SkillRegistry()
         self._activate_tool: AgentTool | None = None
         self._read_file_tool: AgentTool | None = None
@@ -122,9 +185,19 @@ class Agent:
         self._mcp_configs: list[Any] = []  # MCPServerConfig instances
         self._mcp_pool: Any = None  # MCPClientPool (lazy)
         self._mcp_tools: list[AgentTool] = []
+        self._tool_timeout = tool_timeout
+        self._pre_hooks: list[PreToolHook] = []
+        self._post_hooks: list[PostToolHook] = []
+        self._agent_callbacks: list[AgentCallback] = []
+        self._deferred_loaded: set[str] = set()
+        self._search_tool: AgentTool | None = None
+        self._subagents: dict[str, tuple[SubagentDefinition, Agent]] = {}
+        self._task_tool: AgentTool | None = None
 
-        tokenizer = _WhitespaceTokenizer()
-        self._pipeline = ContextPipeline(max_tokens=max_tokens, tokenizer=tokenizer)
+        self._tokenizer: Tokenizer = tokenizer or _default_tokenizer()
+        self._pipeline = ContextPipeline(
+            max_tokens=max_tokens, tokenizer=self._tokenizer,
+        )
         self._pipeline.with_formatter(AnthropicFormatter(enable_caching=True))
 
     # -- Fluent configuration (all return self) --
@@ -145,6 +218,35 @@ class Agent:
     def with_tools(self, tools: list[AgentTool]) -> Agent:
         """Add tools (additive). Returns self for chaining."""
         self._tools.extend(tools)
+        return self
+
+    def with_budget(self, budget: TokenBudget) -> Agent:
+        """Attach a token budget to the context pipeline. Returns self for chaining."""
+        self._pipeline.with_budget(budget)
+        return self
+
+    def with_hooks(
+        self,
+        *,
+        pre_tool_use: list[PreToolHook] | None = None,
+        post_tool_use: list[PostToolHook] | None = None,
+    ) -> Agent:
+        """Add veto hooks around tool execution (additive). Returns self.
+
+        Pre-hooks may deny a call (the reason is fed back to the model)
+        or rewrite its input; post-hooks may replace the output. A
+        pre-hook that raises fails closed: the call is denied.
+        """
+        self._pre_hooks.extend(pre_tool_use or [])
+        self._post_hooks.extend(post_tool_use or [])
+        return self
+
+    def with_callbacks(self, callbacks: list[AgentCallback]) -> Agent:
+        """Add observer callbacks for loop events (additive). Returns self.
+
+        Callbacks are fire-and-forget: exceptions are swallowed and logged.
+        """
+        self._agent_callbacks.extend(callbacks)
         return self
 
     def with_skill(self, skill: Skill) -> Agent:
@@ -192,6 +294,71 @@ class Agent:
         self._ensure_skill_meta_tools()
         return self
 
+    def with_subagents(self, definitions: list[SubagentDefinition]) -> Agent:
+        """Register subagents and the ``task`` meta-tool. Returns self.
+
+        Each definition becomes an isolated sub-``Agent`` (own system
+        prompt, restricted tools, no memory — MULTI_AGENT.md rule 1).
+        The model delegates via ``task(agent_name, task)``; a discovery
+        listing is appended to the system prompt.
+        """
+        for definition in definitions:
+            if definition.name in self._subagents:
+                msg = f"Duplicate subagent name: '{definition.name}'"
+                raise ValueError(msg)
+            if any(_is_subagent_tool(t) for t in definition.tools):
+                msg = (
+                    f"Subagent '{definition.name}' has subagent tools "
+                    "(MULTI_AGENT.md: no nesting)"
+                )
+                raise ValueError(msg)
+            if definition.model is None:
+                sub = Agent(
+                    llm=self._llm,
+                    max_rounds=definition.max_rounds,
+                    tokenizer=self._tokenizer,
+                )
+            else:
+                sub = Agent(
+                    model=definition.model,
+                    max_rounds=definition.max_rounds,
+                    tokenizer=self._tokenizer,
+                )
+            if definition.system_prompt:
+                sub.with_system_prompt(definition.system_prompt)
+            if definition.tools:
+                sub.with_tools(list(definition.tools))
+            self._subagents[definition.name] = (definition, sub)
+
+        if self._subagents and self._task_tool is None:
+            self._task_tool = _make_task_tool(self._subagents)
+        return self
+
+    def as_tool(
+        self,
+        name: str,
+        description: str,
+        *,
+        output_model: type[BaseModel] | None = None,
+        max_output_retries: int = 1,
+    ) -> AgentTool:
+        """Expose this agent as a subagent tool for an orchestrator.
+
+        The tool takes a single ``task`` string — the subagent starts
+        with a clean context (MULTI_AGENT.md rule 1). With
+        ``output_model``, the subagent must return schema-valid JSON;
+        invalid output is retried ``max_output_retries`` times with the
+        validation error (rule 3). Agents that already have subagent
+        tools cannot be wrapped (rule 5: no nesting).
+        """
+        return _make_subagent_tool(
+            self,
+            name,
+            description,
+            output_model=output_model,
+            max_output_retries=max_output_retries,
+        )
+
     # -- Accessors --
 
     @property
@@ -209,10 +376,15 @@ class Agent:
         """The ContextResult from the most recent ``chat()`` call."""
         return self._last_result
 
+    @property
+    def last_turn(self) -> TurnDiagnostics | None:
+        """Per-round token accounting for the most recent turn."""
+        return self._last_turn
+
     # -- Internal helpers --
 
     def _all_active_tools(self) -> list[AgentTool]:
-        """Return direct tools + skill tools + skill meta-tools + MCP tools."""
+        """Return direct tools + skill tools + meta-tools + MCP tools."""
         tools: list[AgentTool] = list(self._tools)
         tools.extend(self._skill_registry.active_tools())
         if self._activate_tool is not None:
@@ -221,8 +393,29 @@ class Agent:
             tools.append(self._read_file_tool)
         if self._script_tool is not None:
             tools.append(self._script_tool)
+        if self._task_tool is not None:
+            tools.append(self._task_tool)
+        if self._search_tool is not None:
+            tools.append(self._search_tool)
         tools.extend(self._mcp_tools)
         return tools
+
+    def _sendable_tools(self) -> list[AgentTool]:
+        """Tools whose schemas are sent this round.
+
+        Deferred tools are excluded until loaded through the
+        ``search_tools`` meta-tool, which is auto-created as soon as
+        any deferred tool exists.
+        """
+        tools = self._all_active_tools()
+        if self._search_tool is None and any(t.defer_loading for t in tools):
+            self._search_tool = _make_search_tools_tool(self)
+            tools.append(self._search_tool)
+        return [
+            t
+            for t in tools
+            if not t.defer_loading or t.name in self._deferred_loaded
+        ]
 
     def _check_tool_collisions(self, skill: Skill) -> None:
         """Raise if a skill tool name collides with a direct agent tool."""
@@ -255,13 +448,14 @@ class Agent:
         if self._allow_skill_scripts and has_scripts and self._script_tool is None:
             self._script_tool = _make_run_skill_script_tool(registry)
 
-    def _skill_system_suffix(self) -> str:
-        """Static skill text appended to the system prompt each turn.
+    def _system_suffix(self) -> str:
+        """Static text appended to the system prompt each turn.
 
-        Contains always-skill instructions plus the on-demand discovery
-        listing. Built once per turn (not per round) and stable across
-        activation state — prompt-cache friendly. The listing is capped at
-        roughly 1% of the pipeline's token budget.
+        Contains always-skill instructions, the on-demand skill
+        discovery listing, and the subagent listing. Built once per
+        turn (not per round) and stable across activation state —
+        prompt-cache friendly. The skill listing is capped at roughly
+        1% of the pipeline's token budget.
         """
         parts: list[str] = []
         always = self._skill_registry.always_instructions()
@@ -272,75 +466,173 @@ class Agent:
         discovery = self._skill_registry.skill_discovery_prompt(max_chars=max_chars)
         if discovery:
             parts.append(discovery)
+        subagents = _subagent_listing(self._subagents)
+        if subagents:
+            parts.append(subagents)
         return "\n\n".join(parts)
 
-    def _execute_tool(self, name: str, tool_input: dict[str, Any]) -> str:
-        """Look up and execute a tool by name.
+    def _fire(self, method: str, *args: Any) -> None:
+        """Notify observer callbacks; exceptions are swallowed and logged."""
+        if self._agent_callbacks:
+            fire_callbacks(self._agent_callbacks, method, *args, logger=logger)
 
-        Validates input against the tool's schema before calling.
-        Searches direct tools, active skill tools, and the meta-tool.
-        """
+    # -- Tool execution --
+
+    def _find_tool(self, name: str) -> AgentTool | None:
         for tool in self._all_active_tools():
             if tool.name == name:
-                valid, err = tool.validate_input(tool_input)
-                if not valid:
-                    logger.warning(
-                        "Tool '%s' input validation failed: %s", name, err,
-                    )
-                    return f"Error: invalid input for tool '{name}': {err}"
-                try:
-                    return tool.fn(**tool_input)
-                except Exception:
-                    logger.exception("Tool '%s' failed", name)
-                    return f"Error: tool '{name}' failed."
-        return f"Unknown tool: {name}"
+                return tool
+        return None
+
+    def _apply_pre_hooks(
+        self, name: str, tool_input: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        """Run pre-hooks. Returns (possibly-updated input, deny reason)."""
+        for hook in self._pre_hooks:
+            try:
+                result = hook(name, tool_input)
+            except Exception as exc:  # fail closed: a broken gate stays shut
+                logger.exception("Pre-tool hook failed for '%s'", name)
+                reason = f"pre-tool hook raised {type(exc).__name__}: {exc}"
+                return tool_input, reason
+            if result is None:
+                continue
+            if result.decision == "deny":
+                return tool_input, result.reason or "denied by pre-tool hook"
+            if result.updated_input is not None:
+                tool_input = result.updated_input
+        return tool_input, None
+
+    def _apply_post_hooks(
+        self, name: str, tool_input: dict[str, Any], output: str,
+    ) -> str:
+        """Run post-hooks; a raising post-hook keeps the current output."""
+        for hook in self._post_hooks:
+            try:
+                result = hook(name, tool_input, output)
+            except Exception:
+                logger.exception("Post-tool hook failed for '%s'", name)
+                continue
+            if result is not None and result.updated_output is not None:
+                output = result.updated_output
+        return output
+
+    def _resolve_call(
+        self, name: str, tool_input: dict[str, Any],
+    ) -> tuple[AgentTool | None, dict[str, Any], str | None]:
+        """Look up the tool, validate input, and run pre-hooks.
+
+        Returns ``(tool, updated_input, error_text)``; when
+        ``error_text`` is set the call must not execute.
+        """
+        tool = self._find_tool(name)
+        if tool is None:
+            return None, tool_input, f"Unknown tool: {name}"
+        valid, err = tool.validate_input(tool_input)
+        if not valid:
+            logger.warning("Tool '%s' input validation failed: %s", name, err)
+            return tool, tool_input, f"Error: invalid input for tool '{name}': {err}"
+        tool_input, deny = self._apply_pre_hooks(name, tool_input)
+        if deny is not None:
+            return tool, tool_input, f"Error: tool '{name}' denied: {deny}"
+        return tool, tool_input, None
+
+    def _error_result(
+        self, tc: ToolCall, tool_input: dict[str, Any], error_text: str,
+    ) -> ToolResult:
+        self._fire("on_tool_error", tc.name, tool_input, error_text)
+        self._record_tool_call(tc.name, tool_input, error_text)
+        return ToolResult(tool_call_id=tc.id, content=error_text, is_error=True)
+
+    def _ok_result(
+        self, tc: ToolCall, tool_input: dict[str, Any], output: str,
+    ) -> ToolResult:
+        output = self._apply_post_hooks(tc.name, tool_input, output)
+        self._fire("on_tool_end", tc.name, tool_input, output)
+        self._record_tool_call(tc.name, tool_input, output)
+        return ToolResult(tool_call_id=tc.id, content=output)
+
+    def _execute_call(self, tc: ToolCall) -> ToolResult:
+        """Execute one tool call synchronously."""
+        tool, tool_input, err = self._resolve_call(tc.name, tc.arguments)
+        if tool is None or err is not None:
+            return self._error_result(tc, tool_input, err or f"Unknown tool: {tc.name}")
+        self._fire("on_tool_start", tc.name, tool_input)
+        try:
+            # ponytail: no timeout on sync tools — cancelling a sync call
+            # needs a worker thread; the async path enforces tool.timeout.
+            output = tool.fn(**tool_input)
+        except Exception as exc:
+            logger.exception("Tool '%s' failed", tc.name)
+            error_text = (
+                f"Error: tool '{tc.name}' failed: {type(exc).__name__}: {exc}"
+            )
+            return self._error_result(tc, tool_input, error_text)
+        return self._ok_result(tc, tool_input, output)
+
+    async def _aexecute_call(self, tc: ToolCall) -> ToolResult:
+        """Execute one tool call asynchronously (MCP/subagent-aware)."""
+        tool, tool_input, err = self._resolve_call(tc.name, tc.arguments)
+        if tool is None or err is not None:
+            return self._error_result(tc, tool_input, err or f"Unknown tool: {tc.name}")
+        self._fire("on_tool_start", tc.name, tool_input)
+        async_caller = getattr(tool, "_mcp_async_caller", None) or getattr(
+            tool, "_anchor_async_caller", None,
+        )
+        timeout = tool.timeout if tool.timeout is not None else self._tool_timeout
+        try:
+            if async_caller is not None:
+                original_name = getattr(tool, "_mcp_original_name", tc.name)
+                coro = async_caller(original_name, tool_input)
+                if timeout is not None:
+                    output = await asyncio.wait_for(coro, timeout)
+                else:
+                    output = await coro
+            else:
+                # ponytail: sync tools run inline (blocking, no timeout);
+                # switch to asyncio.to_thread if cancellation ever matters.
+                output = tool.fn(**tool_input)
+        except TimeoutError:
+            error_text = f"Error: tool '{tc.name}' timed out after {timeout}s."
+            return self._error_result(tc, tool_input, error_text)
+        except Exception as exc:
+            logger.exception("Tool '%s' failed", tc.name)
+            error_text = (
+                f"Error: tool '{tc.name}' failed: {type(exc).__name__}: {exc}"
+            )
+            return self._error_result(tc, tool_input, error_text)
+        return self._ok_result(tc, tool_input, output)
 
     async def _aexecute_tool(self, name: str, tool_input: dict[str, Any]) -> str:
-        """Async tool execution — supports both regular and MCP tools."""
-        for tool in self._all_active_tools():
-            if tool.name == name:
-                # Check if this is an MCP tool with async caller
-                async_caller = getattr(tool, "_mcp_async_caller", None)
-                if async_caller is not None:
-                    original_name = getattr(tool, "_mcp_original_name", name)
-                    # Validate input before calling MCP tool
-                    valid, err = tool.validate_input(tool_input)
-                    if not valid:
-                        return f"Error: invalid input for tool '{name}': {err}"
-                    try:
-                        return await async_caller(original_name, tool_input)
-                    except Exception as exc:
-                        logger.exception("MCP tool '%s' failed", name)
-                        return f"Error: MCP tool '{name}' failed: {exc}"
-
-                # Regular tool — run sync
-                valid, err = tool.validate_input(tool_input)
-                if not valid:
-                    return f"Error: invalid input for tool '{name}': {err}"
-                try:
-                    return tool.fn(**tool_input)
-                except Exception:
-                    logger.exception("Tool '%s' failed", name)
-                    return f"Error: tool '{name}' failed."
-        return f"Unknown tool: {name}"
-
-    async def _arun_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
-        """Execute tool calls asynchronously."""
-        results: list[ToolResult] = []
-        for tc in tool_calls:
-            result_text = await self._aexecute_tool(tc.name, tc.arguments)
-            self._record_tool_call(tc.name, tc.arguments, result_text)
-            results.append(ToolResult(tool_call_id=tc.id, content=result_text))
-        return results
+        """Async tool execution by name; returns the result text."""
+        result = await self._aexecute_call(
+            ToolCall(id="direct", name=name, arguments=tool_input),
+        )
+        return result.content
 
     def _run_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
-        """Execute tool calls and return ToolResult objects."""
-        results: list[ToolResult] = []
-        for tc in tool_calls:
-            result_text = self._execute_tool(tc.name, tc.arguments)
-            self._record_tool_call(tc.name, tc.arguments, result_text)
-            results.append(ToolResult(tool_call_id=tc.id, content=result_text))
-        return results
+        """Execute tool calls sequentially and return ToolResult objects."""
+        return [self._execute_call(tc) for tc in tool_calls]
+
+    async def _arun_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
+        """Execute tool calls concurrently, preserving call order."""
+        results = await asyncio.gather(
+            *(self._aexecute_call(tc) for tc in tool_calls),
+            return_exceptions=True,
+        )
+        ordered: list[ToolResult] = []
+        for tc, result in zip(tool_calls, results, strict=True):
+            if isinstance(result, BaseException):
+                error_text = (
+                    f"Error: tool '{tc.name}' failed: "
+                    f"{type(result).__name__}: {result}"
+                )
+                ordered.append(
+                    ToolResult(tool_call_id=tc.id, content=error_text, is_error=True),
+                )
+            else:
+                ordered.append(result)
+        return ordered
 
     def _record_tool_call(
         self, name: str, tool_input: dict[str, Any], result: str,
@@ -410,6 +702,123 @@ class Agent:
 
         return messages, system_text
 
+    # -- Turn/round helpers (shared by chat and achat) --
+
+    def _prepare_turn(
+        self, ctx_result: ContextResult, message: str,
+    ) -> tuple[list[Message], str]:
+        """Extract base messages and the full system text for a turn."""
+        self._last_result = ctx_result
+        formatted = ctx_result.formatted_output
+        if not isinstance(formatted, dict):
+            msg = "Agent requires a dict-based formatter output"
+            raise TypeError(msg)
+        base_messages, base_system = self._formatted_to_messages(formatted)
+
+        # Without memory the formatter emits no conversation, so the
+        # user's message would never reach the model — guarantee it.
+        if not any(m.role == Role.USER for m in base_messages):
+            base_messages.append(Message(role=Role.USER, content=message))
+
+        # Suffix text (skills + subagents) is static per turn: compute
+        # once, keep the prompt stable across rounds so provider prompt
+        # caching can hit.
+        suffix = self._system_suffix()
+        if base_system and suffix:
+            full_system = f"{base_system}\n\n{suffix}"
+        else:
+            full_system = base_system or suffix or ""
+        return list(base_messages), full_system
+
+    def _round_request(
+        self, full_system: str, messages: list[Message],
+    ) -> tuple[list[Message], list[ToolSchema] | None, int]:
+        """Assemble one round's request. Returns (messages, schemas, schema tokens)."""
+        tools = self._sendable_tools()
+        schemas = [t.to_tool_schema() for t in tools] if tools else None
+        llm_messages: list[Message] = []
+        if full_system:
+            llm_messages.append(Message(role=Role.SYSTEM, content=full_system))
+        llm_messages.extend(messages)
+        schema_tokens = 0
+        if schemas:
+            schema_tokens = sum(
+                self._tokenizer.count_tokens(
+                    f"{s.name} {s.description} {json.dumps(s.input_schema)}",
+                )
+                for s in schemas
+            )
+        return llm_messages, schemas, schema_tokens
+
+    @staticmethod
+    def _ingest_chunk(state: _RoundState, chunk: StreamChunk) -> str | None:
+        """Fold one stream chunk into *state*; return text to yield."""
+        out: str | None = None
+        if chunk.content:
+            state.text += chunk.content
+            out = chunk.content
+        if chunk.tool_call_delta:
+            delta: ToolCallDelta = chunk.tool_call_delta
+            acc = state.accumulators.setdefault(
+                delta.index, {"id": None, "name": None, "args_json": ""},
+            )
+            if delta.id:
+                acc["id"] = delta.id
+            if delta.name:
+                acc["name"] = delta.name
+            if delta.arguments_fragment:
+                acc["args_json"] += delta.arguments_fragment
+        if chunk.usage:
+            state.prompt_tokens = max(state.prompt_tokens, chunk.usage.prompt_tokens)
+            state.completion_tokens = max(
+                state.completion_tokens, chunk.usage.completion_tokens,
+            )
+        if chunk.stop_reason:
+            state.stop_reason = chunk.stop_reason
+        return out
+
+    def _round_usage(
+        self,
+        index: int,
+        state: _RoundState,
+        schema_tokens: int,
+        tool_results: list[ToolResult],
+    ) -> RoundUsage:
+        result_tokens = sum(
+            self._tokenizer.count_tokens(r.content) for r in tool_results
+        )
+        return RoundUsage(
+            round=index,
+            prompt_tokens=state.prompt_tokens,
+            completion_tokens=state.completion_tokens,
+            tool_schema_tokens=schema_tokens,
+            tool_result_tokens=result_tokens,
+        )
+
+    def _maybe_final_round_notice(
+        self, round_index: int, messages: list[Message],
+    ) -> None:
+        """Warn the model one round before the limit so it can wrap up."""
+        if round_index and round_index == self._max_rounds - 1:
+            messages.append(Message(role=Role.USER, content=_FINAL_ROUND_NOTICE))
+
+    def _finish_turn(
+        self,
+        rounds: list[RoundUsage],
+        stopped_by: str,
+        final_text: str,
+    ) -> None:
+        self._last_turn = TurnDiagnostics(
+            rounds=tuple(rounds),
+            stopped_by=stopped_by,  # type: ignore[arg-type]
+        )
+        if self._memory is not None and final_text:
+            self._memory.add_assistant_message(final_text)
+
+    @staticmethod
+    def _stop_cause(stop_reason: StopReason | None) -> str:
+        return "max_tokens" if stop_reason == StopReason.MAX_TOKENS else "stop"
+
     # -- Chat --
 
     def chat(self, message: str) -> Iterator[str]:
@@ -430,96 +839,68 @@ class Agent:
         if self._memory is not None:
             self._memory.add_user_message(message)
 
-        ctx_result = self._pipeline.build(message)
-        self._last_result = ctx_result
-        formatted = ctx_result.formatted_output
-        if not isinstance(formatted, dict):
-            msg = "Agent requires a dict-based formatter output"
-            raise TypeError(msg)
-
-        base_messages, base_system = self._formatted_to_messages(formatted)
-
-        # Skill text (always-skill instructions + discovery listing) is static
-        # per turn: compute once, join with newlines, keep the prompt stable
-        # across rounds so provider prompt caching can hit.
-        skill_suffix = self._skill_system_suffix()
-        if base_system and skill_suffix:
-            full_system = f"{base_system}\n\n{skill_suffix}"
-        else:
-            full_system = base_system or skill_suffix
-
-        # Working message list for the tool loop
-        messages: list[Message] = list(base_messages)
-
+        messages, full_system = self._prepare_turn(
+            self._pipeline.build(message), message,
+        )
         final_text = ""
+        rounds: list[RoundUsage] = []
+        stopped_by = "max_rounds"
 
-        for _round in range(self._max_rounds):
-            # Per-round tool recomputation (skills may be activated mid-convo)
-            all_tools = self._all_active_tools()
-            tool_schemas = (
-                [t.to_tool_schema() for t in all_tools] if all_tools else None
+        for round_index in range(self._max_rounds):
+            self._fire("on_round_start", round_index)
+            self._maybe_final_round_notice(round_index, messages)
+            llm_messages, schemas, schema_tokens = self._round_request(
+                full_system, messages,
             )
-
-            # Build messages with system message prepended
-            llm_messages: list[Message] = []
-            if full_system:
-                llm_messages.append(Message(role=Role.SYSTEM, content=full_system))
-            llm_messages.extend(messages)
-
-            # Stream from provider
-            accumulated_text = ""
-            tool_call_accumulators: dict[int, dict[str, Any]] = {}
-            stop_reason: StopReason | None = None
+            state = _RoundState()
 
             for chunk in self._llm.stream(
                 llm_messages,
-                tools=tool_schemas,
+                tools=schemas,
                 max_tokens=self._max_response_tokens,
             ):
-                if chunk.content:
-                    accumulated_text += chunk.content
-                    final_text += chunk.content
-                    yield chunk.content
-                if chunk.tool_call_delta:
-                    delta = chunk.tool_call_delta
-                    acc = tool_call_accumulators.setdefault(
-                        delta.index, {"id": None, "name": None, "args_json": ""},
-                    )
-                    if delta.id:
-                        acc["id"] = delta.id
-                    if delta.name:
-                        acc["name"] = delta.name
-                    if delta.arguments_fragment:
-                        acc["args_json"] += delta.arguments_fragment
-                if chunk.stop_reason:
-                    stop_reason = chunk.stop_reason
+                out = self._ingest_chunk(state, chunk)
+                if out:
+                    final_text += out
+                    yield out
 
-            if stop_reason != StopReason.TOOL_USE:
+            if state.stop_reason != StopReason.TOOL_USE:
+                rounds.append(self._round_usage(round_index, state, schema_tokens, []))
+                stopped_by = self._stop_cause(state.stop_reason)
+                self._fire("on_round_end", round_index)
                 break
 
-            # Build tool calls from accumulated deltas
-            tool_calls = self._build_tool_calls(tool_call_accumulators)
+            if round_index == self._max_rounds - 1:
+                # Final round still asked for tools: don't execute work
+                # whose results the model will never see.
+                rounds.append(self._round_usage(round_index, state, schema_tokens, []))
+                self._fire("on_round_end", round_index)
+                break
 
-            # Add assistant message with tool calls to conversation
-            messages.append(Message(
-                role=Role.ASSISTANT,
-                content=accumulated_text or None,
-                tool_calls=tool_calls,
-            ))
-
-            # Execute tools and add results
+            tool_calls = self._build_tool_calls(state.accumulators)
+            messages.append(
+                Message(
+                    role=Role.ASSISTANT,
+                    content=state.text or None,
+                    tool_calls=tool_calls,
+                ),
+            )
             tool_results = self._run_tools(tool_calls)
             for result in tool_results:
                 messages.append(Message(role=Role.TOOL, tool_result=result))
+            rounds.append(
+                self._round_usage(round_index, state, schema_tokens, tool_results),
+            )
+            self._fire("on_round_end", round_index)
 
-        if self._memory is not None and final_text:
-            self._memory.add_assistant_message(final_text)
+        self._finish_turn(rounds, stopped_by, final_text)
 
     async def achat(self, message: str) -> AsyncGenerator[str, None]:
         """Send a message and stream the response asynchronously.
 
-        Async mirror of :meth:`chat`. Uses ``pipeline.abuild()`` and
-        async iteration over the streaming API.
+        Async mirror of :meth:`chat`. Uses ``pipeline.abuild()``, async
+        iteration over the streaming API, and executes independent tool
+        calls concurrently.
 
         Yields text chunks as they arrive from the API.
         """
@@ -538,90 +919,61 @@ class Agent:
                 await pool.disconnect_all()
                 raise
 
-        ctx_result = await self._pipeline.abuild(message)
-        self._last_result = ctx_result
-        formatted = ctx_result.formatted_output
-        if not isinstance(formatted, dict):
-            msg = "Agent requires a dict-based formatter output"
-            raise TypeError(msg)
-
-        base_messages, base_system = self._formatted_to_messages(formatted)
-
-        # Skill text (always-skill instructions + discovery listing) is static
-        # per turn: compute once, join with newlines, keep the prompt stable
-        # across rounds so provider prompt caching can hit.
-        skill_suffix = self._skill_system_suffix()
-        if base_system and skill_suffix:
-            full_system = f"{base_system}\n\n{skill_suffix}"
-        else:
-            full_system = base_system or skill_suffix
-
-        # Working message list for the tool loop
-        messages: list[Message] = list(base_messages)
-
+        messages, full_system = self._prepare_turn(
+            await self._pipeline.abuild(message), message,
+        )
         final_text = ""
+        rounds: list[RoundUsage] = []
+        stopped_by = "max_rounds"
 
-        for _round in range(self._max_rounds):
-            # Per-round tool recomputation (skills may be activated mid-convo)
-            all_tools = self._all_active_tools()
-            tool_schemas = (
-                [t.to_tool_schema() for t in all_tools] if all_tools else None
+        for round_index in range(self._max_rounds):
+            self._fire("on_round_start", round_index)
+            self._maybe_final_round_notice(round_index, messages)
+            llm_messages, schemas, schema_tokens = self._round_request(
+                full_system, messages,
             )
-
-            # Build messages with system message prepended
-            llm_messages: list[Message] = []
-            if full_system:
-                llm_messages.append(Message(role=Role.SYSTEM, content=full_system))
-            llm_messages.extend(messages)
-
-            # Stream from provider
-            accumulated_text = ""
-            tool_call_accumulators: dict[int, dict[str, Any]] = {}
-            stop_reason: StopReason | None = None
+            state = _RoundState()
 
             async for chunk in self._llm.astream(
                 llm_messages,
-                tools=tool_schemas,
+                tools=schemas,
                 max_tokens=self._max_response_tokens,
             ):
-                if chunk.content:
-                    accumulated_text += chunk.content
-                    final_text += chunk.content
-                    yield chunk.content
-                if chunk.tool_call_delta:
-                    delta = chunk.tool_call_delta
-                    acc = tool_call_accumulators.setdefault(
-                        delta.index, {"id": None, "name": None, "args_json": ""},
-                    )
-                    if delta.id:
-                        acc["id"] = delta.id
-                    if delta.name:
-                        acc["name"] = delta.name
-                    if delta.arguments_fragment:
-                        acc["args_json"] += delta.arguments_fragment
-                if chunk.stop_reason:
-                    stop_reason = chunk.stop_reason
+                out = self._ingest_chunk(state, chunk)
+                if out:
+                    final_text += out
+                    yield out
 
-            if stop_reason != StopReason.TOOL_USE:
+            if state.stop_reason != StopReason.TOOL_USE:
+                rounds.append(self._round_usage(round_index, state, schema_tokens, []))
+                stopped_by = self._stop_cause(state.stop_reason)
+                self._fire("on_round_end", round_index)
                 break
 
-            # Build tool calls from accumulated deltas
-            tool_calls = self._build_tool_calls(tool_call_accumulators)
+            if round_index == self._max_rounds - 1:
+                # Final round still asked for tools: don't execute work
+                # whose results the model will never see.
+                rounds.append(self._round_usage(round_index, state, schema_tokens, []))
+                self._fire("on_round_end", round_index)
+                break
 
-            # Add assistant message with tool calls to conversation
-            messages.append(Message(
-                role=Role.ASSISTANT,
-                content=accumulated_text or None,
-                tool_calls=tool_calls,
-            ))
-
-            # Execute tools and add results
+            tool_calls = self._build_tool_calls(state.accumulators)
+            messages.append(
+                Message(
+                    role=Role.ASSISTANT,
+                    content=state.text or None,
+                    tool_calls=tool_calls,
+                ),
+            )
             tool_results = await self._arun_tools(tool_calls)
             for result in tool_results:
                 messages.append(Message(role=Role.TOOL, tool_result=result))
+            rounds.append(
+                self._round_usage(round_index, state, schema_tokens, tool_results),
+            )
+            self._fire("on_round_end", round_index)
 
-        if self._memory is not None and final_text:
-            self._memory.add_assistant_message(final_text)
+        self._finish_turn(rounds, stopped_by, final_text)
 
     async def aclose(self) -> None:
         """Clean up MCP connections and other async resources."""
