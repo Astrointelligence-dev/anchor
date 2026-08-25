@@ -362,9 +362,15 @@ def test_per_round_accounting_visible():
     assert first.round == 0
     assert first.tool_schema_tokens > 0
     assert first.tool_result_tokens > 0  # "echo:hello world"
+    assert first.tool_calls == 1
+    # Round 1 had no provider usage: prompt/completion are tokenizer
+    # estimates (messages + schemas / streamed tool-call args).
+    assert first.prompt_tokens > 0
+    assert first.completion_tokens > 0
+    # Provider-reported usage is never overridden by estimates.
     assert second.prompt_tokens == 10
     assert second.completion_tokens == 5
-    assert turn.total_prompt_tokens == 10
+    assert turn.total_prompt_tokens == first.prompt_tokens + 10
 
 
 def test_stopped_by_max_tokens():

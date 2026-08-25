@@ -89,6 +89,19 @@ class RoundFinished(_BaseEvent):
     usage: RoundUsage
 
 
+class UsageLimitReached(_BaseEvent):
+    """A usage limit was crossed; the next round is the wrap-up round.
+
+    The turn ends gracefully with ``stopped_by="usage_limit"`` — no
+    exception is raised.
+    """
+
+    type: Literal["usage_limit_reached"] = "usage_limit_reached"
+    kind: Literal["total_tokens", "tool_calls"]
+    used: int
+    limit: int
+
+
 class TurnFinished(_BaseEvent):
     """Terminal event: the final text and per-round diagnostics.
 
@@ -110,6 +123,7 @@ AgentEvent = (
     | CompactionStarted
     | CompactionFinished
     | RoundFinished
+    | UsageLimitReached
     | TurnFinished
 )
 

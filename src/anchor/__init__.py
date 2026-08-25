@@ -5,6 +5,7 @@ Agent:
     SubagentDefinition, HookResult, AgentCallback, RoundUsage, TurnDiagnostics,
     AgentEvent, TurnStarted, RoundStarted, TextDelta, ToolStarted, ToolFinished,
     CompactionStarted, CompactionFinished, RoundFinished, TurnFinished,
+    UsageLimits, UsageLimitReached,
     memory_skill, memory_tools, rag_skill, rag_tools
 
 Core Pipeline:
@@ -138,6 +139,8 @@ from anchor.agent import (
     TurnDiagnostics,
     TurnFinished,
     TurnStarted,
+    UsageLimitReached,
+    UsageLimits,
     memory_skill,
     memory_tools,
     rag_skill,
@@ -439,6 +442,8 @@ __all__ = [
     "TurnDiagnostics",
     "TurnFinished",
     "TurnStarted",
+    "UsageLimitReached",
+    "UsageLimits",
     "AstroContextError",
     "AsyncCohereReranker",
     "AsyncCompactionStrategy",

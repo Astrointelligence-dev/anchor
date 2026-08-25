@@ -12,9 +12,10 @@ from anchor.agent.events import (
     ToolStarted,
     TurnFinished,
     TurnStarted,
+    UsageLimitReached,
 )
 from anchor.agent.hooks import AgentCallback, HookResult, PostToolHook, PreToolHook
-from anchor.agent.models import AgentTool, RoundUsage, TurnDiagnostics
+from anchor.agent.models import AgentTool, RoundUsage, TurnDiagnostics, UsageLimits
 from anchor.agent.skills import (
     Skill,
     SkillRegistry,
@@ -50,6 +51,8 @@ __all__ = [
     "TurnDiagnostics",
     "TurnFinished",
     "TurnStarted",
+    "UsageLimitReached",
+    "UsageLimits",
     "load_skill",
     "load_skills_directory",
     "memory_skill",

@@ -43,9 +43,10 @@ from .events import (
     ToolStarted,
     TurnFinished,
     TurnStarted,
+    UsageLimitReached,
 )
 from .hooks import AgentCallback, PostToolHook, PreToolHook
-from .models import AgentTool, RoundUsage, TurnDiagnostics
+from .models import AgentTool, RoundUsage, TurnDiagnostics, UsageLimits
 from .skills.activate import _make_activate_skill_tool
 from .skills.models import Skill
 from .skills.registry import SkillRegistry
@@ -172,6 +173,7 @@ class Agent:
         "_tokenizer",
         "_tool_timeout",
         "_tools",
+        "_usage_limits",
     )
 
     def __init__(
@@ -220,6 +222,7 @@ class Agent:
         self._compaction_trigger: int | None = None
         self._compaction_keep = 4
         self._compact_fn: Callable[[str], str] | None = None
+        self._usage_limits: UsageLimits | None = None
 
         self._tokenizer: Tokenizer = tokenizer or _default_tokenizer()
         self._pipeline = ContextPipeline(
@@ -259,6 +262,18 @@ class Agent:
     def with_budget(self, budget: TokenBudget) -> Agent:
         """Attach a token budget to the context pipeline. Returns self for chaining."""
         self._pipeline.with_budget(budget)
+        return self
+
+    def with_usage_limits(self, limits: UsageLimits) -> Agent:
+        """Enforce per-turn usage limits in the tool loop. Returns self.
+
+        Crossing a limit grants the model one wrap-up round (final-round
+        notice + ``tool_choice="none"``) and ends the turn with
+        ``stopped_by="usage_limit"`` — no exception. Complements the
+        pipeline's :class:`TokenBudget`, which governs what enters the
+        context window; this caps what the whole turn may spend.
+        """
+        self._usage_limits = limits
         return self
 
     def with_hooks(
@@ -707,16 +722,13 @@ class Agent:
             await pool.disconnect_all()
             raise
 
-    def _should_run_tools(self, state: _RoundState, round_index: int) -> bool:
+    def _should_run_tools(self, state: _RoundState, *, final_round: bool) -> bool:
         """Whether this round's tool calls execute.
 
         A final round that still asked for tools runs none: the model
         would never see their results.
         """
-        return (
-            state.stop_reason == StopReason.TOOL_USE
-            and round_index < self._max_rounds - 1
-        )
+        return state.stop_reason == StopReason.TOOL_USE and not final_round
 
     def _close_round(
         self,
@@ -724,18 +736,26 @@ class Agent:
         state: _RoundState,
         schema_tokens: int,
         tool_results: list[ToolResult],
+        llm_messages: list[Message],
         *,
         run_tools: bool,
+        wrap_up: bool,
         stopped_by: str,
     ) -> tuple[RoundUsage, str]:
         """Account the round and fire ``on_round_end``.
 
         Returns ``(usage, stopped_by)``; ``stopped_by`` changes only
-        when the model stopped without requesting tools.
+        when the round ends the turn: ``usage_limit`` after a wrap-up
+        round, otherwise the model's own stop cause.
         """
-        if not run_tools and state.stop_reason != StopReason.TOOL_USE:
-            stopped_by = self._stop_cause(state.stop_reason)
-        usage = self._round_usage(round_index, state, schema_tokens, tool_results)
+        if not run_tools:
+            if wrap_up:
+                stopped_by = "usage_limit"
+            elif state.stop_reason != StopReason.TOOL_USE:
+                stopped_by = self._stop_cause(state.stop_reason)
+        usage = self._round_usage(
+            round_index, state, schema_tokens, tool_results, llm_messages,
+        )
         self._fire("on_round_end", round_index)
         return usage, stopped_by
 
@@ -1067,39 +1087,112 @@ class Agent:
             state.stop_reason = chunk.stop_reason
         return out
 
+    def _stream_model_round(
+        self,
+        llm_messages: list[Message],
+        schemas: list[ToolSchema] | None,
+        call_extra: dict[str, Any],
+        state: _RoundState,
+    ) -> Iterator[TextDelta]:
+        """Stream one model call, folding chunks into *state*."""
+        for chunk in self._llm.stream(
+            llm_messages,
+            tools=schemas,
+            max_tokens=self._max_response_tokens,
+            **call_extra,
+        ):
+            out = self._ingest_chunk(state, chunk)
+            if out:
+                yield TextDelta(text=out)
+
+    async def _astream_model_round(
+        self,
+        llm_messages: list[Message],
+        schemas: list[ToolSchema] | None,
+        call_extra: dict[str, Any],
+        state: _RoundState,
+    ) -> AsyncGenerator[TextDelta, None]:
+        """Async mirror of :meth:`_stream_model_round`."""
+        async for chunk in self._llm.astream(
+            llm_messages,
+            tools=schemas,
+            max_tokens=self._max_response_tokens,
+            **call_extra,
+        ):
+            out = self._ingest_chunk(state, chunk)
+            if out:
+                yield TextDelta(text=out)
+
     def _round_usage(
         self,
         index: int,
         state: _RoundState,
         schema_tokens: int,
         tool_results: list[ToolResult],
+        llm_messages: list[Message],
     ) -> RoundUsage:
         result_tokens = sum(
             self._tokenizer.count_tokens(r.content) for r in tool_results
         )
+        # Providers that report no usage on the stream (all but
+        # Anthropic today) get tokenizer estimates, so usage limits and
+        # accounting hold across providers.
+        prompt = state.prompt_tokens
+        if prompt == 0:
+            prompt = self._messages_tokens(llm_messages) + schema_tokens
+        completion = state.completion_tokens
+        if completion == 0:
+            completion = self._tokenizer.count_tokens(state.text) + sum(
+                self._tokenizer.count_tokens(acc["args_json"])
+                for acc in state.accumulators.values()
+            )
         return RoundUsage(
             round=index,
-            prompt_tokens=state.prompt_tokens,
-            completion_tokens=state.completion_tokens,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
             tool_schema_tokens=schema_tokens,
             tool_result_tokens=result_tokens,
             cache_creation_tokens=state.cache_creation_tokens,
             cache_read_tokens=state.cache_read_tokens,
+            tool_calls=len(tool_results),
         )
 
     def _is_final_round(self, round_index: int) -> bool:
         return round_index == self._max_rounds - 1
 
     def _maybe_final_round_notice(
-        self, round_index: int, messages: list[Message],
+        self, final_round: bool, messages: list[Message],
     ) -> None:
-        """Warn the model one round before the limit so it can wrap up.
+        """Warn the model its next answer must be the last so it wraps up.
 
         Only meaningful when tools exist — a tool-less agent has no
         tool budget to exhaust (relevant for ``max_rounds=1``).
         """
-        if self._is_final_round(round_index) and self._all_active_tools():
+        if final_round and self._all_active_tools():
             messages.append(Message(role=Role.USER, content=_FINAL_ROUND_NOTICE))
+
+    def _check_usage_limits(
+        self, rounds: list[RoundUsage],
+    ) -> UsageLimitReached | None:
+        """Return a breach event when a per-turn limit is crossed."""
+        limits = self._usage_limits
+        if limits is None:
+            return None
+        if limits.total_tokens_limit is not None:
+            used = sum(r.total_tokens for r in rounds)
+            if used > limits.total_tokens_limit:
+                return UsageLimitReached(
+                    kind="total_tokens",
+                    used=used,
+                    limit=limits.total_tokens_limit,
+                )
+        if limits.tool_calls_limit is not None:
+            calls = sum(r.tool_calls for r in rounds)
+            if calls > limits.tool_calls_limit:
+                return UsageLimitReached(
+                    kind="tool_calls", used=calls, limit=limits.tool_calls_limit,
+                )
+        return None
 
     # -- Client-side compaction (provider-agnostic) --
 
@@ -1250,34 +1343,30 @@ class Agent:
         rounds: list[RoundUsage] = []
         stopped_by = "max_rounds"
         round_open: int | None = None
+        wrap_up = False
         try:
             yield TurnStarted()
             for round_index in range(self._max_rounds):
+                final_round = wrap_up or self._is_final_round(round_index)
                 self._fire("on_round_start", round_index)
                 round_open = round_index
                 yield RoundStarted(round=round_index, max_rounds=self._max_rounds)
                 yield from self._stream_compact(messages)
-                self._maybe_final_round_notice(round_index, messages)
+                self._maybe_final_round_notice(final_round, messages)
                 llm_messages, schemas, schema_tokens, call_extra = (
                     self._round_request(
-                        full_system, messages,
-                        final_round=self._is_final_round(round_index),
+                        full_system, messages, final_round=final_round,
                     )
                 )
                 state = _RoundState()
 
-                for chunk in self._llm.stream(
-                    llm_messages,
-                    tools=schemas,
-                    max_tokens=self._max_response_tokens,
-                    **call_extra,
+                for delta in self._stream_model_round(
+                    llm_messages, schemas, call_extra, state,
                 ):
-                    out = self._ingest_chunk(state, chunk)
-                    if out:
-                        final_text += out
-                        yield TextDelta(text=out)
+                    final_text += delta.text
+                    yield delta
 
-                run_tools = self._should_run_tools(state, round_index)
+                run_tools = self._should_run_tools(state, final_round=final_round)
                 tool_results: list[ToolResult] = []
                 if run_tools:
                     yield from self._stream_tool_phase(
@@ -1285,13 +1374,18 @@ class Agent:
                     )
                 usage, stopped_by = self._close_round(
                     round_index, state, schema_tokens, tool_results,
-                    run_tools=run_tools, stopped_by=stopped_by,
+                    llm_messages,
+                    run_tools=run_tools, wrap_up=wrap_up, stopped_by=stopped_by,
                 )
                 round_open = None
                 rounds.append(usage)
                 yield RoundFinished(round=round_index, usage=usage)
                 if not run_tools:
                     break
+                breach = self._check_usage_limits(rounds)
+                if breach is not None:
+                    wrap_up = True
+                    yield breach
         finally:
             # Runs exactly once on every path. On abandonment or a
             # mid-turn exception this closes the open round and persists
@@ -1322,35 +1416,31 @@ class Agent:
         rounds: list[RoundUsage] = []
         stopped_by = "max_rounds"
         round_open: int | None = None
+        wrap_up = False
         try:
             yield TurnStarted()
             for round_index in range(self._max_rounds):
+                final_round = wrap_up or self._is_final_round(round_index)
                 self._fire("on_round_start", round_index)
                 round_open = round_index
                 yield RoundStarted(round=round_index, max_rounds=self._max_rounds)
                 async for event in self._astream_compact(messages):
                     yield event
-                self._maybe_final_round_notice(round_index, messages)
+                self._maybe_final_round_notice(final_round, messages)
                 llm_messages, schemas, schema_tokens, call_extra = (
                     self._round_request(
-                        full_system, messages,
-                        final_round=self._is_final_round(round_index),
+                        full_system, messages, final_round=final_round,
                     )
                 )
                 state = _RoundState()
 
-                async for chunk in self._llm.astream(
-                    llm_messages,
-                    tools=schemas,
-                    max_tokens=self._max_response_tokens,
-                    **call_extra,
+                async for delta in self._astream_model_round(
+                    llm_messages, schemas, call_extra, state,
                 ):
-                    out = self._ingest_chunk(state, chunk)
-                    if out:
-                        final_text += out
-                        yield TextDelta(text=out)
+                    final_text += delta.text
+                    yield delta
 
-                run_tools = self._should_run_tools(state, round_index)
+                run_tools = self._should_run_tools(state, final_round=final_round)
                 tool_results: list[ToolResult] = []
                 if run_tools:
                     async for event in self._astream_tool_phase(
@@ -1359,13 +1449,18 @@ class Agent:
                         yield event
                 usage, stopped_by = self._close_round(
                     round_index, state, schema_tokens, tool_results,
-                    run_tools=run_tools, stopped_by=stopped_by,
+                    llm_messages,
+                    run_tools=run_tools, wrap_up=wrap_up, stopped_by=stopped_by,
                 )
                 round_open = None
                 rounds.append(usage)
                 yield RoundFinished(round=round_index, usage=usage)
                 if not run_tools:
                     break
+                breach = self._check_usage_limits(rounds)
+                if breach is not None:
+                    wrap_up = True
+                    yield breach
         finally:
             # Runs exactly once on every path. On abandonment or a
             # mid-turn exception this closes the open round and persists

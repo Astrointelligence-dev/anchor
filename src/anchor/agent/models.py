@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class AgentTool(BaseModel):
@@ -109,9 +109,12 @@ class RoundUsage(BaseModel, frozen=True):
     """Per-round token accounting for one iteration of the tool loop.
 
     ``prompt_tokens``/``completion_tokens`` come from provider-reported
-    usage (0 when the provider does not report usage on the stream).
-    ``tool_schema_tokens`` and ``tool_result_tokens`` are counted with
-    the agent's tokenizer.
+    usage; when the provider does not report usage on the stream they
+    are estimated with the agent's tokenizer (messages + tool schemas
+    for the prompt, streamed text + tool-call arguments for the
+    completion). ``tool_schema_tokens`` and ``tool_result_tokens`` are
+    tokenizer-counted visibility fields — subsets of the prompt, never
+    added on top of it.
     """
 
     round: int
@@ -121,13 +124,39 @@ class RoundUsage(BaseModel, frozen=True):
     tool_result_tokens: int = 0
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
+    tool_calls: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        """Tokens this round consumed, as billed: full input + output."""
+        return (
+            self.prompt_tokens
+            + self.completion_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+        )
+
+
+class UsageLimits(BaseModel, frozen=True):
+    """Per-turn usage limits enforced by the agent loop.
+
+    When a limit is crossed mid-turn the loop grants the model one
+    wrap-up round (final-round notice + ``tool_choice="none"``) and
+    stops with ``stopped_by="usage_limit"`` — no exception is raised.
+    Checks are post-hoc, so a turn may overshoot by the round in
+    flight plus the bounded wrap-up call. Rounds are capped separately
+    by the agent's ``max_rounds``.
+    """
+
+    total_tokens_limit: int | None = Field(default=None, gt=0)
+    tool_calls_limit: int | None = Field(default=None, ge=0)
 
 
 class TurnDiagnostics(BaseModel, frozen=True):
     """Accounting and outcome for one full ``chat()``/``achat()`` turn."""
 
     rounds: tuple[RoundUsage, ...] = ()
-    stopped_by: Literal["stop", "max_rounds", "max_tokens"] = "stop"
+    stopped_by: Literal["stop", "max_rounds", "max_tokens", "usage_limit"] = "stop"
 
     @property
     def total_prompt_tokens(self) -> int:
@@ -140,3 +169,11 @@ class TurnDiagnostics(BaseModel, frozen=True):
     @property
     def total_tool_result_tokens(self) -> int:
         return sum(r.tool_result_tokens for r in self.rounds)
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(r.total_tokens for r in self.rounds)
+
+    @property
+    def total_tool_calls(self) -> int:
+        return sum(r.tool_calls for r in self.rounds)
