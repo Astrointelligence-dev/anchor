@@ -61,13 +61,13 @@ Details: retrieval analysis §1–§3.
 
 Details: retrieval analysis §4–§10. Every change here gates on the golden-set metric, so build that first.
 
-- [ ] Golden-set eval harness: 50–200 real queries, recall@k / graded NDCG via correct implementations; CI-gate for retrieval changes; fix `LLMRAGEvaluator` silent-0.0 (missing callback → error, not score)
-- [ ] BM25: swap rank_bm25 → **bm25s** + PyStemmer Portuguese + stopwords; pluggable tokenizer; keep raw scores
-- [ ] **sqlite-vec** backend (+ FTS5 for single-file hybrid) as the local vector store; retire the full-scan Python cosine path past small N
-- [ ] Chunking: defaults to 256–400 tokens / 0–50 overlap (Chroma evidence); propagate markdown headers into chunk metadata; `ParentChildChunker` stores parent **id** not full text (`hierarchical.py:137`); fix quadratic sizing loops; tokenizer encoding parameterized (o200k_base option)
-- [ ] Parsing: per-page metadata on PDF chunks (citation provenance); parse frontmatter into metadata instead of discarding (`parsers.py:105`); add csv/json/docx parsers
-- [ ] Contextual enrichment step (Anthropic-style chunk-context prepend, LLM-callback-delegated) as an opt-in ingestion step
-- [ ] Real CLI: `anchor index` = ingest → embed → sqlite-vec; `anchor query` = hybrid + rerank (today both are stubs, `cli.py:66-120`)
+- [x] Golden-set eval harness: 50–200 real queries, recall@k / graded NDCG via correct implementations; CI-gate for retrieval changes; fix `LLMRAGEvaluator` silent-0.0 (missing callback → error, not score)
+- [x] BM25: swap rank_bm25 → **bm25s** + PyStemmer Portuguese + stopwords; pluggable tokenizer; keep raw scores
+- [x] **sqlite-vec** backend (+ FTS5 for single-file hybrid) as the local vector store; retire the full-scan Python cosine path past small N
+- [x] Chunking: defaults to 256–400 tokens / 0–50 overlap (Chroma evidence); propagate markdown headers into chunk metadata; `ParentChildChunker` stores parent **id** not full text (`hierarchical.py:137`); fix quadratic sizing loops; tokenizer encoding parameterized (o200k_base option)
+- [x] Parsing: per-page metadata on PDF chunks (citation provenance); parse frontmatter into metadata instead of discarding (`parsers.py:105`); add csv/json/docx parsers
+- [x] Contextual enrichment step (Anthropic-style chunk-context prepend, LLM-callback-delegated) as an opt-in ingestion step
+- [x] Real CLI: `anchor index` = ingest → embed → sqlite-vec; `anchor query` = hybrid + rerank (today both are stubs, `cli.py:66-120`)
 
 **Done when:** golden-set recall@k improves or holds on every merged item; CLI demo works offline with a local embedder.
 
@@ -102,6 +102,9 @@ Details: gap analysis §2–§5, §8. Independent of phases 2–3.
 ---
 
 ## Review log
+
+### Phase 3 — shipped 2026-08-25
+All 7 items landed. Evidence: 2613 passed / 3 skipped; new suites `tests/test_ingestion/test_phase3_quality.py` (14), `tests/test_evaluation/test_golden.py` (5), `tests/test_storage/test_sqlite/test_vec_store.py` (8, incl. a Portuguese-stemming BM25 test), CLI suite rewritten against the real commands (11); CLI verified E2E by hand (index a mixed-corpus dir, query returns the right doc offline). Deviations: (a) FTS5 single-file hybrid deferred — bm25s (in-memory, memory-mappable) covers sparse and the CLI rebuilds it from the context store at query time; revisit if corpora outgrow that; (b) tokenizer-encoding parameterization was already present (`TiktokenCounter(encoding_name=...)`) — no change needed; (c) golden-set gating is infrastructure + tests here; the actual 50-200-query golden set is corpus-specific and must be authored per project; (d) `FixedSizeChunker` keeps 512/50 defaults (parent/child sizing depends on them), only the ingester default `RecursiveCharacterChunker` moved to 384/0.
 
 ### Phase 2 — shipped 2026-08-25
 All 7 items landed. Evidence: 2603 passed / 3 skipped; new suite `tests/test_retrieval/test_phase2_embeddings_filtering.py` (18 tests: protocol conformance, batch-call counting, `where` on InMemory/SQLite sync+async, store-backed async E2E, HNSW schema assertions) + env-gated pgvector integration suite. Deviations: (a) filter param named `where` (Chroma-style) not `filter` (builtin shadowing); equality-only semantics — range/negation operators deferred until needed; (b) protocol carries `dimensions` but not `dtype` — no backend stores int8 today, quantization lands with the sqlite-vec backend (Phase 3); (c) sync/async convergence achieved by teaching `AsyncDenseRetriever` the store-backed path (the in-process legacy mode kept for its 28 existing tests) rather than a shared-code rewrite; (d) `where` is passed to stores only when set, so pre-existing custom VectorStore implementations keep working.

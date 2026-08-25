@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Golden-set eval harness (`anchor.evaluation.golden`): `GoldenCase` JSONL loading, `evaluate_retriever`, `assert_metric_floor` — the CI-gate primitive for retrieval changes; `RetrievalMetricsCalculator` now supports graded NDCG via `{id: grade}` relevance maps
+- `SqliteVecVectorStore` (`[sqlite-vec]` extra): real KNN inside SQLite via the vec0 virtual table (C cosine distance, declared dimensions, `where` pre-filtering through rowid IN) — replaces the full-scan Python cosine path for local persistence
+- `MarkdownHeaderChunker`: structure-aware chunking — splits at headings, stamps each chunk with its `H1 > H2` path in metadata and (by default) in content
+- Parsers: `CSVParser` (header-context rows), `JSONParser`, `DocxParser` (stdlib zipfile+ElementTree, DTD-rejecting); `MarkdownParser` now parses YAML frontmatter into metadata instead of discarding it
+- Per-page PDF provenance: `PDFParser.parse_pages` + page-aware ingestion stamps every chunk with `doc_page` for citations
+- Contextual retrieval hook: `DocumentIngester(contextualize_fn=...)` prepends caller-generated chunk context (Anthropic contextual-retrieval pattern), preserving the original in `metadata["original_content"]`
+- Real CLI: `anchor index` (ingest → chunks + optional dense vectors in one SQLite file) and `anchor query` (BM25 + optional dense, RRF-fused) — works fully offline; previously both were placeholders
 - Embeddings layer: `EmbeddingProvider` protocol (query/document asymmetry, native batching, async, `dimensions` for Matryoshka truncation) + providers behind extras — `OpenAIEmbeddingProvider` (`[openai]`), `VoyageEmbeddingProvider` (`[voyage]`), `SentenceTransformerEmbeddingProvider` (`[local-embeddings]`, BGE-M3 default for multilingual/PT) — and `CallableEmbeddingProvider` unifying the legacy `embed_fn` shapes
 - Metadata filtering: `where: dict` parameter on `VectorStore.search` / `AsyncVectorStore.search`, pushed down in every backend (InMemory dict match, SQLite `json_extract` in SQL, Postgres JSONB containment `@>` with a GIN index) and exposed on `DenseRetriever.retrieve` / `AsyncDenseRetriever.aretrieve` — unblocks user/tenant/type scoping
 - `DenseRetriever.index` embeds documents in one batch call (was one embedding call per item)
@@ -41,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README sections for Priority System (1--10 scale) and Token Budgets
 
 ### Changed
+- BM25 backend: **bm25s** (numpy sparse scoring, up to 500x faster, Lucene-variant correctness) with Snowball stemming + stopwords via `SparseRetriever(language=...)` — Portuguese finally stems (`correndo` matches `correr`); rank_bm25 remains the fallback and the path for custom `tokenize_fn`; the `bm25` extra now ships `bm25s + PyStemmer`
+- Chunking defaults: `RecursiveCharacterChunker` 512/50 → **384/0** per Chroma's chunking evaluation (recursive at 200-400 tokens, zero overlap, within ~2 recall points of semantic chunking)
+- Chunker sizing loops are O(n) (per-word token counts) instead of re-encoding the growing chunk per word (O(n²)); exact for whitespace tokenizers, approximate for BPE
+- `ParentChildChunker` stores parent text once on the chunker (content-hash ids, globally unique across documents — the old `parent-{idx}` collided between docs) instead of duplicating the full parent into every child's metadata; `ParentExpander` takes a `parent_lookup`
+- `LLMRAGEvaluator`: unconfigured metric dimensions are now `None` (not evaluated) instead of a silent 0.0; constructing with zero callbacks raises
 - Skills: `Skill.activation` default flipped from `"always"` to `"on_demand"` (matches the loader default and progressive-disclosure semantics); canonical frontmatter location for activation is now `metadata: {activation: ...}` (top-level key still accepted)
 - Skills: the discovery listing is static (no per-round `[active]` mutation) and joined to the system prompt with newlines, computed once per turn — prompt-cache friendly; the agent's `AnthropicFormatter` now has caching enabled
 - Skills: tool-name collisions raise at registration time (`SkillRegistry.register` and `Agent.with_skill`), never mid-conversation

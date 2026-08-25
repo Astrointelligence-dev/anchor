@@ -7,6 +7,7 @@ convert raw documents into ``ContextItem`` objects ready for indexing.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,10 @@ from anchor.ingestion.metadata import (
     generate_doc_id,
 )
 from anchor.ingestion.parsers import (
+    CSVParser,
+    DocxParser,
     HTMLParser,
+    JSONParser,
     MarkdownParser,
     PDFParser,
     PlainTextParser,
@@ -37,7 +41,15 @@ _EXTENSION_PARSER_MAP: dict[str, DocumentParser] = {}
 def _get_default_parser_map() -> dict[str, DocumentParser]:
     """Build the default extension-to-parser mapping lazily."""
     if not _EXTENSION_PARSER_MAP:
-        for parser in (PlainTextParser(), MarkdownParser(), HTMLParser(), PDFParser()):
+        for parser in (
+            PlainTextParser(),
+            MarkdownParser(),
+            HTMLParser(),
+            PDFParser(),
+            CSVParser(),
+            JSONParser(),
+            DocxParser(),
+        ):
             for ext in parser.supported_extensions:
                 _EXTENSION_PARSER_MAP[ext] = parser
     return _EXTENSION_PARSER_MAP
@@ -52,6 +64,7 @@ class DocumentIngester:
 
     __slots__ = (
         "_chunker",
+        "_contextualize_fn",
         "_enricher",
         "_parsers",
         "_priority",
@@ -67,12 +80,25 @@ class DocumentIngester:
         enricher: MetadataEnricher | None = None,
         source_type: SourceType = SourceType.RETRIEVAL,
         priority: int = 5,
+        contextualize_fn: Callable[[str, str], str] | None = None,
     ) -> None:
+        """See class docstring.
+
+        Parameters:
+            contextualize_fn: Optional Anthropic-style contextual-retrieval
+                hook ``(document_text, chunk_text) -> context``. The
+                returned context is prepended to the chunk before indexing
+                (the original chunk is kept in ``metadata["original_content"]``).
+                Typically an LLM call written by the caller — anchor never
+                calls a model itself. Cheap with prompt caching since the
+                document prefix repeats across chunks.
+        """
         self._chunker: Chunker = chunker or RecursiveCharacterChunker()
         self._tokenizer = tokenizer or get_default_counter()
         self._enricher = enricher
         self._source_type = source_type
         self._priority = priority
+        self._contextualize_fn = contextualize_fn
 
         # Merge default parsers with user overrides
         self._parsers: dict[str, DocumentParser] = dict(_get_default_parser_map())
@@ -104,14 +130,16 @@ class DocumentIngester:
             chunks_with_meta = self._chunker.chunk_with_metadata(text, doc_metadata)
             if not chunks_with_meta:
                 return []
-            return self._build_items_with_metadata(chunks_with_meta, doc_id, doc_metadata)
+            return self._build_items_with_metadata(
+                chunks_with_meta, doc_id, doc_metadata, doc_text=text
+            )
 
         chunks = self._chunker.chunk(text, doc_metadata)
 
         if not chunks:
             return []
 
-        return self._build_items(chunks, doc_id, doc_metadata)
+        return self._build_items(chunks, doc_id, doc_metadata, doc_text=text)
 
     def ingest_file(
         self,
@@ -145,6 +173,11 @@ class DocumentIngester:
             msg = f"No parser registered for extension '{ext}'. Supported: {list(self._parsers)}"
             raise IngestionError(msg)
 
+        # Page-aware parsers (duck-typed `parse_pages`, e.g. PDFParser) get
+        # per-page chunking so every chunk carries its source page number.
+        if hasattr(parser, "parse_pages"):
+            return self._ingest_pages(parser, path, doc_id)
+
         text, doc_metadata = parser.parse(path)
         if not text or not text.strip():
             logger.warning("Parser returned empty text for %s", path)
@@ -156,14 +189,43 @@ class DocumentIngester:
             chunks_with_meta = self._chunker.chunk_with_metadata(text, doc_metadata)
             if not chunks_with_meta:
                 return []
-            return self._build_items_with_metadata(chunks_with_meta, doc_id, doc_metadata)
+            return self._build_items_with_metadata(
+                chunks_with_meta, doc_id, doc_metadata, doc_text=text
+            )
 
         chunks = self._chunker.chunk(text, doc_metadata)
 
         if not chunks:
             return []
 
-        return self._build_items(chunks, doc_id, doc_metadata)
+        return self._build_items(chunks, doc_id, doc_metadata, doc_text=text)
+
+    def _ingest_pages(
+        self,
+        parser: DocumentParser,
+        path: Path,
+        doc_id: str | None,
+    ) -> list[ContextItem]:
+        """Chunk a paginated document page by page, stamping ``doc_page``."""
+        _, doc_metadata = parser.parse(path)
+        pages = parser.parse_pages(path)  # type: ignore[attr-defined]
+        if not pages:
+            logger.warning("Parser returned no pages for %s", path)
+            return []
+
+        full_text = "\n\n".join(page_text for _, page_text in pages)
+        doc_id = doc_id or generate_doc_id(full_text, str(path))
+
+        chunks_with_meta: list[tuple[str, dict[str, Any]]] = []
+        for page_num, page_text in pages:
+            for chunk in self._chunker.chunk(page_text, doc_metadata):
+                chunks_with_meta.append((chunk, {"doc_page": page_num}))
+
+        if not chunks_with_meta:
+            return []
+        return self._build_items_with_metadata(
+            chunks_with_meta, doc_id, doc_metadata, doc_text=full_text
+        )
 
     def ingest_directory(
         self,
@@ -207,11 +269,24 @@ class DocumentIngester:
         logger.info("Ingested %d items from %s", len(items), directory)
         return items
 
+    def _contextualize(
+        self, chunk_text: str, doc_text: str | None, metadata: dict[str, Any]
+    ) -> str:
+        """Apply the contextual-retrieval hook, if configured."""
+        if self._contextualize_fn is None or doc_text is None:
+            return chunk_text
+        context = self._contextualize_fn(doc_text, chunk_text)
+        if not context or not context.strip():
+            return chunk_text
+        metadata["original_content"] = chunk_text
+        return f"{context.strip()}\n\n{chunk_text}"
+
     def _build_items(
         self,
         chunks: list[str],
         doc_id: str,
         doc_metadata: dict[str, Any] | None,
+        doc_text: str | None = None,
     ) -> list[ContextItem]:
         """Convert text chunks into ContextItem objects."""
         items: list[ContextItem] = []
@@ -226,11 +301,12 @@ class DocumentIngester:
             if self._enricher:
                 metadata = self._enricher.enrich(chunk_text, idx, total, metadata)
 
-            token_count = self._tokenizer.count_tokens(chunk_text)
+            content = self._contextualize(chunk_text, doc_text, metadata)
+            token_count = self._tokenizer.count_tokens(content)
 
             item = ContextItem(
                 id=chunk_id,
-                content=chunk_text,
+                content=content,
                 source=self._source_type,
                 priority=self._priority,
                 token_count=token_count,
@@ -245,6 +321,7 @@ class DocumentIngester:
         chunks_with_meta: list[tuple[str, dict[str, Any]]],
         doc_id: str,
         doc_metadata: dict[str, Any] | None,
+        doc_text: str | None = None,
     ) -> list[ContextItem]:
         """Convert (text, metadata) tuples into ContextItem objects.
 
@@ -274,11 +351,12 @@ class DocumentIngester:
             if self._enricher:
                 metadata = self._enricher.enrich(chunk_text, idx, total, metadata)
 
-            token_count = self._tokenizer.count_tokens(chunk_text)
+            content = self._contextualize(chunk_text, doc_text, metadata)
+            token_count = self._tokenizer.count_tokens(content)
 
             item = ContextItem(
                 id=chunk_id,
-                content=chunk_text,
+                content=content,
                 source=self._source_type,
                 priority=self._priority,
                 token_count=token_count,

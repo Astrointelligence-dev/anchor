@@ -59,22 +59,27 @@ class FixedSizeChunker:
             return []
 
         words = text.split()
+        # Per-word token counts computed once: O(n) instead of re-encoding
+        # the growing chunk for every appended word (O(n^2)). Exact for
+        # whitespace tokenizers; a close approximation for BPE encodings
+        # (chunk_size is a soft target, not a hard contract).
+        word_tokens = [self._tokenizer.count_tokens(w) for w in words]
         chunks: list[str] = []
         start = 0
 
         while start < len(words):
             # Build a chunk up to chunk_size tokens
             end = start
-            candidate = ""
+            running = 0
             while end < len(words):
-                trial = " ".join(words[start : end + 1])
-                if self._tokenizer.count_tokens(trial) > self._chunk_size and end > start:
+                next_total = running + word_tokens[end]
+                if next_total > self._chunk_size and end > start:
                     break
-                candidate = trial
+                running = next_total
                 end += 1
 
-            if candidate:
-                chunks.append(candidate)
+            if end > start:
+                chunks.append(" ".join(words[start:end]))
 
             # If this chunk reached the end of the text, we're done
             if end >= len(words):
@@ -87,20 +92,23 @@ class FixedSizeChunker:
             else:
                 # Calculate how many words to step back for overlap
                 chunk_word_count = end - start
-                step = max(1, chunk_word_count - self._overlap_words(words, start, end))
+                step = max(
+                    1, chunk_word_count - self._overlap_words(word_tokens, start, end)
+                )
                 start += step
 
         return chunks
 
-    def _overlap_words(self, words: list[str], start: int, end: int) -> int:
+    def _overlap_words(self, word_tokens: list[int], start: int, end: int) -> int:
         """Calculate number of trailing words that fit in overlap tokens."""
         if self._overlap == 0:
             return 0
         count = 0
+        running = 0
         idx = end - 1
         while idx >= start and count < (end - start):
-            trail = " ".join(words[idx:end])
-            if self._tokenizer.count_tokens(trail) > self._overlap:
+            running += word_tokens[idx]
+            if running > self._overlap:
                 break
             count += 1
             idx -= 1
@@ -118,6 +126,10 @@ class RecursiveCharacterChunker:
 
     Separator hierarchy: ``"\\n\\n"`` → ``"\\n"`` → ``". "`` → ``" "``.
 
+    Defaults follow Chroma's chunking evaluation: well-parameterized
+    recursive splitting at 200-400 tokens with zero overlap matches
+    semantic chunkers within ~2 recall points at far lower cost.
+
     Implements the ``Chunker`` protocol.
     """
 
@@ -127,8 +139,8 @@ class RecursiveCharacterChunker:
 
     def __init__(
         self,
-        chunk_size: int = 512,
-        overlap: int = 50,
+        chunk_size: int = 384,
+        overlap: int = 0,
         separators: tuple[str, ...] | None = None,
         tokenizer: Tokenizer | None = None,
     ) -> None:
@@ -208,12 +220,16 @@ class RecursiveCharacterChunker:
         result: list[str] = [chunks[0]]
         for i in range(1, len(chunks)):
             prev_words = chunks[i - 1].split()
-            overlap_text = ""
+            # Walk backwards accumulating per-word counts: O(n) per boundary
+            # instead of re-encoding a growing suffix string per word.
+            running = 0
+            cut = len(prev_words)
             for j in range(len(prev_words) - 1, -1, -1):
-                candidate = " ".join(prev_words[j:])
-                if self._tokenizer.count_tokens(candidate) > self._overlap:
+                running += self._tokenizer.count_tokens(prev_words[j])
+                if running > self._overlap:
                     break
-                overlap_text = candidate
+                cut = j
+            overlap_text = " ".join(prev_words[cut:])
 
             if overlap_text:
                 merged = overlap_text + " " + chunks[i]
@@ -473,3 +489,95 @@ class SemanticChunker:
             f"SemanticChunker(threshold={self._threshold}, "
             f"chunk_size={self._chunk_size})"
         )
+
+
+class MarkdownHeaderChunker:
+    """Structure-aware chunking for Markdown: split at headings first.
+
+    Splits the document into sections at markdown headings, chunks each
+    section with an inner chunker, and stamps every chunk with its header
+    path (``"H1 > H2"``) — both in metadata (``headers``) and, by default,
+    prepended to the chunk content so embeddings carry the document
+    structure. Structure-aware splitting is the evidence-backed win over
+    semantic-similarity splitting for structured documents.
+
+    Implements the ``Chunker`` protocol plus ``chunk_with_metadata`` (the
+    ``DocumentIngester`` hook).
+
+    Parameters:
+        inner: Chunker applied to each section's body. Defaults to
+            ``RecursiveCharacterChunker`` with its standard defaults.
+        include_headers_in_content: Prepend the header path to each chunk's
+            text (default True).
+        tokenizer: Token counter passed to the default inner chunker.
+    """
+
+    __slots__ = ("_include_headers", "_inner")
+
+    _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+
+    def __init__(
+        self,
+        inner: Any = None,
+        include_headers_in_content: bool = True,
+        tokenizer: Tokenizer | None = None,
+    ) -> None:
+        self._inner = inner or RecursiveCharacterChunker(tokenizer=tokenizer)
+        self._include_headers = include_headers_in_content
+
+    def chunk(self, text: str, metadata: dict[str, Any] | None = None) -> list[str]:
+        """Split markdown into header-scoped chunks (text only)."""
+        return [c for c, _ in self.chunk_with_metadata(text, metadata)]
+
+    def chunk_with_metadata(
+        self, text: str, metadata: dict[str, Any] | None = None
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Split markdown into ``(chunk, {"headers": path})`` tuples."""
+        if not text or not text.strip():
+            return []
+
+        sections = self._split_sections(text)
+        results: list[tuple[str, dict[str, Any]]] = []
+        for header_path, body in sections:
+            if not body.strip():
+                continue
+            for chunk in self._inner.chunk(body):
+                content = (
+                    f"{header_path}\n\n{chunk}"
+                    if header_path and self._include_headers
+                    else chunk
+                )
+                chunk_meta: dict[str, Any] = {}
+                if header_path:
+                    chunk_meta["headers"] = header_path
+                results.append((content, chunk_meta))
+        return results
+
+    def _split_sections(self, text: str) -> list[tuple[str, str]]:
+        """Split text at headings, tracking the ``H1 > H2`` path per section."""
+        sections: list[tuple[str, str]] = []
+        # (level, title) stack for the current header path
+        stack: list[tuple[int, str]] = []
+        current_lines: list[str] = []
+
+        def flush() -> None:
+            body = "\n".join(current_lines).strip()
+            path = " > ".join(title for _, title in stack)
+            sections.append((path, body))
+            current_lines.clear()
+
+        for line in text.splitlines():
+            match = self._HEADING_RE.match(line)
+            if match:
+                flush()
+                level = len(match.group(1))
+                while stack and stack[-1][0] >= level:
+                    stack.pop()
+                stack.append((level, match.group(2).strip()))
+            else:
+                current_lines.append(line)
+        flush()
+        return sections
+
+    def __repr__(self) -> str:
+        return f"MarkdownHeaderChunker(inner={self._inner!r})"

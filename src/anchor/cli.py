@@ -1,6 +1,11 @@
 """CLI interface for anchor.
 
-Requires the 'cli' extra: pip install anchor[cli]
+Requires the 'cli' extra: pip install astro-anchor[cli]
+
+``anchor index`` ingests documents into a single SQLite database (chunks +
+optional dense vectors); ``anchor query`` runs hybrid retrieval over it.
+Works fully offline with ``--embeddings none`` (BM25 only) or
+``--embeddings local`` (sentence-transformers).
 """
 
 from __future__ import annotations
@@ -8,6 +13,7 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
+from typing import Any
 
 try:
     import typer
@@ -15,7 +21,7 @@ try:
     from rich.table import Table
 except ImportError:
     print(
-        "CLI dependencies not installed. Install with: pip install anchor[cli]",
+        "CLI dependencies not installed. Install with: pip install astro-anchor[cli]",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -30,13 +36,24 @@ app = typer.Typer(
 console = Console()
 
 
-@app.callback()
-def main(
-    version: bool = typer.Option(False, "--version", "-v", help="Show version"),
-) -> None:
-    if version:
+def _version_callback(value: bool) -> None:
+    if value:
         console.print(f"anchor {__version__}")
         raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-v",
+        help="Show version",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    """Anchor CLI."""
 
 
 @app.command()
@@ -48,7 +65,7 @@ def info() -> None:
     table.add_row("Version", __version__)
     table.add_row("Python", sys.version.split()[0])
 
-    for dep_name in ["rank_bm25", "tiktoken", "pydantic"]:
+    for dep_name in ["bm25s", "sqlite_vec", "tiktoken", "pydantic"]:
         try:
             mod = importlib.import_module(dep_name)
             ver = getattr(mod, "__version__", "installed")
@@ -59,65 +76,191 @@ def info() -> None:
     console.print(table)
 
 
-_MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+def _make_embeddings(spec: str) -> Any:
+    """Build an EmbeddingProvider from a CLI spec.
+
+    Specs: ``none`` | ``openai[:model]`` | ``local[:model]`` | ``voyage[:model]``.
+    """
+    if spec == "none":
+        return None
+    provider, _, model = spec.partition(":")
+    if provider == "openai":
+        from anchor.embeddings import OpenAIEmbeddingProvider
+
+        return OpenAIEmbeddingProvider(model=model or "text-embedding-3-small")
+    if provider == "local":
+        from anchor.embeddings import SentenceTransformerEmbeddingProvider
+
+        return SentenceTransformerEmbeddingProvider(model=model or "BAAI/bge-m3")
+    if provider == "voyage":
+        from anchor.embeddings import VoyageEmbeddingProvider
+
+        return VoyageEmbeddingProvider(model=model or "voyage-3.5")
+    console.print(
+        f"[red]Unknown embeddings spec '{spec}'. "
+        "Use none | openai[:model] | local[:model] | voyage[:model][/red]"
+    )
+    raise typer.Exit(code=1)
+
+
+def _open_context_store(db_path: Path) -> Any:
+    from anchor.storage.sqlite import (
+        SqliteConnectionManager,
+        SqliteContextStore,
+        ensure_tables,
+    )
+
+    manager = SqliteConnectionManager(db_path)
+    ensure_tables(manager.get_connection())
+    return SqliteContextStore(manager)
+
+
+def _open_vector_store(db_path: Path, dimensions: int) -> Any:
+    """Prefer sqlite-vec (real KNN); fall back to the brute-force store."""
+    try:
+        from anchor.storage.sqlite import SqliteVecVectorStore
+
+        return SqliteVecVectorStore(db_path, dimensions=dimensions)
+    except ImportError:
+        from anchor.storage.sqlite import (
+            SqliteConnectionManager,
+            SqliteVectorStore,
+            ensure_tables,
+        )
+
+        console.print(
+            "[dim]sqlite-vec not installed; using brute-force vector store. "
+            "pip install astro-anchor[sqlite-vec] for real KNN.[/dim]"
+        )
+        manager = SqliteConnectionManager(db_path)
+        ensure_tables(manager.get_connection())
+        return SqliteVectorStore(manager)
 
 
 @app.command()
 def index(
     path: Path = typer.Argument(..., help="Path to file or directory to index"),  # noqa: B008 -- typer.Argument() must be called in default
-    chunk_size: int = typer.Option(512, "--chunk-size", "-c", help="Chunk size in tokens"),
+    db: Path = typer.Option(  # noqa: B008 -- typer.Option() must be called in default
+        Path("anchor.db"), "--db", help="SQLite database file for the index"
+    ),
+    embeddings: str = typer.Option(
+        "none",
+        "--embeddings",
+        "-e",
+        help="Embedding provider: none | openai[:model] | local[:model] | voyage[:model]",
+    ),
+    chunk_size: int = typer.Option(384, "--chunk-size", "-c", help="Chunk size in tokens"),
+    language: str = typer.Option(
+        "english", "--language", "-l", help="Snowball language for BM25 stemming"
+    ),
 ) -> None:
-    """Index documents from a file or directory (placeholder for MVP)."""
+    """Ingest documents into a local index (chunks + optional dense vectors)."""
     path = path.resolve()
-
     if not path.exists():
         console.print(f"[red]Error: {path} does not exist[/red]")
         raise typer.Exit(code=1)
 
-    console.print(f"[yellow]Indexing from {path} (chunk_size={chunk_size})[/yellow]")
-    console.print("[dim]Note: Full indexing requires an embedding function. See docs.[/dim]")
+    from anchor.ingestion import DocumentIngester, RecursiveCharacterChunker
 
-    if path.is_file():
-        try:
-            file_size = path.stat().st_size
-            if file_size > _MAX_FILE_SIZE:
-                console.print(
-                    f"[red]Error: {path.name} is too large "
-                    f"({file_size / 1024 / 1024:.1f} MB). Maximum allowed size is 10 MB.[/red]"
-                )
-                raise typer.Exit(code=1)
-            content = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            console.print(f"[red]Error reading {path.name}: {exc}[/red]")
-            raise typer.Exit(code=1) from exc
-        except UnicodeDecodeError as exc:
-            console.print(
-                f"[red]Error: {path.name} is not valid UTF-8 text: {exc}[/red]"
-            )
-            raise typer.Exit(code=1) from exc
+    ingester = DocumentIngester(chunker=RecursiveCharacterChunker(chunk_size=chunk_size))
+    with console.status("Ingesting..."):
+        items = (
+            ingester.ingest_file(path)
+            if path.is_file()
+            else ingester.ingest_directory(path)
+        )
+    if not items:
+        console.print("[yellow]No content ingested.[/yellow]")
+        raise typer.Exit(code=1)
 
-        from anchor.tokens import get_default_counter
+    context_store = _open_context_store(db)
+    for item in items:
+        context_store.add(item)
 
-        counter = get_default_counter()
-        token_count = counter.count_tokens(content)
-        console.print(f"  File: {path.name} ({token_count} tokens)")
-    elif path.is_dir():
-        files = list(path.glob("**/*.txt")) + list(path.glob("**/*.md"))
-        console.print(f"  Found {len(files)} text files")
+    provider = _make_embeddings(embeddings)
+    if provider is not None:
+        with console.status(f"Embedding {len(items)} chunks..."):
+            vectors = provider.embed_documents([item.content for item in items])
+            vector_store = _open_vector_store(db, dimensions=len(vectors[0]))
+            for item, vector in zip(items, vectors, strict=True):
+                vector_store.add_embedding(item.id, vector, item.metadata)
+
+    table = Table(title=f"Indexed into {db}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Chunks", str(len(items)))
+    table.add_row("Total tokens", str(sum(item.token_count for item in items)))
+    table.add_row("Dense vectors", str(len(items)) if provider else "no (BM25 only)")
+    table.add_row("BM25 language", language)
+    console.print(table)
 
 
 @app.command()
 def query(
     query_text: str = typer.Argument(..., help="Query text"),
-    max_tokens: int = typer.Option(4096, "--max-tokens", "-t", help="Max context tokens"),
-    output_format: str = typer.Option(
-        "generic", "--format", "-f", help="Output format: generic|anthropic|openai"
+    db: Path = typer.Option(  # noqa: B008 -- typer.Option() must be called in default
+        Path("anchor.db"), "--db", help="SQLite database file for the index"
+    ),
+    top_k: int = typer.Option(5, "--top-k", "-k", help="Number of results"),
+    embeddings: str = typer.Option(
+        "none",
+        "--embeddings",
+        "-e",
+        help="Embedding provider (must match the one used at index time)",
+    ),
+    language: str = typer.Option(
+        "english", "--language", "-l", help="Snowball language for BM25 stemming"
     ),
 ) -> None:
-    """Query the context pipeline (placeholder for MVP)."""
-    console.print(f"[yellow]Query: {query_text}[/yellow]")
-    console.print(f"[dim]Max tokens: {max_tokens}, Format: {output_format}[/dim]")
-    console.print("[dim]Note: Requires indexed documents. See 'anchor index'.[/dim]")
+    """Run hybrid retrieval (BM25 + optional dense, fused with RRF)."""
+    if not db.exists():
+        console.print(f"[red]No index at {db}. Run 'anchor index' first.[/red]")
+        raise typer.Exit(code=1)
+
+    from anchor.models.query import QueryBundle
+    from anchor.retrieval import HybridRetriever, SparseRetriever
+
+    context_store = _open_context_store(db)
+    items = context_store.get_all()
+    if not items:
+        console.print("[yellow]Index is empty.[/yellow]")
+        raise typer.Exit(code=1)
+
+    sparse = SparseRetriever(language=language)
+    sparse.index(items)
+    retrievers: list[Any] = [sparse]
+
+    provider = _make_embeddings(embeddings)
+    if provider is not None:
+        from anchor.retrieval import DenseRetriever
+
+        vector_store = _open_vector_store(db, dimensions=provider.dimensions)
+        retrievers.append(
+            DenseRetriever(vector_store, context_store, embeddings=provider)
+        )
+
+    retriever: Any = (
+        HybridRetriever(retrievers) if len(retrievers) > 1 else retrievers[0]
+    )
+    results = retriever.retrieve(QueryBundle(query_str=query_text), top_k=top_k)
+
+    if not results:
+        console.print("[yellow]No results.[/yellow]")
+        raise typer.Exit()
+
+    table = Table(title=f"Top {len(results)} for: {query_text}")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Score", style="cyan", width=7)
+    table.add_column("Source", style="magenta")
+    table.add_column("Content", style="green")
+    for rank, item in enumerate(results, start=1):
+        source = str(item.metadata.get("doc_filename", item.metadata.get("parent_doc_id", "")))
+        page = item.metadata.get("doc_page")
+        if page:
+            source = f"{source} p.{page}"
+        snippet = item.content[:160].replace("\n", " ")
+        table.add_row(str(rank), f"{item.score:.3f}", source, snippet)
+    console.print(table)
 
 
 if __name__ == "__main__":

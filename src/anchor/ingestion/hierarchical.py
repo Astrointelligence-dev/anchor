@@ -7,7 +7,9 @@ the full parent text after retrieval.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from anchor.ingestion.chunkers import FixedSizeChunker
@@ -47,6 +49,7 @@ class ParentChildChunker:
         "_parent_chunk_size",
         "_parent_chunker",
         "_parent_overlap",
+        "_parent_texts",
         "_tokenizer",
     )
 
@@ -70,6 +73,7 @@ class ParentChildChunker:
         self._parent_overlap = parent_overlap
         self._child_overlap = child_overlap
         self._tokenizer = tokenizer or get_default_counter()
+        self._parent_texts: dict[str, str] = {}
 
         self._parent_chunker = FixedSizeChunker(
             chunk_size=parent_chunk_size,
@@ -117,8 +121,11 @@ class ParentChildChunker:
 
         Returns:
             A list of ``(child_text, child_metadata)`` tuples. Each
-            metadata dict includes ``parent_id``, ``parent_text``,
-            ``parent_index``, ``child_index``, and ``is_child_chunk``.
+            metadata dict includes ``parent_id``, ``parent_index``,
+            ``child_index``, and ``is_child_chunk``. The parent text is
+            stored ONCE on the chunker (see :meth:`get_parent`) instead of
+            being duplicated into every child's metadata — a 1024-token
+            parent copied into 4-8 children was pure storage bloat.
         """
         if not text or not text.strip():
             return []
@@ -127,13 +134,16 @@ class ParentChildChunker:
         results: list[tuple[str, dict[str, Any]]] = []
 
         for parent_idx, parent_text in enumerate(parent_chunks):
-            parent_id = f"parent-{parent_idx}"
+            # Content-hash id: globally unique across documents (the old
+            # "parent-{idx}" collided between docs) and dedupes identical
+            # parents for free.
+            parent_id = hashlib.sha256(parent_text.encode("utf-8")).hexdigest()[:16]
+            self._parent_texts[parent_id] = parent_text
             children = self._child_chunker.chunk(parent_text)
 
             for child_idx, child_text in enumerate(children):
                 child_meta: dict[str, Any] = {
                     "parent_id": parent_id,
-                    "parent_text": parent_text,
                     "parent_index": parent_idx,
                     "child_index": child_idx,
                     "is_child_chunk": True,
@@ -143,6 +153,10 @@ class ParentChildChunker:
                 results.append((child_text, child_meta))
 
         return results
+
+    def get_parent(self, parent_id: str) -> str | None:
+        """Look up a parent chunk's text by id (for ``ParentExpander``)."""
+        return self._parent_texts.get(parent_id)
 
     def __repr__(self) -> str:
         return (
@@ -163,12 +177,20 @@ class ParentExpander:
     Parameters:
         keep_child: If True, keep the original child content in metadata
             under ``original_child_content``. Default False.
+        parent_lookup: Callable resolving a ``parent_id`` to its text —
+            typically ``chunker.get_parent``. Falls back to legacy
+            ``metadata["parent_text"]`` when not provided.
     """
 
-    __slots__ = ("_keep_child",)
+    __slots__ = ("_keep_child", "_parent_lookup")
 
-    def __init__(self, keep_child: bool = False) -> None:
+    def __init__(
+        self,
+        keep_child: bool = False,
+        parent_lookup: Callable[[str], str | None] | None = None,
+    ) -> None:
         self._keep_child = keep_child
+        self._parent_lookup = parent_lookup
 
     def process(
         self,
@@ -202,7 +224,11 @@ class ParentExpander:
                 continue
             seen_parents.add(parent_id)
 
-            parent_text = item.metadata.get("parent_text", item.content)
+            parent_text: str | None = None
+            if self._parent_lookup is not None:
+                parent_text = self._parent_lookup(parent_id)
+            if parent_text is None:
+                parent_text = item.metadata.get("parent_text", item.content)
             new_metadata = dict(item.metadata)
 
             if self._keep_child:

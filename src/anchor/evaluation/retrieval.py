@@ -37,19 +37,22 @@ class RetrievalMetricsCalculator:
     def evaluate(
         self,
         retrieved: list[ContextItem],
-        relevant: list[str],
+        relevant: list[str] | dict[str, float],
         k: int | None = None,
     ) -> RetrievalMetrics:
         """Evaluate retrieval quality.
 
         Parameters:
             retrieved: Items returned by the retriever in ranked order.
-            relevant: IDs of the ground-truth relevant documents.
+            relevant: Ground truth — either a list of relevant document IDs
+                (binary relevance) or a ``{doc_id: grade}`` mapping for
+                graded NDCG (grades > 0; higher = more relevant).
             k: Cutoff to use.  Falls back to the instance default.
 
         Returns:
             A ``RetrievalMetrics`` instance with precision@k, recall@k,
-            F1@k, MRR, NDCG, and hit_rate.
+            F1@k, MRR, NDCG, and hit_rate. Set-based metrics treat any
+            graded document as relevant; NDCG uses the grades.
         """
         effective_k = k if k is not None else self._k
         if effective_k < 1:
@@ -57,13 +60,18 @@ class RetrievalMetricsCalculator:
             raise ValueError(msg)
 
         top_k = retrieved[:effective_k]
+        grades = dict(relevant) if isinstance(relevant, dict) else None
         relevant_set = set(relevant)
 
         precision = self._precision_at_k(top_k, relevant_set)
         recall = self._recall_at_k(top_k, relevant_set)
         f1 = self._f1(precision, recall)
         mrr = self._mrr(top_k, relevant_set)
-        ndcg = self._ndcg(top_k, relevant_set)
+        ndcg = (
+            self._graded_ndcg(top_k, grades)
+            if grades is not None
+            else self._ndcg(top_k, relevant_set)
+        )
         hit = self._hit_rate(top_k, relevant_set)
 
         return RetrievalMetrics(
@@ -126,6 +134,28 @@ class RetrievalMetricsCalculator:
         ideal_hits = min(len(relevant), len(top_k))
         idcg = sum(1.0 / math.log2(r + 1) for r in range(1, ideal_hits + 1))
 
+        if idcg == 0.0:
+            return 0.0
+        return dcg / idcg
+
+    @staticmethod
+    def _graded_ndcg(top_k: list[ContextItem], grades: dict[str, float]) -> float:
+        """NDCG with graded relevance: gain = 2^grade - 1."""
+        if not grades or not top_k:
+            return 0.0
+
+        dcg = 0.0
+        for rank, item in enumerate(top_k, start=1):
+            grade = grades.get(item.id, 0.0)
+            if grade > 0:
+                dcg += (2.0**grade - 1.0) / math.log2(rank + 1)
+
+        ideal = sorted(grades.values(), reverse=True)[: len(top_k)]
+        idcg = sum(
+            (2.0**grade - 1.0) / math.log2(rank + 1)
+            for rank, grade in enumerate(ideal, start=1)
+            if grade > 0
+        )
         if idcg == 0.0:
             return 0.0
         return dcg / idcg

@@ -37,13 +37,14 @@ class TestParentChildChunker:
         text = " ".join(f"word{i}" for i in range(30))
         pairs = parent_child_chunker.chunk_with_metadata(text)
 
-        # Collect unique parent texts
-        parent_texts = {m["parent_text"] for _, m in pairs}
-        assert len(parent_texts) >= 2
+        # Collect unique parent ids; text lives on the chunker, not metadata
+        parent_ids = {m["parent_id"] for _, m in pairs}
+        assert len(parent_ids) >= 2
 
         # Every child text should be a substring of its parent
         for child_text, meta in pairs:
-            parent_text = meta["parent_text"]
+            parent_text = parent_child_chunker.get_parent(meta["parent_id"])
+            assert parent_text is not None
             # Each word in the child should appear in the parent
             for word in child_text.split():
                 assert word in parent_text
@@ -57,11 +58,11 @@ class TestParentChildChunker:
 
         for _child_text, meta in pairs:
             assert "parent_id" in meta
-            assert "parent_text" in meta
+            assert "parent_text" not in meta  # stored once on the chunker
             assert "parent_index" in meta
             assert "child_index" in meta
             assert meta["is_child_chunk"] is True
-            assert meta["parent_id"].startswith("parent-")
+            assert parent_child_chunker.get_parent(meta["parent_id"]) is not None
 
     def test_chunk_returns_strings_only(
         self, parent_child_chunker: ParentChildChunker,
@@ -84,7 +85,9 @@ class TestParentChildChunker:
         # Collect parent texts by index
         parents_by_idx: dict[int, str] = {}
         for _, meta in pairs:
-            parents_by_idx[meta["parent_index"]] = meta["parent_text"]
+            text_val = chunker.get_parent(meta["parent_id"])
+            assert text_val is not None
+            parents_by_idx[meta["parent_index"]] = text_val
 
         if len(parents_by_idx) >= 2:
             p0_words = set(parents_by_idx[0].split())

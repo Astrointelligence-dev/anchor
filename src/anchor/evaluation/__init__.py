@@ -9,6 +9,14 @@ from .ab_testing import (
 )
 from .batch import BatchEvaluator
 from .evaluator import PipelineEvaluator
+from .golden import (
+    GoldenCase,
+    GoldenCaseResult,
+    GoldenSetReport,
+    assert_metric_floor,
+    evaluate_retriever,
+    load_golden_set,
+)
 from .human import HumanEvaluationCollector, HumanJudgment
 from .models import EvaluationResult, RAGMetrics, RetrievalMetrics
 from .rag import LLMRAGEvaluator
@@ -22,6 +30,9 @@ __all__ = [
     "EvaluationDataset",
     "EvaluationResult",
     "EvaluationSample",
+    "GoldenCase",
+    "GoldenCaseResult",
+    "GoldenSetReport",
     "HumanEvaluationCollector",
     "HumanJudgment",
     "LLMRAGEvaluator",
@@ -29,4 +40,7 @@ __all__ = [
     "RAGMetrics",
     "RetrievalMetrics",
     "RetrievalMetricsCalculator",
+    "assert_metric_floor",
+    "evaluate_retriever",
+    "load_golden_set",
 ]

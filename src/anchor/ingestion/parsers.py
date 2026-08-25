@@ -101,10 +101,20 @@ class MarkdownParser:
             metadata["filename"] = source.name
             metadata["extension"] = source.suffix
 
-        # Extract frontmatter if present
+        # Extract frontmatter if present — parsed into metadata, not discarded
         fm_match = self._FRONTMATTER_RE.match(text)
         if fm_match:
             metadata["has_frontmatter"] = True
+            try:
+                import yaml
+
+                parsed = yaml.safe_load(fm_match.group(1))
+                if isinstance(parsed, dict):
+                    # Frontmatter values first; computed keys below win.
+                    for key, value in parsed.items():
+                        metadata.setdefault(str(key), value)
+            except yaml.YAMLError:
+                logger.warning("Invalid YAML frontmatter; skipping parse")
             # Remove frontmatter from content text
             text = text[fm_match.end() :]
 
@@ -274,5 +284,189 @@ class PDFParser:
 
         return text, metadata
 
+    def parse_pages(self, source: Path | bytes) -> list[tuple[int, str]]:
+        """Parse a PDF into per-page texts for page-level provenance.
+
+        Returns ``(page_number, text)`` tuples (1-based). Pages with no
+        extractable text are skipped. ``DocumentIngester`` uses this to
+        stamp every chunk with its source page, so citations can point at
+        a real location instead of just the document.
+        """
+        try:
+            from pypdf import PdfReader
+        except ImportError as e:
+            msg = (
+                "pypdf is required for PDFParser. "
+                "Install it with: pip install anchor[pdf]"
+            )
+            raise IngestionError(msg) from e
+
+        import io
+
+        reader = (
+            PdfReader(io.BytesIO(source))
+            if isinstance(source, bytes)
+            else PdfReader(str(source))
+        )
+        pages: list[tuple[int, str]] = []
+        for page_num, page in enumerate(reader.pages, start=1):
+            page_text = page.extract_text()
+            if page_text and page_text.strip():
+                pages.append((page_num, page_text))
+        return pages
+
     def __repr__(self) -> str:
         return "PDFParser()"
+
+
+class CSVParser:
+    """Parse CSV/TSV files into a readable line-per-row text form.
+
+    Uses the stdlib ``csv`` module — zero external dependencies.
+
+    Implements the ``DocumentParser`` protocol.
+    """
+
+    __slots__ = ()
+
+    @property
+    def supported_extensions(self) -> list[str]:
+        return [".csv", ".tsv"]
+
+    def parse(self, source: Path | bytes) -> tuple[str, dict[str, Any]]:
+        import csv
+        import io
+
+        raw = _read_text(source)
+        delimiter = "\t" if (
+            isinstance(source, Path) and source.suffix.lower() == ".tsv"
+        ) else ","
+        rows = list(csv.reader(io.StringIO(raw), delimiter=delimiter))
+
+        metadata: dict[str, Any] = {}
+        if isinstance(source, Path):
+            metadata["filename"] = source.name
+            metadata["extension"] = source.suffix
+        if not rows:
+            return "", metadata
+
+        header = rows[0]
+        metadata["columns"] = header
+        metadata["row_count"] = len(rows) - 1
+
+        # "col: value" lines per row keep header context in every chunk.
+        lines: list[str] = []
+        for row in rows[1:]:
+            pairs = [
+                f"{col}: {val}"
+                for col, val in zip(header, row, strict=False)
+                if val.strip()
+            ]
+            if pairs:
+                lines.append("; ".join(pairs))
+        return "\n".join(lines), metadata
+
+    def __repr__(self) -> str:
+        return "CSVParser()"
+
+
+class JSONParser:
+    """Parse JSON files into indented text.
+
+    Implements the ``DocumentParser`` protocol.
+    """
+
+    __slots__ = ()
+
+    @property
+    def supported_extensions(self) -> list[str]:
+        return [".json"]
+
+    def parse(self, source: Path | bytes) -> tuple[str, dict[str, Any]]:
+        import json
+
+        raw = _read_text(source)
+        metadata: dict[str, Any] = {}
+        if isinstance(source, Path):
+            metadata["filename"] = source.name
+            metadata["extension"] = source.suffix
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            msg = f"Invalid JSON: {e}"
+            raise IngestionError(msg) from e
+
+        if isinstance(data, dict):
+            metadata["top_level_keys"] = sorted(data.keys())
+        elif isinstance(data, list):
+            metadata["item_count"] = len(data)
+
+        return json.dumps(data, indent=2, ensure_ascii=False), metadata
+
+    def __repr__(self) -> str:
+        return "JSONParser()"
+
+
+_DOCX_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+class DocxParser:
+    """Parse .docx files via stdlib zipfile + ElementTree — no python-docx.
+
+    Extracts paragraph text (``w:t`` runs) from ``word/document.xml``.
+    Formatting, tables-as-structure, images, and headers/footers are out
+    of scope; for layout-faithful parsing use a dedicated parser (Docling).
+
+    Implements the ``DocumentParser`` protocol.
+    """
+
+    __slots__ = ()
+
+    @property
+    def supported_extensions(self) -> list[str]:
+        return [".docx"]
+
+    def parse(self, source: Path | bytes) -> tuple[str, dict[str, Any]]:
+        import io
+        import zipfile
+        from xml.etree import ElementTree
+
+        metadata: dict[str, Any] = {}
+        if isinstance(source, Path):
+            metadata["filename"] = source.name
+            metadata["extension"] = source.suffix
+
+        buffer = io.BytesIO(source) if isinstance(source, bytes) else str(source)
+        try:
+            with zipfile.ZipFile(buffer) as zf:
+                xml_bytes = zf.read("word/document.xml")
+        except (zipfile.BadZipFile, KeyError) as e:
+            msg = f"Not a valid .docx file: {e}"
+            raise IngestionError(msg) from e
+
+        # Entity-expansion attacks (XXE / billion laughs) all require a DTD;
+        # legitimate Word documents never put one in document.xml. Rejecting
+        # DTDs outright closes both vectors without a defusedxml dependency.
+        if b"<!DOCTYPE" in xml_bytes or b"<!ENTITY" in xml_bytes:
+            msg = "Refusing .docx with a DTD in document.xml (entity-expansion risk)"
+            raise IngestionError(msg)
+
+        try:
+            root = ElementTree.fromstring(xml_bytes)  # noqa: S314 -- DTDs rejected above
+        except ElementTree.ParseError as e:
+            msg = f"Invalid document.xml in .docx: {e}"
+            raise IngestionError(msg) from e
+
+        paragraphs: list[str] = []
+        for para in root.iter(f"{_DOCX_NS}p"):
+            runs = [node.text or "" for node in para.iter(f"{_DOCX_NS}t")]
+            text = "".join(runs).strip()
+            if text:
+                paragraphs.append(text)
+
+        metadata["paragraph_count"] = len(paragraphs)
+        return "\n\n".join(paragraphs), metadata
+
+    def __repr__(self) -> str:
+        return "DocxParser()"

@@ -35,7 +35,9 @@ class RetrievalMetrics(BaseModel):
 class RAGMetrics(BaseModel):
     """RAGAS-style metrics for RAG evaluation.
 
-    All metrics are bounded in [0.0, 1.0].
+    All metrics are bounded in [0.0, 1.0]. ``None`` means the dimension was
+    NOT evaluated (no callback configured) — previously this silently
+    scored 0.0, indistinguishable from a genuine zero.
 
     Parameters:
         faithfulness: How faithful the answer is to the provided contexts.
@@ -46,10 +48,10 @@ class RAGMetrics(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    faithfulness: float = Field(ge=0.0, le=1.0)
-    answer_relevancy: float = Field(ge=0.0, le=1.0)
-    context_precision: float = Field(ge=0.0, le=1.0)
-    context_recall: float = Field(ge=0.0, le=1.0)
+    faithfulness: float | None = Field(default=None, ge=0.0, le=1.0)
+    answer_relevancy: float | None = Field(default=None, ge=0.0, le=1.0)
+    context_precision: float | None = Field(default=None, ge=0.0, le=1.0)
+    context_recall: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class EvaluationResult(BaseModel):

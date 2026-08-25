@@ -45,7 +45,8 @@ class TestSparseRetrieverIndex:
     def test_index_builds_bm25_object(self) -> None:
         retriever = make_sparse_retriever()
         retriever.index(_make_items())
-        assert retriever._bm25 is not None
+        # bm25s backend when installed, rank_bm25 otherwise
+        assert retriever._bm25s is not None or retriever._bm25 is not None
 
     def test_index_stores_items(self) -> None:
         retriever = make_sparse_retriever()

@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tiktoken = ["tiktoken>=0.7,<1"]
-bm25 = ["rank-bm25>=0.2.2,<1"]
+bm25 = ["bm25s>=0.2,<1", "PyStemmer>=2.2,<4", "rank-bm25>=0.2.2,<1"]
 flashrank = ["flashrank>=0.2,<1"]
 cli = ["typer>=0.12,<1", "rich>=13,<14"]
 anthropic = ["anthropic>=0.40,<1"]
@@ -41,11 +41,12 @@ ollama = ["openai>=1.50.0"]
 openai = ["openai>=1.50.0"]
 pdf = ["pypdf>=4,<5"]
 sqlite = ["aiosqlite>=0.20,<1"]
+sqlite-vec = ["sqlite-vec>=0.1.6,<1"]
 postgres = ["asyncpg>=0.29,<1"]
 voyage = ["voyageai>=0.3,<1"]
 local-embeddings = ["sentence-transformers>=3,<6"]
 redis = ["redis>=5.0,<8"]
-all-storage = ["astro-anchor[sqlite,postgres,redis]"]
+all-storage = ["astro-anchor[sqlite,sqlite-vec,postgres,redis]"]
 otlp = [
     "opentelemetry-exporter-otlp-proto-http>=1.20,<2",
     "opentelemetry-sdk>=1.20,<2",
