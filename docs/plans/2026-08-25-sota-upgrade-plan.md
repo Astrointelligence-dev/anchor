@@ -104,7 +104,7 @@ Details: gap analysis §2–§5, §8. Independent of phases 2–3.
 ## Backlog pós-Phase 5 *(levantado 2026-08-25 — entrada da retomada da próxima sessão)*
 
 **P0 — destrava produto e sustenta o claim do SDK:**
-- [ ] **Event stream do agent loop** — `chat`/`achat` só emitem texto; astro-tui precisa de eventos estruturados (tool started/finished, rounds, progresso de subagent) como async iterator, não callbacks sync. Maior gap produto-facing.
+- [x] **Event stream do agent loop** — shipped 2026-08-25 (`6dc57ac..48dd7a0`): `stream`/`astream` tipados, chat/achat viram projeções, subagents flat com `parent_tool_call_id`, 5 buracos corrigidos (incl. Gemini streaming silenciosamente quebrado). Plano/review: `docs/plans/2026-08-25-agent-event-stream-plan.md`.
 - [ ] **Budget enforcement no loop** — o diferencial "token budget management" hoje é só accounting (`last_turn`); falta cap que PARE o turno (estilo `UsageLimits`); `TokenBudgetExceededError` existe e nunca é levantado. Rounds 2..N crescem sem governança (ou selar o append-only como decisão definitiva).
 - [ ] **Docs + cookbook + migração downstream + release 0.2.0** — mkdocs desatualizado pós-Phases 1–5; anchor-cookbook sem recipes novos (subagents, hooks, compaction, caching); astro-skills/tui/context precisam migrar os breaking changes. Release após `/code-review ultra` do diff acumulado.
 - [ ] **Golden set real** — harness da Phase 3 sem corpus autorado (50–200 queries); o CI-gate não tem o que gatear.

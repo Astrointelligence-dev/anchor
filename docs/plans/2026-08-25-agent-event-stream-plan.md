@@ -34,34 +34,34 @@ Exceções de turno (provider, MCP) continuam levantando — Python idiomático;
 
 ## Fase 1 — Loop vira gerador de eventos *(o core)*
 
-- [ ] `events.py` com o contrato acima; export em `agent/__init__.py` + `anchor/__init__.py` (+ `tests/test_exports.py`)
-- [ ] Corpos de `chat` (`agent.py:1009-1086`) e `achat` (`:1088-1171`) viram `_stream_turn`/`_astream_turn` gerando `AgentEvent`; `chat`/`achat`/`stream`/`astream` são cascas finas
-- [ ] `try/finally` no gerador: `_finish_turn` + `on_round_end` rodam em abandono do consumidor e em exceção (buraco §A.2)
-- [ ] `tool_call_id` propagado do `ToolCall.id` para eventos (buraco §A.3)
-- [ ] Fase de tools async: `asyncio.as_completed` no lugar do `gather` — `ToolStarted` de todos no início (fiel: começam juntos), `ToolFinished` ao vivo conforme cada uma completa; paralelismo preservado; wrapper por task converte exceção em `ToolResult(is_error=True)` **passando por `_error_result`** → conserta o `on_tool_error` perdido (buraco §A.1); ordem dos results de volta ao modelo preservada
-- [ ] Sync: `_run_tools` vira gerador de eventos com results coletados (sequencial, como hoje)
-- [ ] `RoundStarted`/`RoundFinished`/`TurnStarted`/`TurnFinished` emitidos com `max_rounds`, `RoundUsage`, `TurnDiagnostics`
-- [ ] Testes: sequência ordenada de eventos num turno com 2 tools paralelas (ids casando start→finish); tool que levanta exceção no gather vira `ToolFinished(is_error=True)` + `on_tool_error` disparado; abandono do gerador ainda persiste memory/diagnostics; projeção: `achat` produz exatamente os `TextDelta` do `astream`
+- [x] `events.py` com o contrato acima; export em `agent/__init__.py` + `anchor/__init__.py` (+ `tests/test_exports.py`)
+- [x] Corpos de `chat` (`agent.py:1009-1086`) e `achat` (`:1088-1171`) viram `_stream_turn`/`_astream_turn` gerando `AgentEvent`; `chat`/`achat`/`stream`/`astream` são cascas finas
+- [x] `try/finally` no gerador: `_finish_turn` + `on_round_end` rodam em abandono do consumidor e em exceção (buraco §A.2)
+- [x] `tool_call_id` propagado do `ToolCall.id` para eventos (buraco §A.3)
+- [x] Fase de tools async: `asyncio.as_completed` no lugar do `gather` — `ToolStarted` de todos no início (fiel: começam juntos), `ToolFinished` ao vivo conforme cada uma completa; paralelismo preservado; wrapper por task converte exceção em `ToolResult(is_error=True)` **passando por `_error_result`** → conserta o `on_tool_error` perdido (buraco §A.1); ordem dos results de volta ao modelo preservada
+- [x] Sync: `_run_tools` vira gerador de eventos com results coletados (sequencial, como hoje)
+- [x] `RoundStarted`/`RoundFinished`/`TurnStarted`/`TurnFinished` emitidos com `max_rounds`, `RoundUsage`, `TurnDiagnostics`
+- [x] Testes: sequência ordenada de eventos num turno com 2 tools paralelas (ids casando start→finish); tool que levanta exceção no gather vira `ToolFinished(is_error=True)` + `on_tool_error` disparado; abandono do gerador ainda persiste memory/diagnostics; projeção: `achat` produz exatamente os `TextDelta` do `astream`
 
 **Done when:** suite existente verde sem alteração de asserts de comportamento; novos testes de ordem/ids/finally verdes.
 
 ## Fase 2 — Subagents flat no stream
 
-- [ ] `_run_sync`/`_run_async` (`subagent.py:117-157`) drenam `sub.stream()`/`sub.astream()` em vez de `chat`/`achat`; texto final continua vindo do `TurnFinished.text` do filho
-- [ ] Eventos do filho encaminhados ao stream do pai com `parent_tool_call_id` = id da call do tool `task`/`<nome>` (re-emissão via `model_copy`)
-- [ ] Async: merge na fase de tools — `asyncio.Queue` interna drenada enquanto as tasks rodam (eventos do filho chegam DURANTE a execução, não no fim); sync: yield inline
-- [ ] `TurnFinished` do filho não vaza como terminal do pai (encaminhado com parent_id, consumidor distingue)
-- [ ] Testes: orquestrador + subagent — eventos do filho aparecem com parent_id entre `ToolStarted` e `ToolFinished` do task; usage do filho visível via `RoundFinished` encaminhado
+- [x] `_run_sync`/`_run_async` (`subagent.py:117-157`) drenam `sub.stream()`/`sub.astream()` em vez de `chat`/`achat`; texto final continua vindo do `TurnFinished.text` do filho
+- [x] Eventos do filho encaminhados ao stream do pai com `parent_tool_call_id` = id da call do tool `task`/`<nome>` (re-emissão via `model_copy`)
+- [x] Async: merge na fase de tools — `asyncio.Queue` interna drenada enquanto as tasks rodam (eventos do filho chegam DURANTE a execução, não no fim); sync: yield inline
+- [x] `TurnFinished` do filho não vaza como terminal do pai (encaminhado com parent_id, consumidor distingue)
+- [x] Testes: orquestrador + subagent — eventos do filho aparecem com parent_id entre `ToolStarted` e `ToolFinished` do task; usage do filho visível via `RoundFinished` encaminhado
 
 **Done when:** o done-when do MULTI_AGENT.md ganha visibilidade: um `async for` mostra progresso do subagent ao vivo.
 
 ## Fase 3 — Fixes periféricos + limpeza
 
-- [ ] Gemini: `arguments_fragment` com `json.dumps(args)` em vez de `str(dict)` (`gemini.py:473-478`) + teste de round-trip com `json.loads` do loop
-- [ ] `_is_final_round`: remover o `bool(round_index)` — `max_rounds=1` marca round final (`agent.py:892-893`) + teste
-- [ ] Deletar `anchor.models.streaming` órfão (`StreamDelta`/`StreamUsage`/`StreamResult` — zero uso em src/) e seus exports/testes; breaking pre-1.0, changelog
-- [ ] Compaction: `CompactionStarted`/`Finished` emitidos em `_maybe_compact`/`_amaybe_compact`
-- [ ] Docstrings do módulo agent + entrada no mkdocs (`guides/`) com o exemplo TUI-shaped (`async for ev: match ev`)
+- [x] Gemini: `arguments_fragment` com `json.dumps(args)` em vez de `str(dict)` (`gemini.py:473-478`) + teste de round-trip com `json.loads` do loop
+- [x] `_is_final_round`: remover o `bool(round_index)` — `max_rounds=1` marca round final (`agent.py:892-893`) + teste
+- [x] Deletar `anchor.models.streaming` órfão (`StreamDelta`/`StreamUsage`/`StreamResult` — zero uso em src/) e seus exports/testes; breaking pre-1.0, changelog
+- [x] Compaction: `CompactionStarted`/`Finished` emitidos em `_maybe_compact`/`_amaybe_compact`
+- [x] Docstrings do módulo agent + entrada no mkdocs (`guides/`) com o exemplo TUI-shaped (`async for ev: match ev`)
 
 **Done when:** suite completa verde; grep por `StreamDelta` limpo; docs buildam.
 
@@ -76,4 +76,12 @@ Exceções de turno (provider, MCP) continuam levantando — Python idiomático;
 
 ## Review
 
-(preencher pós-implementação — ritual: ponytail reviewer + adversarial judge)
+### Shipped 2026-08-25 — 5 commits (`6dc57ac..48dd7a0`)
+
+**Fases 1–3 entregues** (835810a, d86e96d, a90d4e9) + condições do review (48dd7a0). Suite: 2674 verdes (baseline 2670; 17 saíram com o módulo órfão, 21 novos entraram). Zero lint novo vs baseline.
+
+**Ritual** (ponytail reviewer + juiz adversarial): 8 findings, 7 confirmados, 1 refutado (inline de `_merge_tool_events` — barrado por C901=13). Destaques: (a) o P1 do Gemini foi **ampliado** pelo juiz — além de id ausente e index fixo, o stream nunca emitia `TOOL_USE` (`_STOP_REASON_MAP`), então tools do Gemini via streaming falhavam silenciosamente desde sempre; corrigido com parser em lista + override no driver + teste round-trip pelo funil do loop; (b) mutação provou que a entrega ao vivo do merge tinha cobertura zero na suite inteira — teste subagent+sibling-lento adicionado; (c) `_finish_turn` movido para finally incondicional com `TurnFinished` pós-finally (semântica GeneratorExit verificada empiricamente pelo juiz); (d) juiz errou um caveat (TracingAgentCallback existe em `observability/callback.py:225`).
+
+**Deviations do plano:** (a) eventos de compaction anteciparam da Fase 3 para a Fase 1 (o loop foi reescrito uma vez só); (b) caminho sync de subagent: eventos do filho são bufferizados e emitidos antes do `ToolFinished` (consumidor sync está bloqueado durante a call — entrega ao vivo é impossível sem thread; async é ao vivo de verdade); (c) `_maybe_final_round_notice` ganhou guard de tools (agent sem tools + max_rounds=1 não recebe notice sem sentido); (d) `stream()` sync exposto além do `astream()` — o corpo sync existe de qualquer forma para `chat()`, custou uma casca.
+
+**Segue em aberto (registrado, não bloqueante):** migração da astro-tui (task separada; R0 = rename astro_context→anchor), budget enforcement (P0 #2 do backlog, vai consumir `RoundFinished.usage`), cancel graceful estilo `cancel("after_turn")` se a TUI pedir.
