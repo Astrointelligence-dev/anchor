@@ -101,6 +101,34 @@ Details: gap analysis §2–§5, §8. Independent of phases 2–3.
 
 ---
 
+## Backlog pós-Phase 5 *(levantado 2026-08-25 — entrada da retomada da próxima sessão)*
+
+**P0 — destrava produto e sustenta o claim do SDK:**
+- [ ] **Event stream do agent loop** — `chat`/`achat` só emitem texto; astro-tui precisa de eventos estruturados (tool started/finished, rounds, progresso de subagent) como async iterator, não callbacks sync. Maior gap produto-facing.
+- [ ] **Budget enforcement no loop** — o diferencial "token budget management" hoje é só accounting (`last_turn`); falta cap que PARE o turno (estilo `UsageLimits`); `TokenBudgetExceededError` existe e nunca é levantado. Rounds 2..N crescem sem governança (ou selar o append-only como decisão definitiva).
+- [ ] **Docs + cookbook + migração downstream + release 0.2.0** — mkdocs desatualizado pós-Phases 1–5; anchor-cookbook sem recipes novos (subagents, hooks, compaction, caching); astro-skills/tui/context precisam migrar os breaking changes. Release após `/code-review ultra` do diff acumulado.
+- [ ] **Golden set real** — harness da Phase 3 sem corpus autorado (50–200 queries); o CI-gate não tem o que gatear.
+- [ ] **Finalizar/rebasar `storage-layer-gaps`** (worktree `1f0afb0`, março) — ConversationStore desbloqueia histórico estruturado de tool calls cross-turn (hoje resumo truncado de 200 chars na memory) e compaction server-side cross-turn.
+
+**P1 — completa o loop e a plataforma:**
+- [ ] Approval/HITL seam — hooks têm allow/deny mas não "ask" (pausar turno p/ aprovação e retomar, estilo DeferredToolRequests)
+- [ ] Memory tool compat Anthropic (`memory_20250818`) + backend de memory file-based (padrão CLAUDE.md)
+- [ ] MCP 2026-07-28: ordering determinístico, `defer_loading` nos MCP tools (campo já existe no AgentTool, falta wire no bridge), transporte stateless, watch fastmcp; prompts/resources MCP nunca entram no contexto
+- [ ] Smoke tests live env-gated (estilo pgvector) — caching/tool_choice/context_management/input_examples nunca tocaram a API real
+- [ ] `pause_turn` no StopReason (API pode retornar; loop trataria como STOP)
+- [ ] Structured output first-class no Agent (`output_model` no chat) + opcional: retorno de subagent via tool_choice forçado
+
+**P2 — por demanda:**
+- [ ] Server tools no ToolSchema (type field: web_search, tool search server-native — hoje inexprimível)
+- [ ] Emulação client-side de `clear_tool_uses` (complementa a compaction emulada)
+- [ ] Timeout de tools sync via thread pool (`ponytail:` ceiling anotado)
+- [ ] RAG/storage extras: Docling, LanceDB, tree-sitter AST chunking, BGE-reranker-v2-m3; decidir late-interaction (reescrever ou deletar) e Redis (implementar ou dropar)
+- [ ] Concurrency cap para tools/subagents paralelos
+
+**Sequência sugerida:** event stream + budget enforcement primeiro (cumprem o que o MULTI_AGENT.md e o pitch prometem), storage-layer-gaps logo atrás (desbloqueia 2 itens), docs em paralelo.
+
+---
+
 ## Review log
 
 ### Phase 5 (bloco Anthropic provider + backlog P2) — shipped 2026-08-25
