@@ -7,7 +7,6 @@ them directly from the top-level package:
 from anchor import (
     AstroContextError,
     PipelineExecutionError,
-    TokenBudgetExceededError,
     RetrieverError,
     StorageError,
     FormatterError,
@@ -21,7 +20,6 @@ from anchor import (
 Exception
  └── AstroContextError
       ├── PipelineExecutionError
-      ├── TokenBudgetExceededError
       ├── RetrieverError
       ├── StorageError
       ├── FormatterError
@@ -60,10 +58,6 @@ except PipelineExecutionError as e:
     print(f"Failed at step: {e.diagnostics.get('failed_step')}")
     print(f"Steps completed: {e.diagnostics.get('steps', [])}")
 ```
-
-## `TokenBudgetExceededError`
-
-Raised when the token budget is exceeded and no overflow strategy can handle it.
 
 ## `RetrieverError`
 

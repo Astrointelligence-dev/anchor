@@ -11,7 +11,6 @@ __all__ = [
     "PipelineExecutionError",
     "RetrieverError",
     "StorageError",
-    "TokenBudgetExceededError",
 ]
 
 
@@ -26,9 +25,6 @@ class PipelineExecutionError(AstroContextError):
         super().__init__(message)
         self.diagnostics = diagnostics or {}
 
-
-class TokenBudgetExceededError(AstroContextError):
-    """Raised when token budget is exceeded and no overflow strategy can handle it."""
 
 
 class RetrieverError(AstroContextError):

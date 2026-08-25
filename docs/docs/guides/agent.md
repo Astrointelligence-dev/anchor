@@ -195,6 +195,33 @@ subagent's run arrive flat in the same stream with `parent_tool_call_id`
 set to the invoking tool call — top-level events leave it `None`, which
 is also how the text projections filter subagent text out.
 
+### Usage Limits
+
+`with_usage_limits` caps what a whole turn may spend — the loop-level
+complement to the pipeline's `TokenBudget`:
+
+```python
+from anchor import UsageLimits
+
+agent.with_usage_limits(UsageLimits(
+    total_tokens_limit=50_000,   # prompt+completion+cache, all rounds
+    tool_calls_limit=20,
+))
+```
+
+Crossing a limit never raises. The loop emits a `UsageLimitReached`
+event, gives the model one wrap-up round (the final-round notice plus
+`tool_choice="none"`), and ends the turn with
+`stopped_by="usage_limit"` in `TurnFinished.diagnostics` /
+`agent.last_turn`. Checks are post-hoc, so a turn can overshoot by the
+round in flight plus one bounded wrap-up call. Rounds themselves are
+capped by `max_rounds`.
+
+On providers that do not report usage on the stream (all but Anthropic
+today), per-round `prompt_tokens`/`completion_tokens` are estimated
+with the agent's tokenizer, so the limit is enforced consistently on
+every provider.
+
 ### Accessing the Last Result
 
 After calling `chat()` or `achat()`, the full `ContextResult` is available:

@@ -19,6 +19,16 @@ Token budgets solve this by:
   exceeds its cap.
 - **Tracking shared pool usage** -- diagnostics show how tokens flow.
 
+## Budget vs. Usage Limits
+
+`TokenBudget` governs **what enters the context window** when the
+pipeline assembles a turn: per-source allocations, priorities, and
+overflow strategies. It does not cap what an agent's tool loop spends
+across rounds — that is `Agent.with_usage_limits(UsageLimits(...))`,
+which stops the turn gracefully (`stopped_by="usage_limit"`) when a
+per-turn token or tool-call limit is crossed. See the
+[Agent Guide](../guides/agent.md#usage-limits).
+
 ## Core Models
 
 ### TokenBudget

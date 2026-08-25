@@ -111,7 +111,7 @@ Ingestion:
 
 Exceptions:
     AstroContextError, FormatterError, IngestionError, RetrieverError,
-    StorageError, TokenBudgetExceededError
+    StorageError
 
 Tokens:
     TiktokenCounter
@@ -171,7 +171,6 @@ from anchor.exceptions import (
     PipelineExecutionError,
     RetrieverError,
     StorageError,
-    TokenBudgetExceededError,
 )
 from anchor.formatters import (
     AnthropicFormatter,
@@ -635,7 +634,6 @@ __all__ = [
     "TiktokenCounter",
     "TimeoutError",
     "TokenBudget",
-    "TokenBudgetExceededError",
     "TokenLevelEncoder",
     "Tokenizer",
     "ToolCall",

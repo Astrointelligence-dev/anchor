@@ -98,14 +98,12 @@ class TestTopLevelExports:
             FormatterError,
             RetrieverError,
             StorageError,
-            TokenBudgetExceededError,
         )
 
         assert AstroContextError is not None
         assert FormatterError is not None
         assert RetrieverError is not None
         assert StorageError is not None
-        assert TokenBudgetExceededError is not None
 
     def test_retrieval_exports(self) -> None:
         from anchor import (
