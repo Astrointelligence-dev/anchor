@@ -66,8 +66,8 @@ logger = logging.getLogger(__name__)
 _TOOL_MEMORY_TRUNCATE = 200
 
 _FINAL_ROUND_NOTICE = (
-    "[system] Final round: the tool budget is exhausted. Respond with "
-    "your best final answer now — do not call tools."
+    "[system] Final round: the budget for this turn is exhausted. "
+    "Respond with your best final answer now — do not call tools."
 )
 
 
@@ -1384,7 +1384,11 @@ class Agent:
                     break
                 breach = self._check_usage_limits(rounds)
                 if breach is not None:
+                    # Set eagerly so an abandoned wrap-up still persists
+                    # the true cause; the wrap-up's _close_round
+                    # re-derives the same value on the happy path.
                     wrap_up = True
+                    stopped_by = "usage_limit"
                     yield breach
         finally:
             # Runs exactly once on every path. On abandonment or a
@@ -1459,7 +1463,11 @@ class Agent:
                     break
                 breach = self._check_usage_limits(rounds)
                 if breach is not None:
+                    # Set eagerly so an abandoned wrap-up still persists
+                    # the true cause; the wrap-up's _close_round
+                    # re-derives the same value on the happy path.
                     wrap_up = True
+                    stopped_by = "usage_limit"
                     yield breach
         finally:
             # Runs exactly once on every path. On abandonment or a

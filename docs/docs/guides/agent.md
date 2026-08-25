@@ -186,8 +186,9 @@ The event vocabulary: `TurnStarted`, `RoundStarted`, `TextDelta`,
 `ToolStarted`/`ToolFinished` (correlated by `tool_call_id` — tool calls
 run concurrently in the async path and finish events arrive live, in
 completion order), `CompactionStarted`/`CompactionFinished`,
-`RoundFinished` (with per-round `RoundUsage`), and a terminal
-`TurnFinished` carrying the final text and `TurnDiagnostics`.
+`RoundFinished` (with per-round `RoundUsage`), `UsageLimitReached`
+(a usage limit was crossed; see below), and a terminal `TurnFinished`
+carrying the final text and `TurnDiagnostics`.
 
 Tool failures surface as `ToolFinished(is_error=True)`, not exceptions;
 only turn-level failures (provider, MCP) raise. Events forwarded from a
@@ -221,6 +222,10 @@ On providers that do not report usage on the stream (all but Anthropic
 today), per-round `prompt_tokens`/`completion_tokens` are estimated
 with the agent's tokenizer, so the limit is enforced consistently on
 every provider.
+
+The limit covers the turn's own rounds; LLM calls made outside them —
+compaction summarization and a subagent's internal rounds — are not
+counted (a subagent enforces its own limits, if configured).
 
 ### Accessing the Last Result
 

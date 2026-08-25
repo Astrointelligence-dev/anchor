@@ -87,6 +87,12 @@ async def test_total_tokens_breach_async_mirror():
     assert isinstance(final, TurnFinished)
     assert final.diagnostics.stopped_by == "usage_limit"
     assert len(provider.seen_messages) == 2
+    # Pin the async wrap-up wiring (notice + forced tool_choice) — the
+    # loop bodies are hand-mirrored, so the mirror must assert both.
+    assert any(
+        "Final round" in str(m.content) for m in provider.seen_messages[1]
+    )
+    assert provider.seen_kwargs[1]["tool_choice"] == "none"
 
 
 def test_turn_below_limit_unaffected():
