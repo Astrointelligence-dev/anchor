@@ -40,14 +40,14 @@ class AsyncCrossEncoderReranker:
         self,
         query: QueryBundle,
         items: list[ContextItem],
-        top_k: int = 10,
+        top_k: int | None = None,
     ) -> list[ContextItem]:
         """Asynchronously rerank items using cross-encoder scoring.
 
         Parameters:
             query: The query bundle containing the user's query text.
             items: Candidate context items to rerank.
-            top_k: Maximum number of items to return.
+            top_k: Maximum number of items to return. ``None`` returns all.
 
         Returns:
             Reranked list of context items, truncated to ``top_k``.
@@ -62,7 +62,10 @@ class AsyncCrossEncoderReranker:
         scored: list[tuple[float, ContextItem]] = []
         for score, item in zip(scores, items, strict=True):
             clamped = max(0.0, min(1.0, score))
-            updated = item.model_copy(update={"score": clamped})
+            updated = item.model_copy(update={
+                "score": clamped,
+                "metadata": {**item.metadata, "raw_score": score},
+            })
             scored.append((score, updated))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -73,21 +76,22 @@ class AsyncCohereReranker:
     """Async reranker using a batch reranking callback.
 
     The callback receives ``(query_str, documents, top_k)`` and returns
-    a list of ranked indices. This class maps those indices back to
-    ``ContextItem`` objects.
+    a list of ``(original_index, score)`` tuples in ranked order — the
+    same shape as the sync ``CohereReranker``. This class maps those
+    back to ``ContextItem`` objects with updated scores.
 
     Implements the ``AsyncReranker`` protocol.
 
     Parameters:
         rerank_fn: Async callable that takes ``(query, documents, top_k)``
-            and returns a list of original indices in ranked order.
+            and returns a list of ``(index, score)`` tuples in ranked order.
     """
 
     __slots__ = ("_rerank_fn",)
 
     def __init__(
         self,
-        rerank_fn: Callable[[str, list[str], int], Awaitable[list[int]]],
+        rerank_fn: Callable[[str, list[str], int], Awaitable[list[tuple[int, float]]]],
     ) -> None:
         self._rerank_fn = rerank_fn
 
@@ -98,27 +102,35 @@ class AsyncCohereReranker:
         self,
         query: QueryBundle,
         items: list[ContextItem],
-        top_k: int = 10,
+        top_k: int | None = None,
     ) -> list[ContextItem]:
         """Asynchronously rerank items using the batch reranking callback.
 
         Parameters:
             query: The query bundle containing the user's query text.
             items: Candidate context items to rerank.
-            top_k: Maximum number of items to return.
+            top_k: Maximum number of items to return. ``None`` returns all.
 
         Returns:
-            Reranked list of context items in ranked order.
+            Reranked list of context items with updated scores.
         """
         if not items:
             return []
 
+        effective_top_k = top_k if top_k is not None else len(items)
         documents = [item.content for item in items]
-        indices = await self._rerank_fn(query.query_str, documents, top_k)
+        ranked_results = await self._rerank_fn(
+            query.query_str, documents, effective_top_k
+        )
 
         result: list[ContextItem] = []
-        for idx in indices:
+        for idx, score in ranked_results:
             if 0 <= idx < len(items):
-                result.append(items[idx])
+                clamped = max(0.0, min(1.0, score))
+                updated = items[idx].model_copy(update={
+                    "score": clamped,
+                    "metadata": {**items[idx].metadata, "raw_score": score},
+                })
+                result.append(updated)
 
-        return result[:top_k]
+        return result[:effective_top_k]

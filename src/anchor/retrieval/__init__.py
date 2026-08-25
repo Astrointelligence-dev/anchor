@@ -12,7 +12,6 @@ from .late_interaction import (
     MaxSimScorer,
 )
 from .memory_retriever import MemoryRetrieverAdapter, ScoredMemoryRetriever
-from .reranker import ScoreReranker
 from .rerankers import (
     CohereReranker,
     CrossEncoderReranker,
@@ -44,7 +43,6 @@ __all__ = [
     "RerankerPipeline",
     "RoundRobinReranker",
     "RoutedRetriever",
-    "ScoreReranker",
     "ScoredMemoryRetriever",
     "SharedSpaceRetriever",
     "SparseRetriever",

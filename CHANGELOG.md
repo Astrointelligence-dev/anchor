@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `metadata["raw_score"]` on all retriever and reranker results, preserving the unclamped/unnormalized score (raw cosine, raw BM25, raw reranker logits) so quality thresholds are possible
+- `min_score` parameter on `DenseRetriever` and `SparseRetriever` to filter results below a raw-score threshold
+- SOTA 2026 research docs (`docs/research/2026-08-25-*`) and phased upgrade plan (`docs/plans/2026-08-25-sota-upgrade-plan.md`)
 - Multi-provider LLM interface (`anchor.llm`) with support for Anthropic, OpenAI, Gemini, Grok, Ollama, OpenRouter, and LiteLLM
 - `LLMProvider` protocol and `BaseLLMProvider` ABC with built-in retry and timeout logic
 - `create_provider()` factory with `"provider/model"` string format and automatic lazy loading
@@ -27,11 +30,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README sections for Priority System (1--10 scale) and Token Budgets
 
 ### Changed
+- Reranker `rerank()`/`arerank()` signatures: `top_k: int = 10` → `top_k: int | None = None`; an explicit `top_k` now always overrides the constructor value, `None` falls back to it (applies to all rerankers, the `Reranker`/`AsyncReranker` protocols, and `reranker_step`/`async_reranker_step`)
+- `AsyncCohereReranker` callback now returns `(index, score)` tuples, matching the sync `CohereReranker` shape, and applies scores to results
+- `HybridRetriever` and `AsyncHybridRetriever` now delegate fusion to the canonical `rrf_fuse` (single RRF implementation); `rrf_fuse` gained a `retrieval_method` label parameter
+- `AsyncHybridRetriever` raises `RetrieverError` when all sub-retrievers fail, matching the sync behavior (previously returned `[]`)
+- All cosine-similarity call sites (`SemanticChunker`, late interaction, cross-modal, `EmbeddingClassifier`) now use the strict `anchor._math.cosine_similarity` — dimension mismatches raise instead of silently truncating
+- Repo workflow: `docs/superpowers/` retired; specs/plans live in `docs/plans/`, research in `docs/research/`
 - `Agent` constructor: `client` parameter replaced with `llm: LLMProvider` and `fallbacks: list[str]`
 - `Role` and `StopReason` enums changed from `(str, Enum)` to `StrEnum` for correct string formatting
 - `AgentTool`: removed `to_anthropic_schema()`, `to_openai_schema()`, `to_generic_schema()`; replaced with unified `to_tool_schema() -> ToolSchema`
 
+### Removed
+- `ScoreReranker` (dead duplicate of `CrossEncoderReranker` implementing the wrong protocol)
+
 ### Fixed
+- **Reranker `top_k` sentinel bug**: passing `top_k=10` explicitly was indistinguishable from the default and silently discarded in all five rerankers; the pipeline `reranker_step` default hit this on every run
+- `RecursiveCharacterChunker` applied overlap at every recursion level, duplicating overlap text in nested sub-chunks; overlap is now applied exactly once over the final chunk list
+- `SqliteVectorStore` unpacked stored embeddings using the *query* vector's dimension — a query/stored dimension mismatch silently mis-unpacked or crashed with `struct.error`; the dimension now derives from the stored blob and mismatches raise a clear `ValueError`
 - 34 pre-existing test failures caused by missing optional dependencies (tiktoken, rank-bm25)
 - `FallbackProvider.astream` mid-stream fallback semantics (yields now outside try/except)
 - `test_consolidator.py`: eliminated shared mutable state (`_orthogonal_index` dict) by converting to factory function pattern (`make_orthogonal_embed()`)

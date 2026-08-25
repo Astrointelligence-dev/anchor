@@ -7,11 +7,11 @@ protocol for token-aware splitting.  Zero external dependencies required.
 from __future__ import annotations
 
 import logging
-import math
 import re
 from collections.abc import Callable
 from typing import Any
 
+from anchor._math import cosine_similarity
 from anchor.protocols.tokenizer import Tokenizer
 from anchor.tokens.counter import get_default_counter
 
@@ -158,7 +158,10 @@ class RecursiveCharacterChunker:
         """
         if not text or not text.strip():
             return []
-        return self._split(text, 0)
+        # Overlap is applied exactly once, over the final flat chunk list.
+        # _split is recursive; applying overlap inside it would re-apply
+        # overlap to sub-chunks at every recursion level.
+        return self._apply_overlap(self._split(text, 0))
 
     def _split(self, text: str, sep_idx: int) -> list[str]:
         """Recursively split text, falling back to finer separators."""
@@ -195,7 +198,7 @@ class RecursiveCharacterChunker:
         if current.strip():
             chunks.append(current.strip())
 
-        return self._apply_overlap(chunks)
+        return chunks
 
     def _apply_overlap(self, chunks: list[str]) -> list[str]:
         """Apply token-based overlap between adjacent chunks."""
@@ -317,25 +320,6 @@ class SentenceChunker:
         )
 
 
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors.
-
-    Parameters:
-        a: First embedding vector.
-        b: Second embedding vector.
-
-    Returns:
-        Cosine similarity in ``[-1, 1]``.  Returns ``0.0`` when either
-        vector has zero magnitude.
-    """
-    dot = sum(x * y for x, y in zip(a, b, strict=False))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0.0 or mag_b == 0.0:
-        return 0.0
-    return dot / (mag_a * mag_b)
-
-
 class SemanticChunker:
     """Split text at semantic boundaries using embedding similarity.
 
@@ -409,7 +393,7 @@ class SemanticChunker:
         # Identify split points where similarity drops below threshold
         split_indices: list[int] = []
         for i in range(len(embeddings) - 1):
-            sim = _cosine_similarity(embeddings[i], embeddings[i + 1])
+            sim = cosine_similarity(embeddings[i], embeddings[i + 1])
             if sim < self._threshold:
                 split_indices.append(i + 1)
 

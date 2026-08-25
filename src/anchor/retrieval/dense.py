@@ -21,7 +21,7 @@ class DenseRetriever:
     Implements the Retriever protocol.
     """
 
-    __slots__ = ("_context_store", "_embed_fn", "_tokenizer", "_vector_store")
+    __slots__ = ("_context_store", "_embed_fn", "_min_score", "_tokenizer", "_vector_store")
 
     def __init__(
         self,
@@ -29,11 +29,13 @@ class DenseRetriever:
         context_store: ContextStore,
         embed_fn: Callable[[str], list[float]] | None = None,
         tokenizer: Tokenizer | None = None,
+        min_score: float | None = None,
     ) -> None:
         self._vector_store = vector_store
         self._context_store = context_store
         self._embed_fn = embed_fn
         self._tokenizer = tokenizer or get_default_counter()
+        self._min_score = min_score
 
     def __repr__(self) -> str:
         return (
@@ -66,13 +68,19 @@ class DenseRetriever:
         results = self._vector_store.search(query_embedding, top_k=top_k)
         items: list[ContextItem] = []
         for item_id, score in results:
+            if self._min_score is not None and score < self._min_score:
+                continue
             item = self._context_store.get(item_id)
             if item is not None:
                 scored_item = item.model_copy(update={
                     "source": SourceType.RETRIEVAL,
                     "score": min(1.0, max(0.0, score)),
                     "token_count": item.token_count or self._tokenizer.count_tokens(item.content),
-                    "metadata": {**item.metadata, "retrieval_method": "dense"},
+                    "metadata": {
+                        **item.metadata,
+                        "retrieval_method": "dense",
+                        "raw_score": score,
+                    },
                 })
                 items.append(scored_item)
         return items

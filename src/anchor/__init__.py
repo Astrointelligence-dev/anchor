@@ -39,7 +39,7 @@ Memory Management:
     EbbinghausDecay, LinearDecay
 
 Retrieval:
-    DenseRetriever, SparseRetriever, HybridRetriever, ScoreReranker,
+    DenseRetriever, SparseRetriever, HybridRetriever,
     CrossEncoderReranker, CohereReranker, FlashRankReranker,
     RoundRobinReranker, RerankerPipeline,
     ScoredMemoryRetriever, MemoryRetrieverAdapter, rrf_fuse,
@@ -347,7 +347,6 @@ from anchor.retrieval import (
     RoundRobinReranker,
     RoutedRetriever,
     ScoredMemoryRetriever,
-    ScoreReranker,
     SharedSpaceRetriever,
     SparseRetriever,
     rrf_fuse,
@@ -563,7 +562,6 @@ __all__ = [
     "Role",
     "RoundRobinReranker",
     "RoutedRetriever",
-    "ScoreReranker",
     "ScoredMemoryRetriever",
     "SemanticChunker",
     "SentenceChunker",

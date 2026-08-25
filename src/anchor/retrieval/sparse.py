@@ -25,17 +25,19 @@ class SparseRetriever:
     Implements the Retriever protocol.
     """
 
-    __slots__ = ("_bm25", "_items", "_tokenize_fn", "_tokenizer")
+    __slots__ = ("_bm25", "_items", "_min_score", "_tokenize_fn", "_tokenizer")
 
     def __init__(
         self,
         tokenize_fn: Callable[[str], list[str]] | None = None,
         tokenizer: Tokenizer | None = None,
+        min_score: float | None = None,
     ) -> None:
         self._tokenize_fn = tokenize_fn or self._default_tokenize
         self._bm25: BM25Okapi | None = None
         self._items: list[ContextItem] = []
         self._tokenizer = tokenizer or get_default_counter()
+        self._min_score = min_score
 
     def __repr__(self) -> str:
         return (
@@ -80,19 +82,27 @@ class SparseRetriever:
         max_score = raw_max if raw_max > 0 else 1.0
 
         # Use heapq.nlargest for O(N log K) instead of full sort O(N log N)
-        scored_indices = [(float(s / max_score), i) for i, s in enumerate(scores)]
+        # score field is max-normalized (ContextItem.score is [0,1]); the raw
+        # BM25 score is preserved in metadata["raw_score"] for thresholding.
+        scored_indices = [(float(s / max_score), float(s), i) for i, s in enumerate(scores)]
         top_entries = heapq.nlargest(top_k, scored_indices)
 
         items: list[ContextItem] = []
-        for score, idx in top_entries:
+        for score, raw_score, idx in top_entries:
             if score <= 0:
+                continue
+            if self._min_score is not None and raw_score < self._min_score:
                 continue
             item = self._items[idx]
             scored_item = item.model_copy(update={
                 "source": SourceType.RETRIEVAL,
                 "score": score,
                 "token_count": item.token_count or self._tokenizer.count_tokens(item.content),
-                "metadata": {**item.metadata, "retrieval_method": "sparse_bm25"},
+                "metadata": {
+                    **item.metadata,
+                    "retrieval_method": "sparse_bm25",
+                    "raw_score": raw_score,
+                },
             })
             items.append(scored_item)
         return items

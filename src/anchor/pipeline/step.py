@@ -119,7 +119,9 @@ def async_postprocessor_step(name: str, processor: AsyncPostProcessor) -> Pipeli
     return PipelineStep(name=name, fn=_aprocess, is_async=True)
 
 
-def reranker_step(name: str, reranker: Reranker, top_k: int = 10) -> PipelineStep:
+def reranker_step(
+    name: str, reranker: Reranker, top_k: int | None = None
+) -> PipelineStep:
     """Create a pipeline step from a Reranker protocol implementation.
 
     The reranker receives the current items and query, scores them,
@@ -129,6 +131,7 @@ def reranker_step(name: str, reranker: Reranker, top_k: int = 10) -> PipelineSte
         name: Human-readable name for the step.
         reranker: Any object implementing the Reranker protocol.
         top_k: Maximum number of items the reranker should return.
+            ``None`` defers to the reranker's own configured ``top_k``.
 
     Returns:
         A ``PipelineStep`` that applies the reranker to the pipeline items.
@@ -140,13 +143,16 @@ def reranker_step(name: str, reranker: Reranker, top_k: int = 10) -> PipelineSte
     return PipelineStep(name=name, fn=_rerank)
 
 
-def async_reranker_step(name: str, reranker: AsyncReranker, top_k: int = 10) -> PipelineStep:
+def async_reranker_step(
+    name: str, reranker: AsyncReranker, top_k: int | None = None
+) -> PipelineStep:
     """Create an async pipeline step from an AsyncReranker implementation.
 
     Parameters:
         name: Human-readable name for the step.
         reranker: Any object implementing the AsyncReranker protocol.
         top_k: Maximum number of items the reranker should return.
+            ``None`` defers to the reranker's own configured ``top_k``.
 
     Returns:
         An async ``PipelineStep`` that applies the reranker.

@@ -7,8 +7,10 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from anchor._math import cosine_similarity
+from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
+from anchor.retrieval._rrf import rrf_fuse
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,7 @@ class AsyncDenseRetriever:
                     "metadata": {
                         **item.metadata,
                         "retrieval_method": "async_dense",
+                        "raw_score": score,
                     },
                 }
             )
@@ -177,42 +180,13 @@ class AsyncHybridRetriever:
             successful_weights.append(weight)
 
         if not all_rankings:
-            return []
+            msg = "All sub-retrievers failed during hybrid retrieval"
+            raise RetrieverError(msg)
 
-        rrf_scores: dict[str, float] = {}
-        item_map: dict[str, ContextItem] = {}
-
-        for ranking, weight in zip(all_rankings, successful_weights, strict=True):
-            for rank, item in enumerate(ranking, start=1):
-                rrf_scores[item.id] = rrf_scores.get(item.id, 0.0) + weight / (self._k + rank)
-                if item.id not in item_map or item.score > item_map[item.id].score:
-                    item_map[item.id] = item
-
-        sorted_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)[:top_k]
-
-        if not sorted_ids:
-            return []
-
-        max_rrf = rrf_scores[sorted_ids[0]]
-        min_rrf = rrf_scores[sorted_ids[-1]] if len(sorted_ids) > 1 else 0.0
-        score_range = max_rrf - min_rrf if max_rrf > min_rrf else 1.0
-
-        fused_results: list[ContextItem] = []
-        for item_id in sorted_ids:
-            original = item_map[item_id]
-            normalized_score = (
-                (rrf_scores[item_id] - min_rrf) / score_range if score_range > 0 else 1.0
-            )
-            fused_item = original.model_copy(
-                update={
-                    "score": min(1.0, max(0.0, normalized_score)),
-                    "metadata": {
-                        **original.metadata,
-                        "retrieval_method": "async_hybrid_rrf",
-                        "rrf_raw_score": rrf_scores[item_id],
-                    },
-                }
-            )
-            fused_results.append(fused_item)
-
-        return fused_results
+        return rrf_fuse(
+            all_rankings,
+            weights=successful_weights,
+            k=self._k,
+            top_k=top_k,
+            retrieval_method="async_hybrid_rrf",
+        )

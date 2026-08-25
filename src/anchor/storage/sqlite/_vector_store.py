@@ -21,9 +21,15 @@ def _pack_embedding(embedding: list[float]) -> bytes:
     return struct.pack(f"{len(embedding)}f", *embedding)
 
 
-def _unpack_embedding(blob: bytes, dim: int) -> list[float]:
-    """Unpack a binary blob back into a float list."""
-    return list(struct.unpack(f"{dim}f", blob))
+def _unpack_embedding(blob: bytes) -> list[float]:
+    """Unpack a binary blob back into a float list.
+
+    The dimension is derived from the blob length (4 bytes per float32),
+    never from the query vector — a query/stored dimension mismatch then
+    surfaces as a clear ``ValueError`` from cosine_similarity instead of
+    silently mis-unpacking.
+    """
+    return list(struct.unpack(f"{len(blob) // 4}f", blob))
 
 
 class SqliteVectorStore:
@@ -68,10 +74,9 @@ class SqliteVectorStore:
         if not rows:
             return []
 
-        dim = len(query_embedding)
         results: list[tuple[str, float]] = []
         for row in rows:
-            emb = _unpack_embedding(row["embedding_blob"], dim)
+            emb = _unpack_embedding(row["embedding_blob"])
             score = cosine_similarity(query_embedding, emb)
             results.append((row["item_id"], score))
         return heapq.nlargest(top_k, results, key=lambda x: x[1])
@@ -126,10 +131,9 @@ class AsyncSqliteVectorStore:
         if not rows:
             return []
 
-        dim = len(query_embedding)
         results: list[tuple[str, float]] = []
         for row in rows:
-            emb = _unpack_embedding(row["embedding_blob"], dim)
+            emb = _unpack_embedding(row["embedding_blob"])
             score = cosine_similarity(query_embedding, emb)
             results.append((row["item_id"], score))
         return heapq.nlargest(top_k, results, key=lambda x: x[1])
