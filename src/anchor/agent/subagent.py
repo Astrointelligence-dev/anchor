@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from anchor._text import strip_markdown_fences
+from anchor.agent.events import TurnFinished, _forward
 from anchor.agent.models import AgentTool
 from anchor.agent.tool_decorator import tool
 
@@ -114,20 +115,40 @@ def _task_prompt(task: str, output_model: type[BaseModel] | None) -> str:
     return f"{task}{_schema_instruction(output_model)}"
 
 
+def _one_turn_sync(sub: Agent, prompt: str) -> str:
+    """One child turn: forward its events to the parent's sink, return text."""
+    text = ""
+    for event in sub.stream(prompt):
+        _forward(event)
+        if isinstance(event, TurnFinished):
+            text = event.text
+    return text
+
+
+async def _one_turn_async(sub: Agent, prompt: str) -> str:
+    """Async mirror of :func:`_one_turn_sync`."""
+    text = ""
+    async for event in sub.astream(prompt):
+        _forward(event)
+        if isinstance(event, TurnFinished):
+            text = event.text
+    return text
+
+
 def _run_sync(
     sub: Agent,
     task: str,
     output_model: type[BaseModel] | None,
     max_output_retries: int,
 ) -> str:
-    text = "".join(sub.chat(_task_prompt(task, output_model)))
+    text = _one_turn_sync(sub, _task_prompt(task, output_model))
     if output_model is None:
         return text
     normalized, err = _validate_output(text, output_model)
     for _ in range(max_output_retries):
         if err is None:
             break
-        text = "".join(sub.chat(_retry_prompt(text, err, output_model)))
+        text = _one_turn_sync(sub, _retry_prompt(text, err, output_model))
         normalized, err = _validate_output(text, output_model)
     if err is not None or normalized is None:
         msg = f"subagent output failed schema validation: {err}"
@@ -141,7 +162,7 @@ async def _run_async(
     output_model: type[BaseModel] | None,
     max_output_retries: int,
 ) -> str:
-    text = "".join([c async for c in sub.achat(_task_prompt(task, output_model))])
+    text = await _one_turn_async(sub, _task_prompt(task, output_model))
     if output_model is None:
         return text
     normalized, err = _validate_output(text, output_model)
@@ -149,7 +170,7 @@ async def _run_async(
         if err is None:
             break
         retry = _retry_prompt(text, err, output_model)
-        text = "".join([c async for c in sub.achat(retry)])
+        text = await _one_turn_async(sub, retry)
         normalized, err = _validate_output(text, output_model)
     if err is not None or normalized is None:
         msg = f"subagent output failed schema validation: {err}"

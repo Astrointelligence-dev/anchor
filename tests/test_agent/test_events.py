@@ -305,3 +305,106 @@ def test_compaction_events_in_stream():
     assert len(started) == 1
     assert len(finished) == 1
     assert finished[0].tokens_before > finished[0].tokens_after
+
+
+# ---------------------------------------------------------------------------
+# Subagent events forwarded flat (parent_tool_call_id)
+# ---------------------------------------------------------------------------
+
+
+def _sub(responses: list[list[Any]]) -> Agent:
+    sub = Agent(llm=FakeLLMProvider(responses), tokenizer=_Tok())
+    sub.with_system_prompt("You are a researcher.")
+    return sub
+
+
+def test_sync_subagent_events_forwarded_with_parent_id():
+    sub = _sub([_text_response("42")])
+    orch, _ = _agent([
+        _tool_use_response("tu_1", "researcher", {"task": "Find the answer."}),
+        _text_response("The answer is 42."),
+    ])
+    orch.with_tools([sub.as_tool("researcher", "Researches questions")])
+
+    events = list(orch.stream("Go"))
+
+    child = [e for e in events if e.parent_tool_call_id is not None]
+    assert child, "expected forwarded subagent events"
+    assert all(e.parent_tool_call_id == "tu_1" for e in child)
+    # The child ran a full turn: its lifecycle arrives flat in order.
+    assert [e.type for e in child] == [
+        "turn_started", "round_started", "text_delta",
+        "round_finished", "turn_finished",
+    ]
+    # Forwarded events land between the parent call's started/finished.
+    types = [(e.type, e.parent_tool_call_id) for e in events]
+    started_at = types.index(("tool_started", None))
+    finished_at = types.index(("tool_finished", None))
+    child_positions = [
+        i for i, e in enumerate(events) if e.parent_tool_call_id is not None
+    ]
+    assert all(started_at < i < finished_at for i in child_positions)
+    # The parent's terminal event is last and top-level.
+    assert isinstance(events[-1], TurnFinished)
+    assert events[-1].parent_tool_call_id is None
+
+
+def test_chat_excludes_subagent_text():
+    sub = _sub([_text_response("42")])
+    orch, _ = _agent([
+        _tool_use_response("tu_1", "researcher", {"task": "Find the answer."}),
+        _text_response("The answer is 42."),
+    ])
+    orch.with_tools([sub.as_tool("researcher", "Researches questions")])
+
+    assert "".join(orch.chat("Go")) == "The answer is 42."
+
+
+async def test_async_subagent_events_forwarded_with_parent_id():
+    from anchor.agent import SubagentDefinition
+
+    # The declarative path shares the orchestrator's provider, so the
+    # fake's responses interleave: orch round 1, subagent turn, orch
+    # round 2.
+    orch_responses = [
+        _tool_use_response(
+            "tu_1", "task",
+            {"agent_name": "researcher", "task": "Find the answer."},
+        ),
+        _text_response("42"),
+        _text_response("The answer is 42."),
+    ]
+    orch, _ = _agent(orch_responses)
+    orch.with_subagents([
+        SubagentDefinition(name="researcher", description="Researches"),
+    ])
+    events = [e async for e in orch.astream("Go")]
+
+    child = [e for e in events if e.parent_tool_call_id is not None]
+    assert child, "expected forwarded subagent events"
+    assert all(e.parent_tool_call_id == "tu_1" for e in child)
+    child_deltas = [e for e in child if isinstance(e, TextDelta)]
+    assert [e.text for e in child_deltas] == ["42"]
+    # Forwarded child TurnFinished is not the parent terminal.
+    assert isinstance(events[-1], TurnFinished)
+    assert events[-1].parent_tool_call_id is None
+    assert events[-1].text == "The answer is 42."
+
+
+async def test_achat_excludes_subagent_text():
+    from anchor.agent import SubagentDefinition
+
+    orch, _ = _agent([
+        _tool_use_response(
+            "tu_1", "task",
+            {"agent_name": "researcher", "task": "Find the answer."},
+        ),
+        _text_response("42"),
+        _text_response("The answer is 42."),
+    ])
+    orch.with_subagents([
+        SubagentDefinition(name="researcher", description="Researches"),
+    ])
+
+    chunks = [c async for c in orch.achat("Go")]
+    assert "".join(chunks) == "The answer is 42."

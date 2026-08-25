@@ -32,6 +32,7 @@ from anchor.pipeline.pipeline import ContextPipeline
 from anchor.protocols.tokenizer import Tokenizer
 
 from .events import (
+    _EVENT_SINK,
     AgentEvent,
     CompactionFinished,
     CompactionStarted,
@@ -792,13 +793,22 @@ class Agent:
         """Execute calls sequentially, yielding started/finished events.
 
         Completed ``ToolResult`` objects are appended to *results*.
+        Events a subagent forwards during the call are buffered and
+        yielded before its ``ToolFinished`` (a sync consumer is blocked
+        while the tool runs, so live delivery is impossible anyway).
         """
         for tc in tool_calls:
             yield ToolStarted(
                 tool_call_id=tc.id, name=tc.name, tool_input=tc.arguments,
             )
-            result = self._execute_call(tc)
+            forwarded: list[AgentEvent] = []
+            token = _EVENT_SINK.set((forwarded.append, tc.id))
+            try:
+                result = self._execute_call(tc)
+            finally:
+                _EVENT_SINK.reset(token)
             results.append(result)
+            yield from forwarded
             yield self._tool_finished(tc, result)
 
     async def _astream_tools(
@@ -808,13 +818,17 @@ class Agent:
 
         All ``ToolStarted`` events are emitted up front (the calls do
         start together); each ``ToolFinished`` is emitted as its call
-        completes. *results* receives the ToolResults in call order.
-        An exception escaping a call is converted through
+        completes, interleaved with events subagents forward through
+        the per-task event sink. *results* receives the ToolResults in
+        call order. An exception escaping a call is converted through
         ``_error_result`` (firing ``on_tool_error``); cancellation
         propagates and pending calls are cancelled.
         """
+        queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
 
         async def _one(index: int, tc: ToolCall) -> tuple[int, ToolResult]:
+            # Each task owns a context copy, so the sink is per-call.
+            _EVENT_SINK.set((queue.put_nowait, tc.id))
             try:
                 return index, await self._aexecute_call(tc)
             except Exception as exc:
@@ -832,16 +846,53 @@ class Agent:
             asyncio.ensure_future(_one(i, tc)) for i, tc in enumerate(tool_calls)
         ]
         ordered: list[ToolResult | None] = [None] * len(tool_calls)
+        async for event in self._merge_tool_events(
+            tool_calls, tasks, queue, ordered,
+        ):
+            yield event
+        results.extend(r for r in ordered if r is not None)
+
+    async def _merge_tool_events(
+        self,
+        tool_calls: list[ToolCall],
+        tasks: list[asyncio.Task[tuple[int, ToolResult]]],
+        queue: asyncio.Queue[AgentEvent],
+        ordered: list[ToolResult | None],
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Interleave forwarded child events with tool completions.
+
+        Waits on the running tool tasks and the event queue at once, so
+        a subagent's events surface while sibling calls are still
+        running. Cancels everything still pending on the way out.
+        """
+        pending: set[asyncio.Task[tuple[int, ToolResult]]] = set(tasks)
+        getter: asyncio.Task[AgentEvent] | None = None
         try:
-            for fut in asyncio.as_completed(tasks):
-                index, result = await fut
-                ordered[index] = result
-                yield self._tool_finished(tool_calls[index], result)
+            while pending:
+                if getter is None:
+                    getter = asyncio.ensure_future(queue.get())
+                done, _ = await asyncio.wait(
+                    {*pending, getter}, return_when=asyncio.FIRST_COMPLETED,
+                )
+                if getter.done():
+                    yield getter.result()
+                    getter = None
+                    while not queue.empty():
+                        yield queue.get_nowait()
+                for task in done & pending:
+                    pending.discard(task)
+                    index, result = task.result()
+                    ordered[index] = result
+                    # A call's forwarded events precede its ToolFinished.
+                    while not queue.empty():
+                        yield queue.get_nowait()
+                    yield self._tool_finished(tool_calls[index], result)
         finally:
+            if getter is not None:
+                getter.cancel()
             for task in tasks:
                 if not task.done():
                     task.cancel()
-        results.extend(r for r in ordered if r is not None)
 
     def _record_tool_call(
         self, name: str, tool_input: dict[str, Any], result: str,

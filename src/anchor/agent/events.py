@@ -8,6 +8,8 @@ call's id in ``parent_tool_call_id``; top-level events leave it ``None``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -110,3 +112,22 @@ AgentEvent = (
     | RoundFinished
     | TurnFinished
 )
+
+
+# Per-tool-call event sink: ``(emit, parent_tool_call_id)``. The loop's
+# tool phase sets it around each call; a subagent runner executing
+# inside that call forwards the child's events through ``emit`` with
+# ``parent_tool_call_id`` stamped, flattening nested runs into the
+# parent stream. Each asyncio task gets its own context copy, so
+# parallel tool calls never see each other's sink.
+_EVENT_SINK: ContextVar[tuple[Callable[[AgentEvent], None], str] | None] = (
+    ContextVar("anchor_agent_event_sink", default=None)
+)
+
+
+def _forward(event: AgentEvent) -> None:
+    """Emit *event* to the active sink (if any) with the parent id set."""
+    sink = _EVENT_SINK.get()
+    if sink is not None:
+        emit, parent_id = sink
+        emit(event.model_copy(update={"parent_tool_call_id": parent_id}))
