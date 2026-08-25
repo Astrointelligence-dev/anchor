@@ -618,6 +618,10 @@ class Agent:
             return tool, tool_input, f"Error: tool '{name}' denied: {deny}"
         return tool, tool_input, None
 
+    @staticmethod
+    def _tool_failure_text(name: str, exc: BaseException) -> str:
+        return f"Error: tool '{name}' failed: {type(exc).__name__}: {exc}"
+
     def _error_result(
         self, tc: ToolCall, tool_input: dict[str, Any], error_text: str,
     ) -> ToolResult:
@@ -645,10 +649,9 @@ class Agent:
             output = tool.fn(**tool_input)
         except Exception as exc:
             logger.exception("Tool '%s' failed", tc.name)
-            error_text = (
-                f"Error: tool '{tc.name}' failed: {type(exc).__name__}: {exc}"
+            return self._error_result(
+                tc, tool_input, self._tool_failure_text(tc.name, exc),
             )
-            return self._error_result(tc, tool_input, error_text)
         return self._ok_result(tc, tool_input, output)
 
     async def _aexecute_call(self, tc: ToolCall) -> ToolResult:
@@ -678,10 +681,9 @@ class Agent:
             return self._error_result(tc, tool_input, error_text)
         except Exception as exc:
             logger.exception("Tool '%s' failed", tc.name)
-            error_text = (
-                f"Error: tool '{tc.name}' failed: {type(exc).__name__}: {exc}"
+            return self._error_result(
+                tc, tool_input, self._tool_failure_text(tc.name, exc),
             )
-            return self._error_result(tc, tool_input, error_text)
         return self._ok_result(tc, tool_input, output)
 
     async def _aexecute_tool(self, name: str, tool_input: dict[str, Any]) -> str:
@@ -833,10 +835,9 @@ class Agent:
                 return index, await self._aexecute_call(tc)
             except Exception as exc:
                 logger.exception("Tool '%s' failed", tc.name)
-                error_text = (
-                    f"Error: tool '{tc.name}' failed: {type(exc).__name__}: {exc}"
+                return index, self._error_result(
+                    tc, tc.arguments, self._tool_failure_text(tc.name, exc),
                 )
-                return index, self._error_result(tc, tc.arguments, error_text)
 
         for tc in tool_calls:
             yield ToolStarted(
@@ -888,11 +889,16 @@ class Agent:
                         yield queue.get_nowait()
                     yield self._tool_finished(tool_calls[index], result)
         finally:
+            leftover = [t for t in tasks if not t.done()]
             if getter is not None:
-                getter.cancel()
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
+                leftover.append(getter)
+            for fut in leftover:
+                fut.cancel()
+            if leftover:
+                # Await the cancellations so in-flight tool calls (MCP
+                # sessions, subagent turns) finish their cleanup before
+                # aclose() returns — no orphaned pending tasks.
+                await asyncio.gather(*leftover, return_exceptions=True)
 
     def _record_tool_call(
         self, name: str, tool_input: dict[str, Any], result: str,
@@ -1243,11 +1249,12 @@ class Agent:
         final_text = ""
         rounds: list[RoundUsage] = []
         stopped_by = "max_rounds"
-        finished = False
+        round_open: int | None = None
         try:
             yield TurnStarted()
             for round_index in range(self._max_rounds):
                 self._fire("on_round_start", round_index)
+                round_open = round_index
                 yield RoundStarted(round=round_index, max_rounds=self._max_rounds)
                 yield from self._stream_compact(messages)
                 self._maybe_final_round_notice(round_index, messages)
@@ -1280,19 +1287,19 @@ class Agent:
                     round_index, state, schema_tokens, tool_results,
                     run_tools=run_tools, stopped_by=stopped_by,
                 )
+                round_open = None
                 rounds.append(usage)
                 yield RoundFinished(round=round_index, usage=usage)
                 if not run_tools:
                     break
-
-            diagnostics = self._finish_turn(rounds, stopped_by, final_text)
-            finished = True
-            yield TurnFinished(text=final_text, diagnostics=diagnostics)
         finally:
-            # Abandoned generator or mid-turn exception: still persist
-            # diagnostics and the partial text the consumer already saw.
-            if not finished:
-                self._finish_turn(rounds, stopped_by, final_text)
+            # Runs exactly once on every path. On abandonment or a
+            # mid-turn exception this closes the open round and persists
+            # diagnostics plus the partial text the consumer already saw.
+            if round_open is not None:
+                self._fire("on_round_end", round_open)
+            diagnostics = self._finish_turn(rounds, stopped_by, final_text)
+        yield TurnFinished(text=final_text, diagnostics=diagnostics)
 
     async def astream(self, message: str) -> AsyncGenerator[AgentEvent, None]:
         """Send a message and stream typed agent events asynchronously.
@@ -1314,11 +1321,12 @@ class Agent:
         final_text = ""
         rounds: list[RoundUsage] = []
         stopped_by = "max_rounds"
-        finished = False
+        round_open: int | None = None
         try:
             yield TurnStarted()
             for round_index in range(self._max_rounds):
                 self._fire("on_round_start", round_index)
+                round_open = round_index
                 yield RoundStarted(round=round_index, max_rounds=self._max_rounds)
                 async for event in self._astream_compact(messages):
                     yield event
@@ -1353,19 +1361,19 @@ class Agent:
                     round_index, state, schema_tokens, tool_results,
                     run_tools=run_tools, stopped_by=stopped_by,
                 )
+                round_open = None
                 rounds.append(usage)
                 yield RoundFinished(round=round_index, usage=usage)
                 if not run_tools:
                     break
-
-            diagnostics = self._finish_turn(rounds, stopped_by, final_text)
-            finished = True
-            yield TurnFinished(text=final_text, diagnostics=diagnostics)
         finally:
-            # Abandoned generator or mid-turn exception: still persist
-            # diagnostics and the partial text the consumer already saw.
-            if not finished:
-                self._finish_turn(rounds, stopped_by, final_text)
+            # Runs exactly once on every path. On abandonment or a
+            # mid-turn exception this closes the open round and persists
+            # diagnostics plus the partial text the consumer already saw.
+            if round_open is not None:
+                self._fire("on_round_end", round_open)
+            diagnostics = self._finish_turn(rounds, stopped_by, final_text)
+        yield TurnFinished(text=final_text, diagnostics=diagnostics)
 
     def chat(self, message: str) -> Iterator[str]:
         """Send a message and stream the response text.

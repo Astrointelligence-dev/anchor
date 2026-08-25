@@ -92,8 +92,8 @@ class RoundFinished(_BaseEvent):
 class TurnFinished(_BaseEvent):
     """Terminal event: the final text and per-round diagnostics.
 
-    Also available after the turn as ``agent.last_turn`` /
-    the return of the text projections.
+    The diagnostics are also available after the turn as
+    ``agent.last_turn``.
     """
 
     type: Literal["turn_finished"] = "turn_finished"

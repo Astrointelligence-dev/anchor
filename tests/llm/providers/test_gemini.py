@@ -447,19 +447,20 @@ class TestStreamChunkParsing:
         parts = [_make_text_part("Hello")]
         raw_chunk = self._make_stream_chunk(parts)
 
-        result = self.provider._parse_stream_chunk(raw_chunk)
-        assert result is not None
-        assert result.content == "Hello"
-        assert result.tool_call_delta is None
+        chunks = self.provider._parse_stream_chunks(raw_chunk, 0)
+        assert chunks[0].content == "Hello"
+        assert chunks[0].tool_call_delta is None
 
     def test_function_call_chunk(self):
         parts = [_make_function_call_part("get_weather", {"location": "NYC"})]
         raw_chunk = self._make_stream_chunk(parts)
 
-        result = self.provider._parse_stream_chunk(raw_chunk)
-        assert result is not None
-        assert result.tool_call_delta is not None
-        assert result.tool_call_delta.name == "get_weather"
+        chunks = self.provider._parse_stream_chunks(raw_chunk, 0)
+        delta = chunks[0].tool_call_delta
+        assert delta is not None
+        assert delta.name == "get_weather"
+        # Gemini provides no call ids; the parser generates one.
+        assert delta.id
 
     def test_function_call_chunk_arguments_are_json(self):
         parts = [
@@ -467,30 +468,56 @@ class TestStreamChunkParsing:
         ]
         raw_chunk = self._make_stream_chunk(parts)
 
-        result = self.provider._parse_stream_chunk(raw_chunk)
+        chunks = self.provider._parse_stream_chunks(raw_chunk, 0)
+        delta = chunks[0].tool_call_delta
         # The agent loop json.loads the accumulated fragments --
         # str(dict) (single quotes) would break it.
-        assert result is not None
-        assert result.tool_call_delta is not None
-        assert json.loads(result.tool_call_delta.arguments_fragment) == {
+        assert delta is not None
+        assert json.loads(delta.arguments_fragment) == {
             "location": "NYC",
             "days": 3,
         }
 
-    def test_empty_candidates_returns_none(self):
+    def test_empty_candidates_returns_empty(self):
         raw_chunk = self._make_stream_chunk(parts=None)
-        result = self.provider._parse_stream_chunk(raw_chunk)
-        assert result is None
+        assert self.provider._parse_stream_chunks(raw_chunk, 0) == []
 
-    def test_stop_finish_reason_yields_stop_chunk(self):
+    def test_finish_reason_no_longer_dropped_by_text(self):
         parts = [_make_text_part("end")]
         raw_chunk = self._make_stream_chunk(parts=parts, finish_reason="STOP")
-        # The last chunk from Gemini may have finish_reason set
         raw_chunk.candidates[0].finish_reason = "STOP"
 
-        result = self.provider._parse_stream_chunk(raw_chunk)
-        # When we get a text chunk, content takes priority over finish_reason in streaming
-        assert result is not None
+        chunks = self.provider._parse_stream_chunks(raw_chunk, 0)
+        # Text and the finish_reason of the same raw chunk both surface.
+        assert chunks[0].content == "end"
+        assert chunks[-1].stop_reason == StopReason.STOP
+
+    def test_stream_tool_calls_round_trip_through_loop(self):
+        from anchor.agent.agent import Agent, _RoundState
+
+        parts = [
+            _make_function_call_part("alpha", {"x": 1}),
+            _make_function_call_part("beta", {"y": 2}),
+        ]
+        raw_chunk = self._make_stream_chunk(parts)
+        raw_chunk.candidates[0].finish_reason = "STOP"
+
+        chunks = self.provider._parse_stream_chunks(raw_chunk, 0)
+        seen = sum(1 for c in chunks if c.tool_call_delta is not None)
+        chunks = [self.provider._with_tool_use_override(c, seen) for c in chunks]
+
+        state = _RoundState()
+        for chunk in chunks:
+            Agent._ingest_chunk(state, chunk)
+        # Function calls mean TOOL_USE even though Gemini reports STOP;
+        # without the override the loop silently never executes tools.
+        assert state.stop_reason == StopReason.TOOL_USE
+        calls = Agent._build_tool_calls(state.accumulators)
+        assert [c.name for c in calls] == ["alpha", "beta"]
+        assert [c.arguments for c in calls] == [{"x": 1}, {"y": 2}]
+        assert calls[0].id
+        assert calls[1].id
+        assert calls[0].id != calls[1].id
 
 
 # ---------------------------------------------------------------------------

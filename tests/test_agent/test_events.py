@@ -73,6 +73,12 @@ class _Recorder:
     def __init__(self) -> None:
         self.events: list[tuple[Any, ...]] = []
 
+    def on_round_start(self, round_index: int) -> None:
+        self.events.append(("round_start", round_index))
+
+    def on_round_end(self, round_index: int) -> None:
+        self.events.append(("round_end", round_index))
+
     def on_tool_error(self, name: str, tool_input: dict, error: str) -> None:
         self.events.append(("tool_error", name, error))
 
@@ -288,7 +294,21 @@ async def test_abandoned_astream_still_persists_diagnostics():
     assert len(agent.last_turn.rounds) == 1
 
 
-def test_provider_exception_still_persists_diagnostics():
+def test_abandoned_mid_round_closes_the_open_round():
+    agent, _ = _agent([_text_response("Hello!")])
+    recorder = _Recorder()
+    agent.with_callbacks([recorder])
+
+    stream = agent.stream("Go")
+    next(e for e in stream if isinstance(e, TextDelta))
+    stream.close()
+
+    # on_round_start/on_round_end stay balanced even on abandonment.
+    assert ("round_start", 0) in recorder.events
+    assert ("round_end", 0) in recorder.events
+
+
+def test_provider_exception_closes_the_open_round():
     class _ExplodingProvider(FakeLLMProvider):
         def stream(self, *args: Any, **kwargs: Any):
             msg = "provider down"
@@ -297,11 +317,14 @@ def test_provider_exception_still_persists_diagnostics():
 
     provider = _ExplodingProvider([])
     agent = Agent(llm=provider, tokenizer=_Tok())
+    recorder = _Recorder()
+    agent.with_callbacks([recorder])
 
     with pytest.raises(ConnectionError):
         list(agent.stream("Go"))
     assert agent.last_turn is not None
     assert agent.last_turn.rounds == ()
+    assert recorder.events == [("round_start", 0), ("round_end", 0)]
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +435,39 @@ async def test_async_subagent_events_forwarded_with_parent_id():
     assert isinstance(events[-1], TurnFinished)
     assert events[-1].parent_tool_call_id is None
     assert events[-1].text == "The answer is 42."
+
+
+async def test_subagent_events_arrive_while_sibling_tool_still_runs():
+    """Live delivery: child events surface BEFORE a slow sibling finishes.
+
+    Guards the getter branch of the queue merge — without it, forwarded
+    events would only flush when a task completes.
+    """
+    sub = _sub([_text_response("42")])
+    orch, _ = _agent(
+        [
+            _multi_tool_use_response([
+                ("tu_1", "researcher", {"task": "Find the answer."}),
+                ("tu_2", "slow", {}),
+            ]),
+            _text_response("done"),
+        ],
+        tools=[_async_sleep_tool("slow", 0.15, "S")],
+    )
+    orch.with_tools([sub.as_tool("researcher", "Researches questions")])
+
+    events = [e async for e in orch.astream("Go")]
+
+    types = [(e.type, e.parent_tool_call_id) for e in events]
+    first_child = next(
+        i for i, e in enumerate(events) if e.parent_tool_call_id == "tu_1"
+    )
+    slow_finished = next(
+        i
+        for i, e in enumerate(events)
+        if isinstance(e, ToolFinished) and e.tool_call_id == "tu_2"
+    )
+    assert first_child < slow_finished, types
 
 
 async def test_achat_excludes_subagent_text():

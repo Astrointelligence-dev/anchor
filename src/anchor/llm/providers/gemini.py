@@ -179,10 +179,12 @@ class GeminiProvider(BaseLLMProvider):
 
         try:
             stream = client.models.generate_content_stream(**call_kwargs)
+            tool_calls_seen = 0
             for raw_chunk in stream:
-                chunk = self._parse_stream_chunk(raw_chunk)
-                if chunk is not None:
-                    yield chunk
+                for chunk in self._parse_stream_chunks(raw_chunk, tool_calls_seen):
+                    if chunk.tool_call_delta is not None:
+                        tool_calls_seen += 1
+                    yield self._with_tool_use_override(chunk, tool_calls_seen)
         except Exception as exc:
             raise self._map_error(exc) from exc
 
@@ -228,12 +230,14 @@ class GeminiProvider(BaseLLMProvider):
         }
 
         try:
+            tool_calls_seen = 0
             async for raw_chunk in await client.aio.models.generate_content_stream(
                 **call_kwargs
             ):
-                chunk = self._parse_stream_chunk(raw_chunk)
-                if chunk is not None:
-                    yield chunk
+                for chunk in self._parse_stream_chunks(raw_chunk, tool_calls_seen):
+                    if chunk.tool_call_delta is not None:
+                        tool_calls_seen += 1
+                    yield self._with_tool_use_override(chunk, tool_calls_seen)
         except Exception as exc:
             raise self._map_error(exc) from exc
 
@@ -456,42 +460,66 @@ class GeminiProvider(BaseLLMProvider):
     # Stream chunk parsing
     # ------------------------------------------------------------------
 
-    def _parse_stream_chunk(self, raw_chunk: Any) -> StreamChunk | None:
-        """Parse a single Gemini stream chunk into a StreamChunk, or None."""
+    def _parse_stream_chunks(
+        self, raw_chunk: Any, tool_call_index: int,
+    ) -> list[StreamChunk]:
+        """Parse a raw Gemini stream chunk into StreamChunks.
+
+        One raw chunk may carry several parts (text and/or function
+        calls) plus a finish_reason; everything is emitted, in order.
+        Function calls get a generated id (Gemini provides none) and
+        sequential indices starting at *tool_call_index*, so parallel
+        calls accumulate separately in the agent loop.
+        """
         candidates = getattr(raw_chunk, "candidates", [])
         if not candidates:
-            return None
+            return []
 
         candidate = candidates[0]
         content = getattr(candidate, "content", None)
-        if content is None:
-            return None
-
-        for part in getattr(content, "parts", []):
+        parts = getattr(content, "parts", []) if content is not None else []
+        chunks: list[StreamChunk] = []
+        index = tool_call_index
+        for part in parts:
             fc = getattr(part, "function_call", None)
             if fc is not None:
                 args = dict(fc.args) if hasattr(fc.args, "items") else {}
-                return StreamChunk(
-                    tool_call_delta=ToolCallDelta(
-                        index=0,
-                        name=fc.name,
-                        # JSON, not str(dict): the agent loop json.loads
-                        # the accumulated fragments.
-                        arguments_fragment=json.dumps(args),
-                    )
+                chunks.append(
+                    StreamChunk(
+                        tool_call_delta=ToolCallDelta(
+                            index=index,
+                            id=f"{fc.name}-{uuid.uuid4().hex[:8]}",
+                            name=fc.name,
+                            # JSON, not str(dict): the agent loop
+                            # json.loads the accumulated fragments.
+                            arguments_fragment=json.dumps(args),
+                        ),
+                    ),
                 )
+                index += 1
+                continue
             text = getattr(part, "text", None)
             if text:
-                return StreamChunk(content=text)
+                chunks.append(StreamChunk(content=text))
 
-        # Chunk with no useful parts (e.g., just finish_reason signal)
         finish_reason_raw = getattr(candidate, "finish_reason", None)
         if finish_reason_raw is not None:
             finish_str = str(finish_reason_raw).split(".")[-1]
-            stop_reason = _map_stop_reason(finish_str)
-            return StreamChunk(stop_reason=stop_reason)
+            chunks.append(StreamChunk(stop_reason=_map_stop_reason(finish_str)))
+        return chunks
 
-        return None
+    @staticmethod
+    def _with_tool_use_override(
+        chunk: StreamChunk, tool_calls_seen: int,
+    ) -> StreamChunk:
+        """Mirror ``_parse_response``: function calls mean TOOL_USE.
+
+        Gemini reports finish_reason "STOP" even when the model called
+        tools; without this the agent loop never executes them.
+        """
+        if chunk.stop_reason is not None and tool_calls_seen:
+            return chunk.model_copy(update={"stop_reason": StopReason.TOOL_USE})
+        return chunk
 
     # ------------------------------------------------------------------
     # Error mapping
