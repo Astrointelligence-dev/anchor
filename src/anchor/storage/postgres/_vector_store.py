@@ -43,18 +43,34 @@ class PostgresVectorStore:
             )
 
     async def search(
-        self, query_embedding: list[float], top_k: int = 10
+        self,
+        query_embedding: list[float],
+        top_k: int = 10,
+        where: dict[str, Any] | None = None,
     ) -> list[tuple[str, float]]:
         vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
         async with self._conn_manager.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT item_id, 1 - (embedding <=> $1::vector) AS score
-                   FROM embeddings
-                   ORDER BY embedding <=> $1::vector
-                   LIMIT $2""",
-                vec_str,
-                top_k,
-            )
+            if where:
+                # JSONB containment: metadata must include every filter pair.
+                rows = await conn.fetch(
+                    """SELECT item_id, 1 - (embedding <=> $1::vector) AS score
+                       FROM embeddings
+                       WHERE metadata @> $3::jsonb
+                       ORDER BY embedding <=> $1::vector
+                       LIMIT $2""",
+                    vec_str,
+                    top_k,
+                    json.dumps(where),
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT item_id, 1 - (embedding <=> $1::vector) AS score
+                       FROM embeddings
+                       ORDER BY embedding <=> $1::vector
+                       LIMIT $2""",
+                    vec_str,
+                    top_k,
+                )
             return [(row["item_id"], row["score"]) for row in rows]
 
     async def delete(self, item_id: str) -> bool:

@@ -77,7 +77,10 @@ class InMemoryVectorStore:
                 self._metadata[item_id] = metadata
 
     def search(
-        self, query_embedding: list[float], top_k: int = 10
+        self,
+        query_embedding: list[float],
+        top_k: int = 10,
+        where: dict[str, Any] | None = None,
     ) -> list[tuple[str, float]]:
         with self._lock:
             if not self._embeddings:
@@ -92,6 +95,10 @@ class InMemoryVectorStore:
                 self._large_store_warned = True
             results: list[tuple[str, float]] = []
             for item_id, emb in self._embeddings.items():
+                if where is not None:
+                    meta = self._metadata.get(item_id, {})
+                    if any(meta.get(k) != v for k, v in where.items()):
+                        continue
                 score = cosine_similarity(query_embedding, emb)
                 results.append((item_id, score))
             return heapq.nlargest(top_k, results, key=lambda x: x[1])

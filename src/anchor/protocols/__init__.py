@@ -24,6 +24,7 @@ from .multimodal import ModalityEncoder, TableExtractor
 from .observability import MetricsCollector, SpanExporter
 from .postprocessor import AsyncPostProcessor, PostProcessor
 from .query_transform import AsyncQueryTransformer, QueryTransformer
+from .embeddings import EmbeddingProvider
 from .reranker import AsyncReranker, Reranker
 from .retriever import AsyncRetriever, Retriever
 from .router import QueryRouter
@@ -69,6 +70,7 @@ __all__ = [
     "QueryTransformer",
     "RAGEvaluator",
     "RecencyScorer",
+    "EmbeddingProvider",
     "Reranker",
     "RetrievalEvaluator",
     "Retriever",

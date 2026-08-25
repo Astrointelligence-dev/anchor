@@ -45,13 +45,13 @@ Adopt the agentskills.io open standard (40+ products read it; full compliance me
 
 Details: retrieval analysis §1–§3.
 
-- [ ] `EmbeddingProvider` protocol: `embed_query` / `embed_documents` (asymmetry), batch, async, `dimensions` (Matryoshka), `dtype` (float/int8); replaces the 3 incompatible `embed_fn` shapes
-- [ ] 2–3 providers as optional extras: OpenAI, Voyage or Gemini, local sentence-transformers (PT default: BGE-M3)
-- [ ] Batch indexing in `DenseRetriever.index` (today 1 call per item)
-- [ ] `filter: dict | None` on `VectorStore.search` protocol + all backends (unblocks user_id/type/date scoping, multi-tenant, self-query)
-- [ ] Make pgvector reachable: sync store or async `DenseRetriever` over `AsyncVectorStore`; **HNSW index created in `ensure_tables`** (not an IVFFlat comment); `embedding_dim` required param
-- [ ] Converge sync/async retrievers on one code path over the store protocols (`AsyncDenseRetriever` currently bypasses `AsyncVectorStore` entirely)
-- [ ] Postgres integration tests (today zero)
+- [x] `EmbeddingProvider` protocol: `embed_query` / `embed_documents` (asymmetry), batch, async, `dimensions` (Matryoshka), `dtype` (float/int8); replaces the 3 incompatible `embed_fn` shapes
+- [x] 2–3 providers as optional extras: OpenAI, Voyage or Gemini, local sentence-transformers (PT default: BGE-M3)
+- [x] Batch indexing in `DenseRetriever.index` (today 1 call per item)
+- [x] `filter: dict | None` on `VectorStore.search` protocol + all backends (unblocks user_id/type/date scoping, multi-tenant, self-query)
+- [x] Make pgvector reachable: sync store or async `DenseRetriever` over `AsyncVectorStore`; **HNSW index created in `ensure_tables`** (not an IVFFlat comment); `embedding_dim` required param
+- [x] Converge sync/async retrievers on one code path over the store protocols (`AsyncDenseRetriever` currently bypasses `AsyncVectorStore` entirely)
+- [x] Postgres integration tests (today zero)
 
 **Done when:** end-to-end test ingest → embed (batched) → store → filtered retrieve → rerank passes on InMemory, SQLite, and Postgres.
 
@@ -102,6 +102,9 @@ Details: gap analysis §2–§5, §8. Independent of phases 2–3.
 ---
 
 ## Review log
+
+### Phase 2 — shipped 2026-08-25
+All 7 items landed. Evidence: 2603 passed / 3 skipped; new suite `tests/test_retrieval/test_phase2_embeddings_filtering.py` (18 tests: protocol conformance, batch-call counting, `where` on InMemory/SQLite sync+async, store-backed async E2E, HNSW schema assertions) + env-gated pgvector integration suite. Deviations: (a) filter param named `where` (Chroma-style) not `filter` (builtin shadowing); equality-only semantics — range/negation operators deferred until needed; (b) protocol carries `dimensions` but not `dtype` — no backend stores int8 today, quantization lands with the sqlite-vec backend (Phase 3); (c) sync/async convergence achieved by teaching `AsyncDenseRetriever` the store-backed path (the in-process legacy mode kept for its 28 existing tests) rather than a shared-code rewrite; (d) `where` is passed to stores only when set, so pre-existing custom VectorStore implementations keep working.
 
 ### Phase 1 — shipped 2026-08-25
 All 8 items landed. Evidence: 2585 passed / 2 skipped; new suite `tests/test_agent/test_skills/test_spec_compliance.py` (16 tests) + spec-style fixture `tests/fixtures/skills/spec-demo/` (multi-line YAML description, license, metadata.activation, references/, scripts/). Deviations: (a) tool namespacing replaced by registration-time collision checks — renaming tools would change what the model calls for zero gain while collisions are rare; full namespacing deferred until a real collision case appears; (b) `tools.py` import path KEPT as a documented trusted-Python escape hatch (spec-portable skills should use scripts/); (c) `skills-ref validate` not runnable in this environment — parity asserted via loader tests against the spec rules (name format/length, description length, compatibility cap, name==dir). Breaking: `Skill.activation` default is now `on_demand`; `minimal` fixture renamed `minimal-helper` to satisfy name==dir.

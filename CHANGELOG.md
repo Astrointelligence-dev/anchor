@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Embeddings layer: `EmbeddingProvider` protocol (query/document asymmetry, native batching, async, `dimensions` for Matryoshka truncation) + providers behind extras — `OpenAIEmbeddingProvider` (`[openai]`), `VoyageEmbeddingProvider` (`[voyage]`), `SentenceTransformerEmbeddingProvider` (`[local-embeddings]`, BGE-M3 default for multilingual/PT) — and `CallableEmbeddingProvider` unifying the legacy `embed_fn` shapes
+- Metadata filtering: `where: dict` parameter on `VectorStore.search` / `AsyncVectorStore.search`, pushed down in every backend (InMemory dict match, SQLite `json_extract` in SQL, Postgres JSONB containment `@>` with a GIN index) and exposed on `DenseRetriever.retrieve` / `AsyncDenseRetriever.aretrieve` — unblocks user/tenant/type scoping
+- `DenseRetriever.index` embeds documents in one batch call (was one embedding call per item)
+- `AsyncDenseRetriever` store-backed mode (`vector_store=` + `context_store=`) over the `AsyncVectorStore` protocol — pgvector (`PostgresVectorStore`) and `AsyncSqliteVectorStore` are now reachable from a built-in retriever
+- Postgres: `ensure_tables` now creates the pgvector **HNSW** index (works on empty tables, unlike the previously suggested IVFFlat) and a JSONB GIN index; `embedding_dim` is a required parameter
+- pgvector integration test suite gated by `ANCHOR_TEST_POSTGRES_DSN` (previously zero Postgres tests)
 - Skills: agentskills.io spec compliance — real YAML frontmatter (multi-line descriptions, quoting), spec fields `license`, `compatibility`, `metadata`, `allowed-tools`, and name==directory validation; `pyyaml` added as a core dependency
 - Skills: level-3 progressive disclosure — `read_skill_file` meta-tool loads `references/` lazily (path-traversal guarded, 50KB cap); `run_skill_script` executes `scripts/` on demand (opt-in via `Agent(allow_skill_scripts=True)`, 60s timeout); activation responses list bundled files
 - Skills: `always`-skill `instructions` are now injected into the system prompt (previously dead text that never reached the model)

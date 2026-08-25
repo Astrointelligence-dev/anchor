@@ -11,14 +11,20 @@ if TYPE_CHECKING:
 async def ensure_tables(
     conn: asyncpg.Connection,  # type: ignore[type-arg]
     *,
-    embedding_dim: int = 1536,
+    embedding_dim: int,
 ) -> None:
     """Create all storage tables and indexes if they do not exist.
 
     Parameters:
         conn: An asyncpg connection.
-        embedding_dim: Dimension of embedding vectors for pgvector column.
+        embedding_dim: Dimension of embedding vectors for the pgvector
+            column. Required — it must match your embedding provider's
+            ``dimensions`` (e.g. 1536 for text-embedding-3-small, 1024 for
+            voyage-3.5 or BGE-M3).
     """
+    if embedding_dim <= 0:
+        msg = f"embedding_dim must be positive, got {embedding_dim}"
+        raise ValueError(msg)
     # Enable pgvector extension (requires superuser or CREATE privilege)
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
@@ -89,7 +95,15 @@ async def ensure_tables(
         "CREATE INDEX IF NOT EXISTS idx_me_expires_at ON memory_entries(expires_at)"
     )
 
-    # pgvector IVFFlat index (requires data to exist for training)
-    # Users should create this after initial data load:
-    # CREATE INDEX ON embeddings
-    #   USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+    # pgvector HNSW index (pgvector >= 0.5). Unlike IVFFlat it needs no
+    # training data, so it can be created on an empty table. Defaults
+    # m=16, ef_construction=64 are the pgvector recommendations.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_embeddings_hnsw ON embeddings "
+        "USING hnsw (embedding vector_cosine_ops)"
+    )
+    # GIN index so JSONB containment filters (search where=...) stay fast.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_embeddings_metadata ON embeddings "
+        "USING gin (metadata jsonb_path_ops)"
+    )

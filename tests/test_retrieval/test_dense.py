@@ -68,7 +68,7 @@ class TestDenseRetrieverIndex:
 
     def test_index_without_embed_fn_raises(self) -> None:
         retriever = make_dense_retriever(embed_fn=None)
-        with pytest.raises(RetrieverError, match="embed_fn must be provided"):
+        with pytest.raises(RetrieverError, match="must be provided to index"):
             retriever.index(_make_items())
 
 

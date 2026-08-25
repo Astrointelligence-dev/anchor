@@ -42,6 +42,8 @@ openai = ["openai>=1.50.0"]
 pdf = ["pypdf>=4,<5"]
 sqlite = ["aiosqlite>=0.20,<1"]
 postgres = ["asyncpg>=0.29,<1"]
+voyage = ["voyageai>=0.3,<1"]
+local-embeddings = ["sentence-transformers>=3,<6"]
 redis = ["redis>=5.0,<8"]
 all-storage = ["astro-anchor[sqlite,postgres,redis]"]
 otlp = [

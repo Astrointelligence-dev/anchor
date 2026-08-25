@@ -103,7 +103,10 @@ class VectorStore(Protocol):
         ...
 
     def search(
-        self, query_embedding: list[float], top_k: int = 10
+        self,
+        query_embedding: list[float],
+        top_k: int = 10,
+        where: dict[str, Any] | None = None,
     ) -> list[tuple[str, float]]:
         """Find the most similar embeddings to a query vector.
 
@@ -111,6 +114,9 @@ class VectorStore(Protocol):
             query_embedding: The dense vector to compare against stored
                 embeddings.
             top_k: Maximum number of results to return.
+            where: Optional metadata filter — only entries whose metadata
+                contains every ``key: value`` pair are considered
+                (pre-filtering, applied before top_k).
 
         Returns:
             A list of ``(item_id, score)`` tuples ordered by descending
@@ -332,7 +338,10 @@ class AsyncVectorStore(Protocol):
         self, item_id: str, embedding: list[float], metadata: dict[str, Any] | None = None
     ) -> None: ...
     async def search(
-        self, query_embedding: list[float], top_k: int = 10
+        self,
+        query_embedding: list[float],
+        top_k: int = 10,
+        where: dict[str, Any] | None = None,
     ) -> list[tuple[str, float]]: ...
     async def delete(self, item_id: str) -> bool: ...
 

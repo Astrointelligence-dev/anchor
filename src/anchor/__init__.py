@@ -351,6 +351,12 @@ from anchor.retrieval import (
     SparseRetriever,
     rrf_fuse,
 )
+from anchor.embeddings import (
+    CallableEmbeddingProvider,
+    OpenAIEmbeddingProvider,
+    SentenceTransformerEmbeddingProvider,
+    VoyageEmbeddingProvider,
+)
 from anchor.storage import (
     InMemoryContextStore,
     InMemoryDocumentStore,
@@ -393,6 +399,10 @@ except PackageNotFoundError:
     __version__ = "0.0.0-dev"
 
 __all__ = [
+    "VoyageEmbeddingProvider",
+    "SentenceTransformerEmbeddingProvider",
+    "OpenAIEmbeddingProvider",
+    "CallableEmbeddingProvider",
     "ABTestResult",
     "ABTestRunner",
     "Agent",

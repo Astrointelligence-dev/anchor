@@ -32,6 +32,23 @@ def _unpack_embedding(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{len(blob) // 4}f", blob))
 
 
+def _build_search_query(where: dict[str, Any] | None) -> tuple[str, list[Any]]:
+    """Build the embeddings SELECT with optional metadata equality filters.
+
+    Filtering happens in SQL via ``json_extract`` so non-matching rows are
+    never unpacked or scored.
+    """
+    sql = "SELECT item_id, embedding_blob FROM embeddings"
+    params: list[Any] = []
+    if where:
+        clauses = []
+        for key, value in where.items():
+            clauses.append("json_extract(metadata_json, ?) = ?")
+            params.extend([f"$.{key}", value])
+        sql += " WHERE " + " AND ".join(clauses)
+    return sql, params
+
+
 class SqliteVectorStore:
     """SQLite-backed vector store with brute-force cosine similarity.
 
@@ -65,12 +82,14 @@ class SqliteVectorStore:
         conn.commit()
 
     def search(
-        self, query_embedding: list[float], top_k: int = 10
+        self,
+        query_embedding: list[float],
+        top_k: int = 10,
+        where: dict[str, Any] | None = None,
     ) -> list[tuple[str, float]]:
         conn = self._conn_manager.get_connection()
-        rows = conn.execute(
-            "SELECT item_id, embedding_blob FROM embeddings"
-        ).fetchall()
+        sql, params = _build_search_query(where)
+        rows = conn.execute(sql, params).fetchall()
         if not rows:
             return []
 
@@ -121,12 +140,14 @@ class AsyncSqliteVectorStore:
         await conn.commit()
 
     async def search(
-        self, query_embedding: list[float], top_k: int = 10
+        self,
+        query_embedding: list[float],
+        top_k: int = 10,
+        where: dict[str, Any] | None = None,
     ) -> list[tuple[str, float]]:
         conn = await self._conn_manager.get_async_connection()
-        cursor = await conn.execute(
-            "SELECT item_id, embedding_blob FROM embeddings"
-        )
+        sql, params = _build_search_query(where)
+        cursor = await conn.execute(sql, params)
         rows = await cursor.fetchall()
         if not rows:
             return []
