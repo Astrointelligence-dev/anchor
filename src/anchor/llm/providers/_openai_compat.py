@@ -146,6 +146,50 @@ def convert_tool(tool: ToolSchema) -> dict[str, Any]:
     }
 
 
+_TOOL_CHOICE_MODES = {"auto": "auto", "any": "required", "none": "none"}
+
+
+def convert_tool_choice(tool_choice: str | dict[str, Any]) -> str | dict[str, Any]:
+    """Map the generic tool_choice (Anthropic shape) to OpenAI's."""
+    if isinstance(tool_choice, str):
+        mapped = _TOOL_CHOICE_MODES.get(tool_choice)
+        if mapped is None:
+            msg = (
+                f"Invalid tool_choice '{tool_choice}': expected one of "
+                f"{sorted(_TOOL_CHOICE_MODES)} or {{'type': 'tool', 'name': ...}}"
+            )
+            raise ValueError(msg)
+        return mapped
+    return {"type": "function", "function": {"name": tool_choice.get("name", "")}}
+
+
+def build_call_kwargs(
+    model: str,
+    converted: list[dict[str, Any]],
+    tools: list[ToolSchema] | None,
+    *,
+    stream: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Build the shared Chat Completions kwargs (openai/litellm family)."""
+    call_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": converted,
+        "max_tokens": kwargs.get("max_tokens", 4096),
+    }
+    if stream:
+        call_kwargs["stream"] = True
+    if tools:
+        call_kwargs["tools"] = [convert_tool(t) for t in tools]
+    if kwargs.get("temperature") is not None:
+        call_kwargs["temperature"] = kwargs["temperature"]
+    if kwargs.get("stop"):
+        call_kwargs["stop"] = kwargs["stop"]
+    if kwargs.get("tool_choice") is not None and tools:
+        call_kwargs["tool_choice"] = convert_tool_choice(kwargs["tool_choice"])
+    return call_kwargs
+
+
 # ---------------------------------------------------------------------------
 # Response parsing
 # ---------------------------------------------------------------------------

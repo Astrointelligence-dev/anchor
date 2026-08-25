@@ -78,6 +78,28 @@ def _map_stop_reason(finish_reason: str | None) -> StopReason:
     return _STOP_REASON_MAP.get(str(finish_reason), StopReason.STOP)
 
 
+_TOOL_CHOICE_MODES = {"auto": "AUTO", "any": "ANY", "none": "NONE"}
+
+
+def _convert_tool_choice(tool_choice: str | dict[str, Any]) -> dict[str, Any]:
+    """Map the generic tool_choice (Anthropic shape) to Gemini's tool_config."""
+    if isinstance(tool_choice, str):
+        mode = _TOOL_CHOICE_MODES.get(tool_choice)
+        if mode is None:
+            msg = (
+                f"Invalid tool_choice '{tool_choice}': expected one of "
+                f"{sorted(_TOOL_CHOICE_MODES)} or {{'type': 'tool', 'name': ...}}"
+            )
+            raise ValueError(msg)
+        return {"function_calling_config": {"mode": mode}}
+    return {
+        "function_calling_config": {
+            "mode": "ANY",
+            "allowed_function_names": [tool_choice.get("name", "")],
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # GeminiProvider
 # ---------------------------------------------------------------------------
@@ -242,6 +264,9 @@ class GeminiProvider(BaseLLMProvider):
 
         if kwargs.get("stop"):
             config_kwargs["stop_sequences"] = kwargs["stop"]
+
+        if kwargs.get("tool_choice") is not None and tools:
+            config_kwargs["tool_config"] = _convert_tool_choice(kwargs["tool_choice"])
 
         # Try to use the SDK's GenerateContentConfig if available; fall back to
         # a simple namespace object so tests can inspect attributes.

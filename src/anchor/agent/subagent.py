@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from anchor._text import strip_markdown_fences
 from anchor.agent.models import AgentTool
 from anchor.agent.tool_decorator import tool
 
@@ -83,22 +84,12 @@ def _schema_instruction(output_model: type[BaseModel]) -> str:
     )
 
 
-def _strip_fences(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        stripped = "\n".join(lines[1:])
-    return stripped.strip()
-
-
 def _validate_output(
     text: str, output_model: type[BaseModel],
 ) -> tuple[str | None, str | None]:
     """Return ``(normalized_json, None)`` or ``(None, error)``."""
     try:
-        parsed = output_model.model_validate_json(_strip_fences(text))
+        parsed = output_model.model_validate_json(strip_markdown_fences(text))
     except ValidationError as exc:
         return None, str(exc)
     return parsed.model_dump_json(), None
@@ -188,18 +179,11 @@ def _make_subagent_tool(
     def run(task: str) -> str:
         return _run_sync(sub, task, output_model, max_output_retries)
 
-    subagent_tool = AgentTool(
-        name=name,
-        description=description,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string", "description": _TASK_PARAM_DESCRIPTION},
-            },
-            "required": ["task"],
-        },
-        fn=run,
-    )
+    # Docstring is dynamic (per-subagent param description), so the
+    # @tool decorator is applied functionally — it derives the schema
+    # and the Pydantic input model from signature + Args section.
+    run.__doc__ = f"Delegate a task to this subagent.\n\nArgs:\n    task: {_TASK_PARAM_DESCRIPTION}"
+    subagent_tool = tool(name=name, description=description)(run)
 
     async def acall(_original_name: str, tool_input: dict[str, Any]) -> str:
         return await _run_async(

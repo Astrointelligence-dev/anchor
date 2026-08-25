@@ -155,6 +155,7 @@ class TestMultiBlockCaching:
 
         # Messages: context (user) and conversation (user) merged into one
         assert len(output["messages"]) == 1
-        assert output["messages"][0]["cache_control"] == {"type": "ephemeral"}
-        assert "Here is relevant context:" in output["messages"][0]["content"]
-        assert "Hello" in output["messages"][0]["content"]
+        block = output["messages"][0]["content"][0]
+        assert block["cache_control"] == {"type": "ephemeral"}
+        assert "Here is relevant context:" in block["text"]
+        assert "Hello" in block["text"]

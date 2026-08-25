@@ -77,6 +77,7 @@ class FakeLLMProvider:
         self._call_index = 0
         self.seen_messages: list[list[Message]] = []
         self.seen_tools: list[list[ToolSchema] | None] = []
+        self.seen_kwargs: list[dict[str, Any]] = []
 
     @property
     def model_id(self) -> str:
@@ -96,6 +97,7 @@ class FakeLLMProvider:
     ) -> Iterator[StreamChunk]:
         self.seen_messages.append(list(messages))
         self.seen_tools.append(tools)
+        self.seen_kwargs.append(dict(kwargs))
         if self._call_index < len(self._responses):
             chunks = self._responses[self._call_index]
             self._call_index += 1
@@ -113,6 +115,7 @@ class FakeLLMProvider:
     ) -> AsyncIterator[StreamChunk]:
         self.seen_messages.append(list(messages))
         self.seen_tools.append(tools)
+        self.seen_kwargs.append(dict(kwargs))
         if self._call_index < len(self._responses):
             chunks = self._responses[self._call_index]
             self._call_index += 1

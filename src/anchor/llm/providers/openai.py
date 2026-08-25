@@ -34,6 +34,7 @@ from anchor.llm.models import (
     ToolSchema,
 )
 from anchor.llm.providers._openai_compat import (
+    build_call_kwargs,
     convert_messages,
     convert_tool,
     map_stop_reason,
@@ -110,19 +111,9 @@ class OpenAIProvider(BaseLLMProvider):
         **kwargs: Any,
     ) -> LLMResponse:
         client = self._get_client()
-        converted = convert_messages(messages)
-
-        call_kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": converted,
-            "max_tokens": kwargs.get("max_tokens", 4096),
-        }
-        if tools:
-            call_kwargs["tools"] = [convert_tool(t) for t in tools]
-        if kwargs.get("temperature") is not None:
-            call_kwargs["temperature"] = kwargs["temperature"]
-        if kwargs.get("stop"):
-            call_kwargs["stop"] = kwargs["stop"]
+        call_kwargs = build_call_kwargs(
+            self._model, convert_messages(messages), tools, **kwargs,
+        )
 
         try:
             response = client.chat.completions.create(**call_kwargs)
@@ -138,20 +129,9 @@ class OpenAIProvider(BaseLLMProvider):
         **kwargs: Any,
     ) -> Iterator[StreamChunk]:
         client = self._get_client()
-        converted = convert_messages(messages)
-
-        call_kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": converted,
-            "max_tokens": kwargs.get("max_tokens", 4096),
-            "stream": True,
-        }
-        if tools:
-            call_kwargs["tools"] = [convert_tool(t) for t in tools]
-        if kwargs.get("temperature") is not None:
-            call_kwargs["temperature"] = kwargs["temperature"]
-        if kwargs.get("stop"):
-            call_kwargs["stop"] = kwargs["stop"]
+        call_kwargs = build_call_kwargs(
+            self._model, convert_messages(messages), tools, stream=True, **kwargs,
+        )
 
         try:
             stream = client.chat.completions.create(**call_kwargs)
@@ -169,19 +149,9 @@ class OpenAIProvider(BaseLLMProvider):
         **kwargs: Any,
     ) -> LLMResponse:
         client = self._get_async_client()
-        converted = convert_messages(messages)
-
-        call_kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": converted,
-            "max_tokens": kwargs.get("max_tokens", 4096),
-        }
-        if tools:
-            call_kwargs["tools"] = [convert_tool(t) for t in tools]
-        if kwargs.get("temperature") is not None:
-            call_kwargs["temperature"] = kwargs["temperature"]
-        if kwargs.get("stop"):
-            call_kwargs["stop"] = kwargs["stop"]
+        call_kwargs = build_call_kwargs(
+            self._model, convert_messages(messages), tools, **kwargs,
+        )
 
         try:
             response = await client.chat.completions.create(**call_kwargs)
@@ -197,20 +167,9 @@ class OpenAIProvider(BaseLLMProvider):
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
         client = self._get_async_client()
-        converted = convert_messages(messages)
-
-        call_kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": converted,
-            "max_tokens": kwargs.get("max_tokens", 4096),
-            "stream": True,
-        }
-        if tools:
-            call_kwargs["tools"] = [convert_tool(t) for t in tools]
-        if kwargs.get("temperature") is not None:
-            call_kwargs["temperature"] = kwargs["temperature"]
-        if kwargs.get("stop"):
-            call_kwargs["stop"] = kwargs["stop"]
+        call_kwargs = build_call_kwargs(
+            self._model, convert_messages(messages), tools, stream=True, **kwargs,
+        )
 
         try:
             stream = await client.chat.completions.create(**call_kwargs)

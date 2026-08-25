@@ -57,13 +57,20 @@ class ToolResult(BaseModel, frozen=True):
 
 
 class Message(BaseModel, frozen=True):
-    """A single message in a conversation."""
+    """A single message in a conversation.
+
+    ``raw_content`` is a provider-specific escape hatch: content blocks
+    (e.g. Anthropic ``compaction`` blocks) that must be re-sent verbatim
+    on the next request. Providers that understand them re-emit them
+    ahead of the regular content; others ignore them.
+    """
 
     role: Role
     content: str | list[ContentBlock] | None = None
     tool_calls: list[ToolCall] | None = None
     tool_result: ToolResult | None = None
     name: str | None = None
+    raw_content: list[dict[str, Any]] | None = None
 
 
 class Usage(BaseModel, frozen=True):
@@ -73,6 +80,8 @@ class Usage(BaseModel, frozen=True):
     completion_tokens: int
     total_tokens: int
     total_cost: float | None = None
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
 
 
 class StopReason(StrEnum):
@@ -84,7 +93,11 @@ class StopReason(StrEnum):
 
 
 class LLMResponse(BaseModel, frozen=True):
-    """Complete response from an LLM provider."""
+    """Complete response from an LLM provider.
+
+    ``raw_content`` mirrors ``Message.raw_content``: provider-specific
+    blocks (e.g. compaction) to re-send verbatim on the next request.
+    """
 
     content: str | None = None
     tool_calls: list[ToolCall] | None = None
@@ -92,15 +105,22 @@ class LLMResponse(BaseModel, frozen=True):
     model: str
     provider: str
     stop_reason: StopReason
+    raw_content: list[dict[str, Any]] | None = None
 
 
 class StreamChunk(BaseModel, frozen=True):
-    """A single chunk from a streaming LLM response."""
+    """A single chunk from a streaming LLM response.
+
+    ``raw_block`` carries a completed provider-specific content block
+    (e.g. an Anthropic ``compaction`` block) that the caller must
+    preserve and re-send verbatim via ``Message.raw_content``.
+    """
 
     content: str | None = None
     tool_call_delta: ToolCallDelta | None = None
     usage: Usage | None = None
     stop_reason: StopReason | None = None
+    raw_block: dict[str, Any] | None = None
 
 
 class ToolSchema(BaseModel, frozen=True):

@@ -70,19 +70,84 @@ def _map_stop_reason(stop_reason: str | None) -> StopReason:
 
 
 # ---------------------------------------------------------------------------
+# Tool choice / context management helpers
+# ---------------------------------------------------------------------------
+
+_TOOL_CHOICE_MODES = {"auto", "any", "none"}
+
+_CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
+_COMPACTION_BETA = "compact-2026-01-12"
+
+
+def _convert_tool_choice(tool_choice: str | dict[str, Any]) -> dict[str, Any]:
+    """Map the generic tool_choice to Anthropic's wire shape."""
+    if isinstance(tool_choice, str):
+        if tool_choice not in _TOOL_CHOICE_MODES:
+            msg = (
+                f"Invalid tool_choice '{tool_choice}': expected one of "
+                f"{sorted(_TOOL_CHOICE_MODES)} or {{'type': 'tool', 'name': ...}}"
+            )
+            raise ValueError(msg)
+        return {"type": tool_choice}
+    return tool_choice
+
+
+def _context_betas(context_management: dict[str, Any]) -> list[str]:
+    """Select the beta flags required by the requested context edits."""
+    edit_types = {
+        edit.get("type", "")
+        for edit in context_management.get("edits", [])
+        if isinstance(edit, dict)
+    }
+    betas: list[str] = []
+    if edit_types - {"compact_20260112"}:
+        betas.append(_CONTEXT_MANAGEMENT_BETA)
+    if "compact_20260112" in edit_types:
+        betas.append(_COMPACTION_BETA)
+    return betas or [_CONTEXT_MANAGEMENT_BETA]
+
+
+def _usage_int(usage_obj: Any, field: str) -> int:
+    """Read an int usage field defensively (mocks return MagicMock attrs)."""
+    value = getattr(usage_obj, field, 0)
+    return value if isinstance(value, int) else 0
+
+
+class _StreamState:
+    """Per-stream accumulation: usage from message_start, compaction blocks."""
+
+    __slots__ = ("cache_creation", "cache_read", "compaction", "input_tokens")
+
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.cache_creation = 0
+        self.cache_read = 0
+        self.compaction: dict[str, Any] | None = None
+
+
+# ---------------------------------------------------------------------------
 # AnthropicProvider
 # ---------------------------------------------------------------------------
 
 
 class AnthropicProvider(BaseLLMProvider):
-    """Adapter for the Anthropic Messages API."""
+    """Adapter for the Anthropic Messages API.
+
+    ``prompt_caching=True`` opts into GA top-level auto-caching: every
+    request carries ``cache_control={"type": "ephemeral"}`` and the API
+    caches the longest stable prefix. Cache hits surface on
+    ``Usage.cache_read_tokens`` / ``cache_creation_tokens``.
+    """
 
     provider_name = "anthropic"
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, prompt_caching: bool = False, **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._client: Any = None
         self._async_client: Any = None
+        self._prompt_caching = prompt_caching
 
     # ------------------------------------------------------------------
     # Client caching
@@ -109,15 +174,18 @@ class AnthropicProvider(BaseLLMProvider):
     def _resolve_api_key(self) -> str | None:
         return os.environ.get("ANTHROPIC_API_KEY")
 
-    def _do_invoke(
+    def _build_call_kwargs(
         self,
-        messages: list[Message],
+        system: str | None,
+        converted: list[dict[str, Any]],
         tools: list[ToolSchema] | None,
         **kwargs: Any,
-    ) -> LLMResponse:
-        client = self._get_client()
-        system, converted = self._extract_system_and_convert(messages)
+    ) -> tuple[dict[str, Any], bool]:
+        """Build the shared Messages API kwargs.
 
+        Returns ``(call_kwargs, use_beta)`` — ``use_beta`` routes the
+        call to ``client.beta.messages`` (context management requires it).
+        """
         call_kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": converted,
@@ -131,9 +199,45 @@ class AnthropicProvider(BaseLLMProvider):
             call_kwargs["temperature"] = kwargs["temperature"]
         if kwargs.get("stop"):
             call_kwargs["stop_sequences"] = kwargs["stop"]
+        if kwargs.get("tool_choice") is not None and tools:
+            call_kwargs["tool_choice"] = _convert_tool_choice(kwargs["tool_choice"])
+        if self._prompt_caching:
+            call_kwargs["cache_control"] = {"type": "ephemeral"}
 
+        use_beta = False
+        context_management = kwargs.get("context_management")
+        if context_management:
+            call_kwargs["context_management"] = context_management
+            call_kwargs["betas"] = _context_betas(context_management)
+            use_beta = True
+        return call_kwargs, use_beta
+
+    @staticmethod
+    def _capture_message_start(event: Any, state: _StreamState) -> None:
+        if event.type != "message_start":
+            return
+        msg_usage = getattr(event.message, "usage", None)
+        if msg_usage is not None:
+            state.input_tokens = _usage_int(msg_usage, "input_tokens")
+            state.cache_creation = _usage_int(
+                msg_usage, "cache_creation_input_tokens",
+            )
+            state.cache_read = _usage_int(msg_usage, "cache_read_input_tokens")
+
+    def _do_invoke(
+        self,
+        messages: list[Message],
+        tools: list[ToolSchema] | None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        client = self._get_client()
+        system, converted = self._extract_system_and_convert(messages)
+        call_kwargs, use_beta = self._build_call_kwargs(
+            system, converted, tools, **kwargs,
+        )
+        api = client.beta.messages if use_beta else client.messages
         try:
-            response = client.messages.create(**call_kwargs)
+            response = api.create(**call_kwargs)
         except Exception as exc:
             raise self._map_error(exc) from exc
 
@@ -147,31 +251,16 @@ class AnthropicProvider(BaseLLMProvider):
     ) -> Iterator[StreamChunk]:
         client = self._get_client()
         system, converted = self._extract_system_and_convert(messages)
-
-        call_kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": converted,
-            "max_tokens": kwargs.get("max_tokens", 4096),
-        }
-        if system is not None:
-            call_kwargs["system"] = system
-        if tools:
-            call_kwargs["tools"] = [self._convert_tool(t) for t in tools]
-        if kwargs.get("temperature") is not None:
-            call_kwargs["temperature"] = kwargs["temperature"]
-        if kwargs.get("stop"):
-            call_kwargs["stop_sequences"] = kwargs["stop"]
-
+        call_kwargs, use_beta = self._build_call_kwargs(
+            system, converted, tools, **kwargs,
+        )
+        api = client.beta.messages if use_beta else client.messages
         try:
-            input_tokens: int | None = None
-            with client.messages.stream(**call_kwargs) as stream:
+            state = _StreamState()
+            with api.stream(**call_kwargs) as stream:
                 for event in stream:
-                    # Track input_tokens from message_start
-                    if event.type == "message_start":
-                        msg_usage = getattr(event.message, "usage", None)
-                        if msg_usage is not None:
-                            input_tokens = getattr(msg_usage, "input_tokens", None)
-                    chunk = self._parse_stream_event(event, input_tokens=input_tokens)
+                    self._capture_message_start(event, state)
+                    chunk = self._parse_stream_event(event, state=state)
                     if chunk is not None:
                         yield chunk
         except Exception as exc:
@@ -185,23 +274,12 @@ class AnthropicProvider(BaseLLMProvider):
     ) -> LLMResponse:
         client = self._get_async_client()
         system, converted = self._extract_system_and_convert(messages)
-
-        call_kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": converted,
-            "max_tokens": kwargs.get("max_tokens", 4096),
-        }
-        if system is not None:
-            call_kwargs["system"] = system
-        if tools:
-            call_kwargs["tools"] = [self._convert_tool(t) for t in tools]
-        if kwargs.get("temperature") is not None:
-            call_kwargs["temperature"] = kwargs["temperature"]
-        if kwargs.get("stop"):
-            call_kwargs["stop_sequences"] = kwargs["stop"]
-
+        call_kwargs, use_beta = self._build_call_kwargs(
+            system, converted, tools, **kwargs,
+        )
+        api = client.beta.messages if use_beta else client.messages
         try:
-            response = await client.messages.create(**call_kwargs)
+            response = await api.create(**call_kwargs)
         except Exception as exc:
             raise self._map_error(exc) from exc
 
@@ -215,31 +293,16 @@ class AnthropicProvider(BaseLLMProvider):
     ) -> AsyncIterator[StreamChunk]:
         client = self._get_async_client()
         system, converted = self._extract_system_and_convert(messages)
-
-        call_kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": converted,
-            "max_tokens": kwargs.get("max_tokens", 4096),
-        }
-        if system is not None:
-            call_kwargs["system"] = system
-        if tools:
-            call_kwargs["tools"] = [self._convert_tool(t) for t in tools]
-        if kwargs.get("temperature") is not None:
-            call_kwargs["temperature"] = kwargs["temperature"]
-        if kwargs.get("stop"):
-            call_kwargs["stop_sequences"] = kwargs["stop"]
-
+        call_kwargs, use_beta = self._build_call_kwargs(
+            system, converted, tools, **kwargs,
+        )
+        api = client.beta.messages if use_beta else client.messages
         try:
-            input_tokens: int | None = None
-            async with client.messages.stream(**call_kwargs) as stream:
+            state = _StreamState()
+            async with api.stream(**call_kwargs) as stream:
                 async for event in stream:
-                    # Track input_tokens from message_start
-                    if event.type == "message_start":
-                        msg_usage = getattr(event.message, "usage", None)
-                        if msg_usage is not None:
-                            input_tokens = getattr(msg_usage, "input_tokens", None)
-                    chunk = self._parse_stream_event(event, input_tokens=input_tokens)
+                    self._capture_message_start(event, state)
+                    chunk = self._parse_stream_event(event, state=state)
                     if chunk is not None:
                         yield chunk
         except Exception as exc:
@@ -276,9 +339,12 @@ class AnthropicProvider(BaseLLMProvider):
                     converted.append({"role": "user", "content": [block]})
                 continue
 
-            if msg.role == Role.ASSISTANT and msg.tool_calls:
-                # Assistant message with tool calls → content blocks
+            if msg.role == Role.ASSISTANT and (msg.tool_calls or msg.raw_content):
+                # Assistant message with tool calls and/or raw provider
+                # blocks (e.g. compaction — must round-trip verbatim).
                 blocks: list[dict[str, Any]] = []
+                if msg.raw_content:
+                    blocks.extend(msg.raw_content)
                 if msg.content:
                     if isinstance(msg.content, str):
                         blocks.append({"type": "text", "text": msg.content})
@@ -286,7 +352,7 @@ class AnthropicProvider(BaseLLMProvider):
                         for block in msg.content:
                             if block.type == "text" and block.text is not None:
                                 blocks.append({"type": "text", "text": block.text})
-                for tc in msg.tool_calls:
+                for tc in msg.tool_calls or []:
                     blocks.append(
                         {
                             "type": "tool_use",
@@ -355,6 +421,7 @@ class AnthropicProvider(BaseLLMProvider):
         """Parse an Anthropic SDK response into an LLMResponse."""
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        raw_blocks: list[dict[str, Any]] = []
 
         for block in response.content:
             if block.type == "text":
@@ -367,12 +434,21 @@ class AnthropicProvider(BaseLLMProvider):
                         arguments=block.input if isinstance(block.input, dict) else {},
                     )
                 )
+            elif block.type == "compaction":
+                # Must be re-sent verbatim or compaction state is lost.
+                raw_blocks.append(
+                    {"type": "compaction", "content": getattr(block, "content", "")},
+                )
 
         content = "".join(text_parts) if text_parts else None
         usage = Usage(
             prompt_tokens=response.usage.input_tokens,
             completion_tokens=response.usage.output_tokens,
             total_tokens=response.usage.input_tokens + response.usage.output_tokens,
+            cache_creation_tokens=_usage_int(
+                response.usage, "cache_creation_input_tokens",
+            ),
+            cache_read_tokens=_usage_int(response.usage, "cache_read_input_tokens"),
         )
 
         return LLMResponse(
@@ -382,6 +458,7 @@ class AnthropicProvider(BaseLLMProvider):
             model=response.model,
             provider=self.provider_name,
             stop_reason=_map_stop_reason(response.stop_reason),
+            raw_content=raw_blocks or None,
         )
 
     # ------------------------------------------------------------------
@@ -389,9 +466,18 @@ class AnthropicProvider(BaseLLMProvider):
     # ------------------------------------------------------------------
 
     def _parse_stream_event(
-        self, event: Any, *, input_tokens: int | None = None
+        self,
+        event: Any,
+        *,
+        input_tokens: int | None = None,
+        state: _StreamState | None = None,
     ) -> StreamChunk | None:
-        """Parse a single Anthropic stream event into a StreamChunk, or None."""
+        """Parse a single Anthropic stream event into a StreamChunk, or None.
+
+        ``state`` (used by the streaming loops) carries usage captured
+        from ``message_start`` and accumulates compaction blocks; the
+        legacy ``input_tokens`` keyword remains for direct calls.
+        """
         event_type = event.type
 
         if event_type == "content_block_delta":
@@ -405,6 +491,13 @@ class AnthropicProvider(BaseLLMProvider):
                         arguments_fragment=delta.partial_json,
                     )
                 )
+            if (
+                delta.type == "compaction_delta"
+                and state is not None
+                and state.compaction is not None
+            ):
+                state.compaction["content"] += getattr(delta, "content", "") or ""
+            return None
 
         if event_type == "content_block_start":
             block = event.content_block
@@ -416,7 +509,20 @@ class AnthropicProvider(BaseLLMProvider):
                         name=block.name,
                     )
                 )
+            if block.type == "compaction" and state is not None:
+                content = getattr(block, "content", "")
+                state.compaction = {
+                    "type": "compaction",
+                    "content": content if isinstance(content, str) else "",
+                }
             # text content_block_start carries no useful data
+            return None
+
+        if event_type == "content_block_stop":
+            if state is not None and state.compaction is not None:
+                completed = state.compaction
+                state.compaction = None
+                return StreamChunk(raw_block=completed)
             return None
 
         if event_type == "message_delta":
@@ -426,11 +532,16 @@ class AnthropicProvider(BaseLLMProvider):
             event_usage = getattr(event, "usage", None)
             if event_usage is not None:
                 output_tokens = getattr(event_usage, "output_tokens", 0)
-                prompt = input_tokens or 0
+                if state is not None:
+                    prompt = state.input_tokens
+                else:
+                    prompt = input_tokens or 0
                 usage = Usage(
                     prompt_tokens=prompt,
                     completion_tokens=output_tokens,
                     total_tokens=prompt + output_tokens,
+                    cache_creation_tokens=state.cache_creation if state else 0,
+                    cache_read_tokens=state.cache_read if state else 0,
                 )
             return StreamChunk(stop_reason=stop_reason, usage=usage)
 

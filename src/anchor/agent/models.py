@@ -119,6 +119,8 @@ class RoundUsage(BaseModel, frozen=True):
     completion_tokens: int = 0
     tool_schema_tokens: int = 0
     tool_result_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
 
 
 class TurnDiagnostics(BaseModel, frozen=True):

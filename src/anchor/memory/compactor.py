@@ -11,6 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from anchor._text import strip_markdown_fences
 from anchor.llm.models import Message, Role
 from anchor.models.memory import FactType, KeyFact
 from anchor.tokens.counter import get_default_counter
@@ -179,12 +180,7 @@ class TierCompactor:
         for attempt in range(2):
             try:
                 # Strip markdown fences if present
-                cleaned = raw_json.strip()
-                if cleaned.startswith("```"):
-                    lines = cleaned.split("\n")
-                    cleaned = "\n".join(lines[1:-1]) if len(lines) > 2 else "[]"
-
-                data = json.loads(cleaned)
+                data = json.loads(strip_markdown_fences(raw_json))
                 if not isinstance(data, list):
                     return []
 
@@ -230,12 +226,7 @@ class TierCompactor:
         """Async variant of _parse_facts — uses ainvoke for retry."""
         for attempt in range(2):
             try:
-                cleaned = raw_json.strip()
-                if cleaned.startswith("```"):
-                    lines = cleaned.split("\n")
-                    cleaned = "\n".join(lines[1:-1]) if len(lines) > 2 else "[]"
-
-                data = json.loads(cleaned)
+                data = json.loads(strip_markdown_fences(raw_json))
                 if not isinstance(data, list):
                     return []
 

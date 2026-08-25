@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +89,11 @@ class _RoundState:
 
     __slots__ = (
         "accumulators",
+        "cache_creation_tokens",
+        "cache_read_tokens",
         "completion_tokens",
         "prompt_tokens",
+        "raw_blocks",
         "stop_reason",
         "text",
     )
@@ -101,6 +104,9 @@ class _RoundState:
         self.stop_reason: StopReason | None = None
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.cache_creation_tokens = 0
+        self.cache_read_tokens = 0
+        self.raw_blocks: list[dict[str, Any]] = []
 
 
 class Agent:
@@ -126,6 +132,10 @@ class Agent:
         "_activate_tool",
         "_agent_callbacks",
         "_allow_skill_scripts",
+        "_compact_fn",
+        "_compaction_keep",
+        "_compaction_trigger",
+        "_context_management",
         "_deferred_loaded",
         "_last_result",
         "_last_turn",
@@ -193,6 +203,10 @@ class Agent:
         self._search_tool: AgentTool | None = None
         self._subagents: dict[str, tuple[SubagentDefinition, Agent]] = {}
         self._task_tool: AgentTool | None = None
+        self._context_management: dict[str, Any] | None = None
+        self._compaction_trigger: int | None = None
+        self._compaction_keep = 4
+        self._compact_fn: Callable[[str], str] | None = None
 
         self._tokenizer: Tokenizer = tokenizer or _default_tokenizer()
         self._pipeline = ContextPipeline(
@@ -217,6 +231,15 @@ class Agent:
 
     def with_tools(self, tools: list[AgentTool]) -> Agent:
         """Add tools (additive). Returns self for chaining."""
+        for t in tools:
+            if (t.name == "task" and self._task_tool is not None) or (
+                t.name == "search_tools" and self._search_tool is not None
+            ):
+                msg = (
+                    f"Tool name collision: '{t.name}' is already registered "
+                    "as an agent meta-tool"
+                )
+                raise ValueError(msg)
         self._tools.extend(tools)
         return self
 
@@ -247,6 +270,39 @@ class Agent:
         Callbacks are fire-and-forget: exceptions are swallowed and logged.
         """
         self._agent_callbacks.extend(callbacks)
+        return self
+
+    def with_context_management(self, config: dict[str, Any]) -> Agent:
+        """Attach an Anthropic ``context_management`` config. Returns self.
+
+        Passed through with every request; the Anthropic provider routes
+        to the beta API with the required flags, other providers ignore
+        it. ``compaction`` blocks returned by the API round-trip
+        verbatim within the turn. For a provider-agnostic alternative,
+        see :meth:`with_compaction`.
+        """
+        self._context_management = config
+        return self
+
+    def with_compaction(
+        self,
+        trigger_tokens: int,
+        *,
+        keep_last: int = 4,
+        compact_fn: Callable[[str], str] | None = None,
+    ) -> Agent:
+        """Enable client-side compaction of the tool loop. Returns self.
+
+        Works with every provider. When the turn's working messages
+        exceed ``trigger_tokens``, older messages are summarized into a
+        single ``[Conversation summary]`` user message; the last
+        ``keep_last`` messages are kept intact. ``compact_fn`` receives
+        the flattened transcript and returns the summary; the default
+        uses ``TierCompactor`` with this agent's own LLM.
+        """
+        self._compaction_trigger = trigger_tokens
+        self._compaction_keep = keep_last
+        self._compact_fn = compact_fn
         return self
 
     def with_skill(self, skill: Skill) -> Agent:
@@ -331,6 +387,12 @@ class Agent:
             self._subagents[definition.name] = (definition, sub)
 
         if self._subagents and self._task_tool is None:
+            if any(t.name == "task" for t in self._all_active_tools()):
+                msg = (
+                    "Tool name collision: 'task' is reserved for the "
+                    "subagent dispatcher"
+                )
+                raise ValueError(msg)
             self._task_tool = _make_task_tool(self._subagents)
         return self
 
@@ -409,6 +471,12 @@ class Agent:
         """
         tools = self._all_active_tools()
         if self._search_tool is None and any(t.defer_loading for t in tools):
+            if any(t.name == "search_tools" for t in tools):
+                msg = (
+                    "Tool name collision: 'search_tools' is reserved for "
+                    "the deferred-tool search meta-tool"
+                )
+                raise ValueError(msg)
             self._search_tool = _make_search_tools_tool(self)
             tools.append(self._search_tool)
         return [
@@ -731,9 +799,18 @@ class Agent:
         return list(base_messages), full_system
 
     def _round_request(
-        self, full_system: str, messages: list[Message],
-    ) -> tuple[list[Message], list[ToolSchema] | None, int]:
-        """Assemble one round's request. Returns (messages, schemas, schema tokens)."""
+        self,
+        full_system: str,
+        messages: list[Message],
+        *,
+        final_round: bool = False,
+    ) -> tuple[list[Message], list[ToolSchema] | None, int, dict[str, Any]]:
+        """Assemble one round's request.
+
+        Returns ``(messages, schemas, schema_tokens, call_extra)`` where
+        ``call_extra`` carries per-call provider options (tool_choice,
+        context_management).
+        """
         tools = self._sendable_tools()
         schemas = [t.to_tool_schema() for t in tools] if tools else None
         llm_messages: list[Message] = []
@@ -748,7 +825,14 @@ class Agent:
                 )
                 for s in schemas
             )
-        return llm_messages, schemas, schema_tokens
+        call_extra: dict[str, Any] = {}
+        if self._context_management:
+            call_extra["context_management"] = self._context_management
+        if final_round and schemas:
+            # Belt over the final-round notice: providers that support
+            # tool_choice force a text answer; others just ignore it.
+            call_extra["tool_choice"] = "none"
+        return llm_messages, schemas, schema_tokens, call_extra
 
     @staticmethod
     def _ingest_chunk(state: _RoundState, chunk: StreamChunk) -> str | None:
@@ -773,6 +857,14 @@ class Agent:
             state.completion_tokens = max(
                 state.completion_tokens, chunk.usage.completion_tokens,
             )
+            state.cache_creation_tokens = max(
+                state.cache_creation_tokens, chunk.usage.cache_creation_tokens,
+            )
+            state.cache_read_tokens = max(
+                state.cache_read_tokens, chunk.usage.cache_read_tokens,
+            )
+        if chunk.raw_block:
+            state.raw_blocks.append(chunk.raw_block)
         if chunk.stop_reason:
             state.stop_reason = chunk.stop_reason
         return out
@@ -793,14 +885,107 @@ class Agent:
             completion_tokens=state.completion_tokens,
             tool_schema_tokens=schema_tokens,
             tool_result_tokens=result_tokens,
+            cache_creation_tokens=state.cache_creation_tokens,
+            cache_read_tokens=state.cache_read_tokens,
         )
+
+    def _is_final_round(self, round_index: int) -> bool:
+        return bool(round_index) and round_index == self._max_rounds - 1
 
     def _maybe_final_round_notice(
         self, round_index: int, messages: list[Message],
     ) -> None:
         """Warn the model one round before the limit so it can wrap up."""
-        if round_index and round_index == self._max_rounds - 1:
+        if self._is_final_round(round_index):
             messages.append(Message(role=Role.USER, content=_FINAL_ROUND_NOTICE))
+
+    # -- Client-side compaction (provider-agnostic) --
+
+    def _message_text(self, msg: Message) -> str:
+        parts: list[str] = []
+        if isinstance(msg.content, str):
+            parts.append(msg.content)
+        if msg.tool_calls:
+            parts.extend(json.dumps(tc.arguments) for tc in msg.tool_calls)
+        if msg.tool_result is not None:
+            parts.append(msg.tool_result.content)
+        return "\n".join(parts)
+
+    def _split_for_compaction(
+        self, messages: list[Message],
+    ) -> tuple[list[Message], list[Message]] | None:
+        """Head to summarize / tail to keep, or None when not needed."""
+        if self._compaction_trigger is None:
+            return None
+        total = sum(
+            self._tokenizer.count_tokens(self._message_text(m)) for m in messages
+        )
+        if total <= self._compaction_trigger:
+            return None
+        split = len(messages) - self._compaction_keep
+        # Never sever a tool_use/tool_result pair: pull the split left
+        # so the kept tail starts at a non-TOOL message.
+        while split > 0 and messages[split].role == Role.TOOL:
+            split -= 1
+        if split <= 0:
+            return None
+        head = list(messages[:split])
+        # Summarizing a head smaller than the summary target shrinks
+        # nothing (and would re-summarize its own summary every round).
+        head_tokens = sum(
+            self._tokenizer.count_tokens(self._message_text(m)) for m in head
+        )
+        if head_tokens <= self._compaction_target_tokens():
+            return None
+        return head, list(messages[split:])
+
+    def _compaction_transcript(self, head: list[Message]) -> str:
+        return "\n".join(
+            f"{m.role.value}: {self._message_text(m)}" for m in head
+        )
+
+    def _compaction_target_tokens(self) -> int:
+        return max(64, (self._compaction_trigger or 1024) // 4)
+
+    @staticmethod
+    def _apply_compaction(
+        messages: list[Message], summary: str, tail: list[Message],
+    ) -> None:
+        messages[:] = [
+            Message(role=Role.USER, content=f"[Conversation summary]\n{summary}"),
+            *tail,
+        ]
+
+    def _maybe_compact(self, messages: list[Message]) -> None:
+        split = self._split_for_compaction(messages)
+        if split is None:
+            return
+        head, tail = split
+        transcript = self._compaction_transcript(head)
+        if self._compact_fn is not None:
+            summary = self._compact_fn(transcript)
+        else:
+            from anchor.memory.compactor import TierCompactor
+            summary = TierCompactor(self._llm, tokenizer=self._tokenizer).summarize(
+                transcript, 1, self._compaction_target_tokens(),
+            )
+        self._apply_compaction(messages, summary, tail)
+
+    async def _amaybe_compact(self, messages: list[Message]) -> None:
+        split = self._split_for_compaction(messages)
+        if split is None:
+            return
+        head, tail = split
+        transcript = self._compaction_transcript(head)
+        if self._compact_fn is not None:
+            summary = self._compact_fn(transcript)
+        else:
+            from anchor.memory.compactor import TierCompactor
+            compactor = TierCompactor(self._llm, tokenizer=self._tokenizer)
+            summary = await compactor.asummarize(
+                transcript, 1, self._compaction_target_tokens(),
+            )
+        self._apply_compaction(messages, summary, tail)
 
     def _finish_turn(
         self,
@@ -839,6 +1024,7 @@ class Agent:
         if self._memory is not None:
             self._memory.add_user_message(message)
 
+        self._last_turn = None
         messages, full_system = self._prepare_turn(
             self._pipeline.build(message), message,
         )
@@ -848,9 +1034,11 @@ class Agent:
 
         for round_index in range(self._max_rounds):
             self._fire("on_round_start", round_index)
+            self._maybe_compact(messages)
             self._maybe_final_round_notice(round_index, messages)
-            llm_messages, schemas, schema_tokens = self._round_request(
+            llm_messages, schemas, schema_tokens, call_extra = self._round_request(
                 full_system, messages,
+                final_round=self._is_final_round(round_index),
             )
             state = _RoundState()
 
@@ -858,6 +1046,7 @@ class Agent:
                 llm_messages,
                 tools=schemas,
                 max_tokens=self._max_response_tokens,
+                **call_extra,
             ):
                 out = self._ingest_chunk(state, chunk)
                 if out:
@@ -883,6 +1072,7 @@ class Agent:
                     role=Role.ASSISTANT,
                     content=state.text or None,
                     tool_calls=tool_calls,
+                    raw_content=state.raw_blocks or None,
                 ),
             )
             tool_results = self._run_tools(tool_calls)
@@ -919,6 +1109,7 @@ class Agent:
                 await pool.disconnect_all()
                 raise
 
+        self._last_turn = None
         messages, full_system = self._prepare_turn(
             await self._pipeline.abuild(message), message,
         )
@@ -928,9 +1119,11 @@ class Agent:
 
         for round_index in range(self._max_rounds):
             self._fire("on_round_start", round_index)
+            await self._amaybe_compact(messages)
             self._maybe_final_round_notice(round_index, messages)
-            llm_messages, schemas, schema_tokens = self._round_request(
+            llm_messages, schemas, schema_tokens, call_extra = self._round_request(
                 full_system, messages,
+                final_round=self._is_final_round(round_index),
             )
             state = _RoundState()
 
@@ -938,6 +1131,7 @@ class Agent:
                 llm_messages,
                 tools=schemas,
                 max_tokens=self._max_response_tokens,
+                **call_extra,
             ):
                 out = self._ingest_chunk(state, chunk)
                 if out:
@@ -963,6 +1157,7 @@ class Agent:
                     role=Role.ASSISTANT,
                     content=state.text or None,
                     tool_calls=tool_calls,
+                    raw_content=state.raw_blocks or None,
                 ),
             )
             tool_results = await self._arun_tools(tool_calls)
