@@ -226,10 +226,11 @@ class TracingAgentCallback:
     """An ``AgentCallback`` that records one span per tool execution.
 
     Attach with ``agent.with_callbacks([TracingAgentCallback(...)])``.
-    Spans are exported on completion, mirroring ``TracingCallback``.
+    Each tool call gets its own short trace, ended and exported on
+    completion — nothing accumulates on long-lived agents.
     """
 
-    __slots__ = ("_exporters", "_tool_spans", "_trace", "_tracer")
+    __slots__ = ("_exporters", "_tool_spans", "_tracer")
 
     def __init__(
         self,
@@ -238,8 +239,7 @@ class TracingAgentCallback:
     ) -> None:
         self._tracer = tracer or Tracer()
         self._exporters: list[SpanExporter] = exporters or []
-        self._trace: TraceRecord | None = None
-        self._tool_spans: dict[str, Span] = {}
+        self._tool_spans: dict[str, tuple[TraceRecord, Span]] = {}
 
     @property
     def tracer(self) -> Tracer:
@@ -247,14 +247,14 @@ class TracingAgentCallback:
         return self._tracer
 
     def on_tool_start(self, name: str, tool_input: dict[str, object]) -> None:
-        if self._trace is None:
-            self._trace = self._tracer.start_trace(name="agent.tools")
-        self._tool_spans[name] = self._tracer.start_span(
-            trace_id=self._trace.trace_id,
+        trace = self._tracer.start_trace(name=f"tool.{name}")
+        span = self._tracer.start_span(
+            trace_id=trace.trace_id,
             name=f"tool.{name}",
             kind=SpanKind.TOOL,
             attributes={"tool_input_keys": sorted(tool_input)},
         )
+        self._tool_spans[name] = (trace, span)
 
     def on_tool_end(
         self, name: str, tool_input: dict[str, object], result: str,
@@ -271,10 +271,12 @@ class TracingAgentCallback:
     ) -> None:
         # ponytail: spans keyed by tool name — parallel calls to the SAME tool
         # share one span; key by call id if that ever matters.
-        span = self._tool_spans.pop(name, None)
-        if span is None:
+        entry = self._tool_spans.pop(name, None)
+        if entry is None:
             return
+        trace, span = entry
         completed = self._tracer.end_span(span, status=status, attributes=attributes)
+        self._tracer.end_trace(trace)
         for exporter in self._exporters:
             try:
                 exporter.export([completed])

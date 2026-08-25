@@ -61,6 +61,20 @@ def _guard_no_nesting(sub: Agent) -> None:
         raise ValueError(msg)
 
 
+def _guard_clean_context(sub: Agent) -> None:
+    """MULTI_AGENT.md rule 1: each spawn starts with a clean context.
+
+    Attached memory would leak one task's conversation into the next
+    (and interleave writes under parallel dispatch).
+    """
+    if sub.memory is not None:
+        msg = (
+            "Subagents cannot have memory attached (MULTI_AGENT.md: clean "
+            "context per spawn). Wrap an agent without with_memory()."
+        )
+        raise ValueError(msg)
+
+
 def _schema_instruction(output_model: type[BaseModel]) -> str:
     schema = json.dumps(output_model.model_json_schema())
     return (
@@ -169,6 +183,7 @@ def _make_subagent_tool(
 ) -> AgentTool:
     """Wrap *sub* as a single tool — the ``Agent.as_tool()`` primitive."""
     _guard_no_nesting(sub)
+    _guard_clean_context(sub)
 
     def run(task: str) -> str:
         return _run_sync(sub, task, output_model, max_output_retries)

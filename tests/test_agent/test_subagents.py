@@ -309,3 +309,13 @@ def test_e2e_orchestrator_subagent_with_accounting():
     # Subagent kept its own accounting for its turn.
     assert sub.last_turn is not None
     assert len(sub.last_turn.rounds) == 1
+
+
+def test_as_tool_rejects_memory_attached_agent():
+    from anchor.memory.manager import MemoryManager
+
+    sub, _ = _sub([_text_response("x")])
+    sub.with_memory(MemoryManager(conversation_tokens=2000, tokenizer=_Tok()))
+
+    with pytest.raises(ValueError, match="clean context"):
+        sub.as_tool("researcher", "Researches")

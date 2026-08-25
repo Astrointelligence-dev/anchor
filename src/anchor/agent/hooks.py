@@ -2,8 +2,9 @@
 
 Two distinct mechanisms:
 
-- **Veto hooks** (``PreToolHook``/``PostToolHook``): can deny a call,
-  rewrite its input, or replace its output. Exceptions in a pre-hook
+- **Veto hooks** (``PreToolHook``/``PostToolHook``): a pre-hook can
+  deny a call or rewrite its input; a post-hook can replace the output
+  (``decision`` is ignored in the post path). Exceptions in a pre-hook
   fail closed (the call is denied with the exception as reason).
 - **Observer callbacks** (``AgentCallback``): fire-and-forget
   notifications dispatched via :func:`anchor._callbacks.fire_callbacks`;
@@ -22,8 +23,9 @@ from pydantic import BaseModel
 class HookResult(BaseModel, frozen=True):
     """Decision returned by a tool hook.
 
-    ``reason`` is fed back to the model on deny so it can adjust
-    instead of blind-retrying. ``updated_input`` applies to pre-hooks,
+    ``decision``/``reason`` apply to pre-hooks only — the reason is fed
+    back to the model on deny so it can adjust instead of
+    blind-retrying. ``updated_input`` applies to pre-hooks,
     ``updated_output`` to post-hooks.
     """
 

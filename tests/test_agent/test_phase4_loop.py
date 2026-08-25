@@ -466,3 +466,18 @@ def test_input_examples_propagate_to_schema():
     )
     schema = tool.to_tool_schema()
     assert schema.input_examples == ({"x": "sample"},)
+
+
+def test_tracing_agent_callback_bounds_traces():
+    from anchor.observability import InMemorySpanExporter, TracingAgentCallback
+
+    exporter = InMemorySpanExporter()
+    callback = TracingAgentCallback(exporters=[exporter])
+
+    for i in range(3):
+        callback.on_tool_start("echo", {"x": i})
+        callback.on_tool_end("echo", {"x": i}, "result")
+
+    assert len(exporter.get_spans()) == 3
+    # Every per-call trace was ended — nothing accumulates on the tracer.
+    assert callback.tracer._active_traces == {}
