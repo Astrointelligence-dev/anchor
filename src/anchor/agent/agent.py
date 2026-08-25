@@ -1082,13 +1082,17 @@ class Agent:
         )
 
     def _is_final_round(self, round_index: int) -> bool:
-        return bool(round_index) and round_index == self._max_rounds - 1
+        return round_index == self._max_rounds - 1
 
     def _maybe_final_round_notice(
         self, round_index: int, messages: list[Message],
     ) -> None:
-        """Warn the model one round before the limit so it can wrap up."""
-        if self._is_final_round(round_index):
+        """Warn the model one round before the limit so it can wrap up.
+
+        Only meaningful when tools exist — a tool-less agent has no
+        tool budget to exhaust (relevant for ``max_rounds=1``).
+        """
+        if self._is_final_round(round_index) and self._all_active_tools():
             messages.append(Message(role=Role.USER, content=_FINAL_ROUND_NOTICE))
 
     # -- Client-side compaction (provider-agnostic) --

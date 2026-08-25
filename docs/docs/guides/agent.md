@@ -153,6 +153,48 @@ async for chunk in agent.achat("Explain quantum computing"):
 `achat()` is the async counterpart. It uses `pipeline.abuild()` and async
 iteration over the streaming API.
 
+### Event Stream
+
+`chat()`/`achat()` are text-only projections of a richer stream.
+`stream()`/`astream()` expose the full tool-use loop as one ordered
+sequence of typed events (`AgentEvent`, discriminated by `.type`) —
+built for UIs that need more than text:
+
+```python
+from anchor import (
+    RoundStarted, TextDelta, ToolStarted, ToolFinished,
+    RoundFinished, TurnFinished,
+)
+
+async for event in agent.astream("Find and summarize the report"):
+    match event:
+        case RoundStarted(round=r, max_rounds=n):
+            status.update(f"round {r + 1}/{n}")
+        case TextDelta(text=text):
+            log.write(text)
+        case ToolStarted(tool_call_id=cid, name=name):
+            spinners[cid] = show_spinner(name)
+        case ToolFinished(tool_call_id=cid, is_error=err):
+            spinners.pop(cid).done(error=err)
+        case RoundFinished(usage=usage):
+            meter.add(usage.prompt_tokens, usage.completion_tokens)
+        case TurnFinished(diagnostics=diag):
+            status.update(f"done ({diag.stopped_by})")
+```
+
+The event vocabulary: `TurnStarted`, `RoundStarted`, `TextDelta`,
+`ToolStarted`/`ToolFinished` (correlated by `tool_call_id` — tool calls
+run concurrently in the async path and finish events arrive live, in
+completion order), `CompactionStarted`/`CompactionFinished`,
+`RoundFinished` (with per-round `RoundUsage`), and a terminal
+`TurnFinished` carrying the final text and `TurnDiagnostics`.
+
+Tool failures surface as `ToolFinished(is_error=True)`, not exceptions;
+only turn-level failures (provider, MCP) raise. Events forwarded from a
+subagent's run arrive flat in the same stream with `parent_tool_call_id`
+set to the invoking tool call — top-level events leave it `None`, which
+is also how the text projections filter subagent text out.
+
 ### Accessing the Last Result
 
 After calling `chat()` or `achat()`, the full `ContextResult` is available:

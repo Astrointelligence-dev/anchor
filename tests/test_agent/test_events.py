@@ -179,6 +179,29 @@ async def test_astream_exception_escaping_call_becomes_error_event(monkeypatch):
     assert ("tool_error", "echo", finished.result) in recorder.events
 
 
+def test_max_rounds_one_marks_final_round():
+    agent, provider = _agent(
+        [_text_response("direct")], tools=[_echo_tool()], max_rounds=1,
+    )
+
+    list(agent.stream("Go"))
+
+    # The only round is the final round: notice + forced tool_choice.
+    sent = provider.seen_messages[0]
+    assert any("Final round" in str(m.content) for m in sent)
+    assert provider.seen_kwargs[0]["tool_choice"] == "none"
+
+
+def test_max_rounds_one_without_tools_sends_no_notice():
+    agent, provider = _agent([_text_response("hi")], max_rounds=1)
+
+    list(agent.stream("Go"))
+
+    sent = provider.seen_messages[0]
+    assert not any("Final round" in str(m.content) for m in sent)
+    assert "tool_choice" not in provider.seen_kwargs[0]
+
+
 def test_final_round_tool_request_runs_no_tools():
     responses = [
         _tool_use_response("tu_1", "echo", {"x": "a"}),

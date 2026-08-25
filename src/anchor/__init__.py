@@ -99,7 +99,6 @@ Models & Types:
     ContextItem, ContextWindow, QueryBundle, TokenBudget, BudgetAllocation,
     ConversationTurn, MemoryEntry, MemoryType, MemoryOperation,
     SourceType, OverflowStrategy, Role,
-    StreamDelta, StreamResult, StreamUsage,
     default_chat_budget, default_rag_budget, default_agent_budget
 
 Ingestion:
@@ -231,9 +230,6 @@ from anchor.models import (
     Role,
     SourceType,
     StepDiagnostic,
-    StreamDelta,
-    StreamResult,
-    StreamUsage,
     TokenBudget,
     default_agent_budget,
     default_chat_budget,
@@ -625,9 +621,6 @@ __all__ = [
     "StopReason",
     "StorageError",
     "StreamChunk",
-    "StreamDelta",
-    "StreamResult",
-    "StreamUsage",
     "SummaryBufferMemory",
     "TableAwareChunker",
     "TableEncoder",

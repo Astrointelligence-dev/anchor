@@ -13,6 +13,7 @@ Uses unittest.mock to avoid real API calls. Tests cover:
 
 from __future__ import annotations
 
+import json
 import os
 from typing import AsyncIterator, Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -459,6 +460,22 @@ class TestStreamChunkParsing:
         assert result is not None
         assert result.tool_call_delta is not None
         assert result.tool_call_delta.name == "get_weather"
+
+    def test_function_call_chunk_arguments_are_json(self):
+        parts = [
+            _make_function_call_part("get_weather", {"location": "NYC", "days": 3}),
+        ]
+        raw_chunk = self._make_stream_chunk(parts)
+
+        result = self.provider._parse_stream_chunk(raw_chunk)
+        # The agent loop json.loads the accumulated fragments --
+        # str(dict) (single quotes) would break it.
+        assert result is not None
+        assert result.tool_call_delta is not None
+        assert json.loads(result.tool_call_delta.arguments_fragment) == {
+            "location": "NYC",
+            "days": 3,
+        }
 
     def test_empty_candidates_returns_none(self):
         raw_chunk = self._make_stream_chunk(parts=None)

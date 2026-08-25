@@ -18,6 +18,7 @@ Key Gemini differences vs OpenAI/Anthropic:
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from typing import Any, AsyncIterator, Iterator
@@ -474,7 +475,9 @@ class GeminiProvider(BaseLLMProvider):
                     tool_call_delta=ToolCallDelta(
                         index=0,
                         name=fc.name,
-                        arguments_fragment=str(args),
+                        # JSON, not str(dict): the agent loop json.loads
+                        # the accumulated fragments.
+                        arguments_fragment=json.dumps(args),
                     )
                 )
             text = getattr(part, "text", None)
