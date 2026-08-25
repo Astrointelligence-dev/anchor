@@ -31,6 +31,18 @@ from anchor.models.context import ContextResult
 from anchor.pipeline.pipeline import ContextPipeline
 from anchor.protocols.tokenizer import Tokenizer
 
+from .events import (
+    AgentEvent,
+    CompactionFinished,
+    CompactionStarted,
+    RoundFinished,
+    RoundStarted,
+    TextDelta,
+    ToolFinished,
+    ToolStarted,
+    TurnFinished,
+    TurnStarted,
+)
 from .hooks import AgentCallback, PostToolHook, PreToolHook
 from .models import AgentTool, RoundUsage, TurnDiagnostics
 from .skills.activate import _make_activate_skill_tool
@@ -678,29 +690,158 @@ class Agent:
         )
         return result.content
 
-    def _run_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
-        """Execute tool calls sequentially and return ToolResult objects."""
-        return [self._execute_call(tc) for tc in tool_calls]
+    async def _ensure_mcp(self) -> None:
+        """Lazily connect configured MCP servers and load their tools."""
+        if not self._mcp_configs or self._mcp_pool is not None:
+            return
+        from anchor.mcp.client import MCPClientPool
+        pool = MCPClientPool(self._mcp_configs)
+        try:
+            await pool.connect_all()
+            self._mcp_tools = await pool.all_agent_tools()
+            self._mcp_pool = pool
+        except Exception:
+            await pool.disconnect_all()
+            raise
 
-    async def _arun_tools(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
-        """Execute tool calls concurrently, preserving call order."""
-        results = await asyncio.gather(
-            *(self._aexecute_call(tc) for tc in tool_calls),
-            return_exceptions=True,
+    def _should_run_tools(self, state: _RoundState, round_index: int) -> bool:
+        """Whether this round's tool calls execute.
+
+        A final round that still asked for tools runs none: the model
+        would never see their results.
+        """
+        return (
+            state.stop_reason == StopReason.TOOL_USE
+            and round_index < self._max_rounds - 1
         )
-        ordered: list[ToolResult] = []
-        for tc, result in zip(tool_calls, results, strict=True):
-            if isinstance(result, BaseException):
+
+    def _close_round(
+        self,
+        round_index: int,
+        state: _RoundState,
+        schema_tokens: int,
+        tool_results: list[ToolResult],
+        *,
+        run_tools: bool,
+        stopped_by: str,
+    ) -> tuple[RoundUsage, str]:
+        """Account the round and fire ``on_round_end``.
+
+        Returns ``(usage, stopped_by)``; ``stopped_by`` changes only
+        when the model stopped without requesting tools.
+        """
+        if not run_tools and state.stop_reason != StopReason.TOOL_USE:
+            stopped_by = self._stop_cause(state.stop_reason)
+        usage = self._round_usage(round_index, state, schema_tokens, tool_results)
+        self._fire("on_round_end", round_index)
+        return usage, stopped_by
+
+    def _stream_tool_phase(
+        self,
+        state: _RoundState,
+        messages: list[Message],
+        tool_results: list[ToolResult],
+    ) -> Iterator[AgentEvent]:
+        """Append the assistant turn, run its tools, append the results."""
+        tool_calls = self._build_tool_calls(state.accumulators)
+        messages.append(
+            Message(
+                role=Role.ASSISTANT,
+                content=state.text or None,
+                tool_calls=tool_calls,
+                raw_content=state.raw_blocks or None,
+            ),
+        )
+        yield from self._stream_tools(tool_calls, tool_results)
+        for result in tool_results:
+            messages.append(Message(role=Role.TOOL, tool_result=result))
+
+    async def _astream_tool_phase(
+        self,
+        state: _RoundState,
+        messages: list[Message],
+        tool_results: list[ToolResult],
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Async mirror of :meth:`_stream_tool_phase`."""
+        tool_calls = self._build_tool_calls(state.accumulators)
+        messages.append(
+            Message(
+                role=Role.ASSISTANT,
+                content=state.text or None,
+                tool_calls=tool_calls,
+                raw_content=state.raw_blocks or None,
+            ),
+        )
+        async for event in self._astream_tools(tool_calls, tool_results):
+            yield event
+        for result in tool_results:
+            messages.append(Message(role=Role.TOOL, tool_result=result))
+
+    @staticmethod
+    def _tool_finished(tc: ToolCall, result: ToolResult) -> ToolFinished:
+        return ToolFinished(
+            tool_call_id=tc.id,
+            name=tc.name,
+            result=result.content,
+            is_error=result.is_error,
+        )
+
+    def _stream_tools(
+        self, tool_calls: list[ToolCall], results: list[ToolResult],
+    ) -> Iterator[AgentEvent]:
+        """Execute calls sequentially, yielding started/finished events.
+
+        Completed ``ToolResult`` objects are appended to *results*.
+        """
+        for tc in tool_calls:
+            yield ToolStarted(
+                tool_call_id=tc.id, name=tc.name, tool_input=tc.arguments,
+            )
+            result = self._execute_call(tc)
+            results.append(result)
+            yield self._tool_finished(tc, result)
+
+    async def _astream_tools(
+        self, tool_calls: list[ToolCall], results: list[ToolResult],
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Execute calls concurrently, yielding finished events live.
+
+        All ``ToolStarted`` events are emitted up front (the calls do
+        start together); each ``ToolFinished`` is emitted as its call
+        completes. *results* receives the ToolResults in call order.
+        An exception escaping a call is converted through
+        ``_error_result`` (firing ``on_tool_error``); cancellation
+        propagates and pending calls are cancelled.
+        """
+
+        async def _one(index: int, tc: ToolCall) -> tuple[int, ToolResult]:
+            try:
+                return index, await self._aexecute_call(tc)
+            except Exception as exc:
+                logger.exception("Tool '%s' failed", tc.name)
                 error_text = (
-                    f"Error: tool '{tc.name}' failed: "
-                    f"{type(result).__name__}: {result}"
+                    f"Error: tool '{tc.name}' failed: {type(exc).__name__}: {exc}"
                 )
-                ordered.append(
-                    ToolResult(tool_call_id=tc.id, content=error_text, is_error=True),
-                )
-            else:
-                ordered.append(result)
-        return ordered
+                return index, self._error_result(tc, tc.arguments, error_text)
+
+        for tc in tool_calls:
+            yield ToolStarted(
+                tool_call_id=tc.id, name=tc.name, tool_input=tc.arguments,
+            )
+        tasks = [
+            asyncio.ensure_future(_one(i, tc)) for i, tc in enumerate(tool_calls)
+        ]
+        ordered: list[ToolResult | None] = [None] * len(tool_calls)
+        try:
+            for fut in asyncio.as_completed(tasks):
+                index, result = await fut
+                ordered[index] = result
+                yield self._tool_finished(tool_calls[index], result)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        results.extend(r for r in ordered if r is not None)
 
     def _record_tool_call(
         self, name: str, tool_input: dict[str, Any], result: str,
@@ -911,16 +1052,18 @@ class Agent:
             parts.append(msg.tool_result.content)
         return "\n".join(parts)
 
+    def _messages_tokens(self, messages: list[Message]) -> int:
+        return sum(
+            self._tokenizer.count_tokens(self._message_text(m)) for m in messages
+        )
+
     def _split_for_compaction(
         self, messages: list[Message],
     ) -> tuple[list[Message], list[Message]] | None:
         """Head to summarize / tail to keep, or None when not needed."""
         if self._compaction_trigger is None:
             return None
-        total = sum(
-            self._tokenizer.count_tokens(self._message_text(m)) for m in messages
-        )
-        if total <= self._compaction_trigger:
+        if self._messages_tokens(messages) <= self._compaction_trigger:
             return None
         split = len(messages) - self._compaction_keep
         # Never sever a tool_use/tool_result pair: pull the split left
@@ -932,10 +1075,7 @@ class Agent:
         head = list(messages[:split])
         # Summarizing a head smaller than the summary target shrinks
         # nothing (and would re-summarize its own summary every round).
-        head_tokens = sum(
-            self._tokenizer.count_tokens(self._message_text(m)) for m in head
-        )
-        if head_tokens <= self._compaction_target_tokens():
+        if self._messages_tokens(head) <= self._compaction_target_tokens():
             return None
         return head, list(messages[split:])
 
@@ -956,10 +1096,12 @@ class Agent:
             *tail,
         ]
 
-    def _maybe_compact(self, messages: list[Message]) -> None:
+    def _stream_compact(self, messages: list[Message]) -> Iterator[AgentEvent]:
         split = self._split_for_compaction(messages)
         if split is None:
             return
+        yield CompactionStarted()
+        tokens_before = self._messages_tokens(messages)
         head, tail = split
         transcript = self._compaction_transcript(head)
         if self._compact_fn is not None:
@@ -970,11 +1112,19 @@ class Agent:
                 transcript, 1, self._compaction_target_tokens(),
             )
         self._apply_compaction(messages, summary, tail)
+        yield CompactionFinished(
+            tokens_before=tokens_before,
+            tokens_after=self._messages_tokens(messages),
+        )
 
-    async def _amaybe_compact(self, messages: list[Message]) -> None:
+    async def _astream_compact(
+        self, messages: list[Message],
+    ) -> AsyncGenerator[AgentEvent, None]:
         split = self._split_for_compaction(messages)
         if split is None:
             return
+        yield CompactionStarted()
+        tokens_before = self._messages_tokens(messages)
         head, tail = split
         transcript = self._compaction_transcript(head)
         if self._compact_fn is not None:
@@ -986,19 +1136,24 @@ class Agent:
                 transcript, 1, self._compaction_target_tokens(),
             )
         self._apply_compaction(messages, summary, tail)
+        yield CompactionFinished(
+            tokens_before=tokens_before,
+            tokens_after=self._messages_tokens(messages),
+        )
 
     def _finish_turn(
         self,
         rounds: list[RoundUsage],
         stopped_by: str,
         final_text: str,
-    ) -> None:
+    ) -> TurnDiagnostics:
         self._last_turn = TurnDiagnostics(
             rounds=tuple(rounds),
             stopped_by=stopped_by,  # type: ignore[arg-type]
         )
         if self._memory is not None and final_text:
             self._memory.add_assistant_message(final_text)
+        return self._last_turn
 
     @staticmethod
     def _stop_cause(stop_reason: StopReason | None) -> str:
@@ -1006,19 +1161,21 @@ class Agent:
 
     # -- Chat --
 
-    def chat(self, message: str) -> Iterator[str]:
-        """Send a message and stream the response.
+    def stream(self, message: str) -> Iterator[AgentEvent]:
+        """Send a message and stream typed agent events.
 
-        Handles the full tool-use loop: if the model calls tools,
-        they are executed and results fed back until the model
-        produces a final text response or ``max_rounds`` is reached.
-
-        Yields text chunks as they arrive from the API.
+        The full tool-use loop as one ordered event stream:
+        ``TurnStarted``, per-round ``RoundStarted``/``RoundFinished``
+        (the latter with :class:`RoundUsage`), ``TextDelta``,
+        ``ToolStarted``/``ToolFinished`` (correlated by
+        ``tool_call_id``), compaction events, and a terminal
+        ``TurnFinished`` with the final text and diagnostics.
+        :meth:`chat` is the text-only projection of this stream.
         """
         if self._mcp_configs:
             msg = (
                 "MCP servers require async execution. "
-                "Use agent.achat() instead of agent.chat()."
+                "Use agent.astream()/agent.achat() instead."
             )
             raise TypeError(msg)
         if self._memory is not None:
@@ -1031,83 +1188,69 @@ class Agent:
         final_text = ""
         rounds: list[RoundUsage] = []
         stopped_by = "max_rounds"
+        finished = False
+        try:
+            yield TurnStarted()
+            for round_index in range(self._max_rounds):
+                self._fire("on_round_start", round_index)
+                yield RoundStarted(round=round_index, max_rounds=self._max_rounds)
+                yield from self._stream_compact(messages)
+                self._maybe_final_round_notice(round_index, messages)
+                llm_messages, schemas, schema_tokens, call_extra = (
+                    self._round_request(
+                        full_system, messages,
+                        final_round=self._is_final_round(round_index),
+                    )
+                )
+                state = _RoundState()
 
-        for round_index in range(self._max_rounds):
-            self._fire("on_round_start", round_index)
-            self._maybe_compact(messages)
-            self._maybe_final_round_notice(round_index, messages)
-            llm_messages, schemas, schema_tokens, call_extra = self._round_request(
-                full_system, messages,
-                final_round=self._is_final_round(round_index),
-            )
-            state = _RoundState()
+                for chunk in self._llm.stream(
+                    llm_messages,
+                    tools=schemas,
+                    max_tokens=self._max_response_tokens,
+                    **call_extra,
+                ):
+                    out = self._ingest_chunk(state, chunk)
+                    if out:
+                        final_text += out
+                        yield TextDelta(text=out)
 
-            for chunk in self._llm.stream(
-                llm_messages,
-                tools=schemas,
-                max_tokens=self._max_response_tokens,
-                **call_extra,
-            ):
-                out = self._ingest_chunk(state, chunk)
-                if out:
-                    final_text += out
-                    yield out
+                run_tools = self._should_run_tools(state, round_index)
+                tool_results: list[ToolResult] = []
+                if run_tools:
+                    yield from self._stream_tool_phase(
+                        state, messages, tool_results,
+                    )
+                usage, stopped_by = self._close_round(
+                    round_index, state, schema_tokens, tool_results,
+                    run_tools=run_tools, stopped_by=stopped_by,
+                )
+                rounds.append(usage)
+                yield RoundFinished(round=round_index, usage=usage)
+                if not run_tools:
+                    break
 
-            if state.stop_reason != StopReason.TOOL_USE:
-                rounds.append(self._round_usage(round_index, state, schema_tokens, []))
-                stopped_by = self._stop_cause(state.stop_reason)
-                self._fire("on_round_end", round_index)
-                break
+            diagnostics = self._finish_turn(rounds, stopped_by, final_text)
+            finished = True
+            yield TurnFinished(text=final_text, diagnostics=diagnostics)
+        finally:
+            # Abandoned generator or mid-turn exception: still persist
+            # diagnostics and the partial text the consumer already saw.
+            if not finished:
+                self._finish_turn(rounds, stopped_by, final_text)
 
-            if round_index == self._max_rounds - 1:
-                # Final round still asked for tools: don't execute work
-                # whose results the model will never see.
-                rounds.append(self._round_usage(round_index, state, schema_tokens, []))
-                self._fire("on_round_end", round_index)
-                break
+    async def astream(self, message: str) -> AsyncGenerator[AgentEvent, None]:
+        """Send a message and stream typed agent events asynchronously.
 
-            tool_calls = self._build_tool_calls(state.accumulators)
-            messages.append(
-                Message(
-                    role=Role.ASSISTANT,
-                    content=state.text or None,
-                    tool_calls=tool_calls,
-                    raw_content=state.raw_blocks or None,
-                ),
-            )
-            tool_results = self._run_tools(tool_calls)
-            for result in tool_results:
-                messages.append(Message(role=Role.TOOL, tool_result=result))
-            rounds.append(
-                self._round_usage(round_index, state, schema_tokens, tool_results),
-            )
-            self._fire("on_round_end", round_index)
-
-        self._finish_turn(rounds, stopped_by, final_text)
-
-    async def achat(self, message: str) -> AsyncGenerator[str, None]:
-        """Send a message and stream the response asynchronously.
-
-        Async mirror of :meth:`chat`. Uses ``pipeline.abuild()``, async
-        iteration over the streaming API, and executes independent tool
-        calls concurrently.
-
-        Yields text chunks as they arrive from the API.
+        Async mirror of :meth:`stream`. Uses ``pipeline.abuild()``,
+        async iteration over the streaming API, and executes
+        independent tool calls concurrently — ``ToolFinished`` events
+        are emitted live as each call completes. :meth:`achat` is the
+        text-only projection of this stream.
         """
         if self._memory is not None:
             self._memory.add_user_message(message)
-
-        # Lazy MCP connection
-        if self._mcp_configs and self._mcp_pool is None:
-            from anchor.mcp.client import MCPClientPool
-            pool = MCPClientPool(self._mcp_configs)
-            try:
-                await pool.connect_all()
-                self._mcp_tools = await pool.all_agent_tools()
-                self._mcp_pool = pool
-            except Exception:
-                await pool.disconnect_all()
-                raise
+        await self._ensure_mcp()
 
         self._last_turn = None
         messages, full_system = self._prepare_turn(
@@ -1116,59 +1259,78 @@ class Agent:
         final_text = ""
         rounds: list[RoundUsage] = []
         stopped_by = "max_rounds"
+        finished = False
+        try:
+            yield TurnStarted()
+            for round_index in range(self._max_rounds):
+                self._fire("on_round_start", round_index)
+                yield RoundStarted(round=round_index, max_rounds=self._max_rounds)
+                async for event in self._astream_compact(messages):
+                    yield event
+                self._maybe_final_round_notice(round_index, messages)
+                llm_messages, schemas, schema_tokens, call_extra = (
+                    self._round_request(
+                        full_system, messages,
+                        final_round=self._is_final_round(round_index),
+                    )
+                )
+                state = _RoundState()
 
-        for round_index in range(self._max_rounds):
-            self._fire("on_round_start", round_index)
-            await self._amaybe_compact(messages)
-            self._maybe_final_round_notice(round_index, messages)
-            llm_messages, schemas, schema_tokens, call_extra = self._round_request(
-                full_system, messages,
-                final_round=self._is_final_round(round_index),
-            )
-            state = _RoundState()
+                async for chunk in self._llm.astream(
+                    llm_messages,
+                    tools=schemas,
+                    max_tokens=self._max_response_tokens,
+                    **call_extra,
+                ):
+                    out = self._ingest_chunk(state, chunk)
+                    if out:
+                        final_text += out
+                        yield TextDelta(text=out)
 
-            async for chunk in self._llm.astream(
-                llm_messages,
-                tools=schemas,
-                max_tokens=self._max_response_tokens,
-                **call_extra,
-            ):
-                out = self._ingest_chunk(state, chunk)
-                if out:
-                    final_text += out
-                    yield out
+                run_tools = self._should_run_tools(state, round_index)
+                tool_results: list[ToolResult] = []
+                if run_tools:
+                    async for event in self._astream_tool_phase(
+                        state, messages, tool_results,
+                    ):
+                        yield event
+                usage, stopped_by = self._close_round(
+                    round_index, state, schema_tokens, tool_results,
+                    run_tools=run_tools, stopped_by=stopped_by,
+                )
+                rounds.append(usage)
+                yield RoundFinished(round=round_index, usage=usage)
+                if not run_tools:
+                    break
 
-            if state.stop_reason != StopReason.TOOL_USE:
-                rounds.append(self._round_usage(round_index, state, schema_tokens, []))
-                stopped_by = self._stop_cause(state.stop_reason)
-                self._fire("on_round_end", round_index)
-                break
+            diagnostics = self._finish_turn(rounds, stopped_by, final_text)
+            finished = True
+            yield TurnFinished(text=final_text, diagnostics=diagnostics)
+        finally:
+            # Abandoned generator or mid-turn exception: still persist
+            # diagnostics and the partial text the consumer already saw.
+            if not finished:
+                self._finish_turn(rounds, stopped_by, final_text)
 
-            if round_index == self._max_rounds - 1:
-                # Final round still asked for tools: don't execute work
-                # whose results the model will never see.
-                rounds.append(self._round_usage(round_index, state, schema_tokens, []))
-                self._fire("on_round_end", round_index)
-                break
+    def chat(self, message: str) -> Iterator[str]:
+        """Send a message and stream the response text.
 
-            tool_calls = self._build_tool_calls(state.accumulators)
-            messages.append(
-                Message(
-                    role=Role.ASSISTANT,
-                    content=state.text or None,
-                    tool_calls=tool_calls,
-                    raw_content=state.raw_blocks or None,
-                ),
-            )
-            tool_results = await self._arun_tools(tool_calls)
-            for result in tool_results:
-                messages.append(Message(role=Role.TOOL, tool_result=result))
-            rounds.append(
-                self._round_usage(round_index, state, schema_tokens, tool_results),
-            )
-            self._fire("on_round_end", round_index)
+        Text-only projection of :meth:`stream` — the full tool-use
+        loop runs identically; only top-level ``TextDelta`` events
+        surface, as plain strings.
+        """
+        for event in self.stream(message):
+            if isinstance(event, TextDelta) and event.parent_tool_call_id is None:
+                yield event.text
 
-        self._finish_turn(rounds, stopped_by, final_text)
+    async def achat(self, message: str) -> AsyncGenerator[str, None]:
+        """Send a message and stream the response text asynchronously.
+
+        Text-only projection of :meth:`astream`.
+        """
+        async for event in self.astream(message):
+            if isinstance(event, TextDelta) and event.parent_tool_call_id is None:
+                yield event.text
 
     async def aclose(self) -> None:
         """Clean up MCP connections and other async resources."""
