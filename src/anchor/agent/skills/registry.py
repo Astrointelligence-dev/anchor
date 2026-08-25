@@ -31,10 +31,31 @@ class SkillRegistry:
     # -- Mutation --
 
     def register(self, skill: Skill) -> None:
-        """Register a skill.  Raises :class:`ValueError` on duplicate name."""
+        """Register a skill.
+
+        Raises :class:`ValueError` on a duplicate skill name, or when the
+        skill provides a tool whose name collides with a tool from any
+        already-registered skill — collisions surface here, at registration
+        time, never mid-conversation.
+        """
         if skill.name in self._skills:
             msg = f"Skill already registered: '{skill.name}'"
             raise ValueError(msg)
+
+        existing_tools: dict[str, str] = {
+            tool.name: existing.name
+            for existing in self._skills.values()
+            for tool in existing.tools
+        }
+        for tool in skill.tools:
+            if tool.name in existing_tools:
+                msg = (
+                    f"Tool name collision: skill '{skill.name}' provides "
+                    f"'{tool.name}', already provided by skill "
+                    f"'{existing_tools[tool.name]}'"
+                )
+                raise ValueError(msg)
+
         self._skills[skill.name] = skill
 
     def activate(self, name: str) -> Skill:
@@ -93,6 +114,10 @@ class SkillRegistry:
         """Look up a skill by name, or ``None`` if not found."""
         return self._skills.get(name)
 
+    def all_skills(self) -> list[Skill]:
+        """Return all registered skills in registration order."""
+        return list(self._skills.values())
+
     def is_active(self, name: str) -> bool:
         """Return ``True`` if the skill's tools should be available now.
 
@@ -109,36 +134,67 @@ class SkillRegistry:
     def active_tools(self) -> list[AgentTool]:
         """Return all tools from currently-active skills.
 
-        Raises :class:`ValueError` if two active skills provide tools
-        with the same name.
+        Collisions are prevented at :meth:`register` time, so this never
+        raises mid-conversation.
         """
         tools: list[AgentTool] = []
-        seen_names: set[str] = set()
         for name, skill in self._skills.items():
-            if not self.is_active(name):
-                continue
-            for tool in skill.tools:
-                if tool.name in seen_names:
-                    msg = f"Duplicate tool name across active skills: '{tool.name}'"
-                    raise ValueError(msg)
-                seen_names.add(tool.name)
-                tools.append(tool)
+            if self.is_active(name):
+                tools.extend(skill.tools)
         return tools
 
     def on_demand_skills(self) -> list[Skill]:
         """Return skills that require activation."""
         return [s for s in self._skills.values() if s.activation == "on_demand"]
 
-    def skill_discovery_prompt(self) -> str:
-        """Build the Tier-1 discovery text for the system prompt.
+    def always_skills(self) -> list[Skill]:
+        """Return skills active from round 1."""
+        return [s for s in self._skills.values() if s.activation == "always"]
+
+    def always_instructions(self) -> str:
+        """Concatenated instructions of all ``always`` skills.
+
+        Injected into the system prompt at build time — an always-on
+        skill's usage guide must reach the model without an activation
+        round-trip.  Returns an empty string when no always skill has
+        instructions.
+        """
+        blocks: list[str] = []
+        for skill in self.always_skills():
+            if skill.instructions.strip():
+                blocks.append(f"## Skill: {skill.name}\n{skill.instructions.strip()}")
+        return "\n\n".join(blocks)
+
+    def skill_discovery_prompt(self, max_chars: int | None = None) -> str:
+        """Build the Level-1 discovery text for the system prompt.
+
+        The text is *static* for a given set of registered skills — it never
+        changes with activation state, so the system prompt stays stable
+        across rounds and turns (prompt-cache friendly).
+
+        Parameters
+        ----------
+        max_chars:
+            Optional budget for the listing. Skills beyond the budget are
+            summarized as a count; earlier-registered skills win.
 
         Returns an empty string when there are no on-demand skills.
         """
         on_demand = self.on_demand_skills()
         if not on_demand:
             return ""
-        lines = ["Available skills (use activate_skill to enable):"]
+
+        header = "Available skills (use activate_skill to enable):"
+        lines = [header]
+        dropped = 0
+        used = len(header)
         for skill in on_demand:
-            active = " [active]" if self.is_active(skill.name) else ""
-            lines.append(f"  - {skill.name}: {skill.description}{active}")
+            line = f"  - {skill.name}: {skill.description}"
+            if max_chars is not None and used + len(line) + 1 > max_chars:
+                dropped += 1
+                continue
+            lines.append(line)
+            used += len(line) + 1
+        if dropped:
+            lines.append(f"  (+{dropped} more skills not listed)")
         return "\n".join(lines)

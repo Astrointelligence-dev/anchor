@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Skills: agentskills.io spec compliance — real YAML frontmatter (multi-line descriptions, quoting), spec fields `license`, `compatibility`, `metadata`, `allowed-tools`, and name==directory validation; `pyyaml` added as a core dependency
+- Skills: level-3 progressive disclosure — `read_skill_file` meta-tool loads `references/` lazily (path-traversal guarded, 50KB cap); `run_skill_script` executes `scripts/` on demand (opt-in via `Agent(allow_skill_scripts=True)`, 60s timeout); activation responses list bundled files
+- Skills: `always`-skill `instructions` are now injected into the system prompt (previously dead text that never reached the model)
+- Skills: minimal eval harness (`run_skill_eval`, `SkillEvalCase/Result/Report`) for with/without-skill A/B baselines with a callback judge
+- `SkillRegistry.all_skills()`, `always_skills()`, `always_instructions()`, and a `max_chars` cap on `skill_discovery_prompt()` (~1% of context budget in the agent)
 - `metadata["raw_score"]` on all retriever and reranker results, preserving the unclamped/unnormalized score (raw cosine, raw BM25, raw reranker logits) so quality thresholds are possible
 - `min_score` parameter on `DenseRetriever` and `SparseRetriever` to filter results below a raw-score threshold
 - SOTA 2026 research docs (`docs/research/2026-08-25-*`) and phased upgrade plan (`docs/plans/2026-08-25-sota-upgrade-plan.md`)
@@ -30,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README sections for Priority System (1--10 scale) and Token Budgets
 
 ### Changed
+- Skills: `Skill.activation` default flipped from `"always"` to `"on_demand"` (matches the loader default and progressive-disclosure semantics); canonical frontmatter location for activation is now `metadata: {activation: ...}` (top-level key still accepted)
+- Skills: the discovery listing is static (no per-round `[active]` mutation) and joined to the system prompt with newlines, computed once per turn — prompt-cache friendly; the agent's `AnthropicFormatter` now has caching enabled
+- Skills: tool-name collisions raise at registration time (`SkillRegistry.register` and `Agent.with_skill`), never mid-conversation
 - Reranker `rerank()`/`arerank()` signatures: `top_k: int = 10` → `top_k: int | None = None`; an explicit `top_k` now always overrides the constructor value, `None` falls back to it (applies to all rerankers, the `Reranker`/`AsyncReranker` protocols, and `reranker_step`/`async_reranker_step`)
 - `AsyncCohereReranker` callback now returns `(index, score)` tuples, matching the sync `CohereReranker` shape, and applies scores to results
 - `HybridRetriever` and `AsyncHybridRetriever` now delegate fusion to the canonical `rrf_fuse` (single RRF implementation); `rrf_fuse` gained a `retrieval_method` label parameter

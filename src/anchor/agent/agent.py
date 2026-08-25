@@ -28,6 +28,7 @@ from .models import AgentTool
 from .skills.activate import _make_activate_skill_tool
 from .skills.models import Skill
 from .skills.registry import SkillRegistry
+from .skills.resources import _make_read_skill_file_tool, _make_run_skill_script_tool
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,7 @@ class Agent:
 
     __slots__ = (
         "_activate_tool",
+        "_allow_skill_scripts",
         "_last_result",
         "_llm",
         "_max_response_tokens",
@@ -82,6 +84,8 @@ class Agent:
         "_mcp_tools",
         "_memory",
         "_pipeline",
+        "_read_file_tool",
+        "_script_tool",
         "_skill_registry",
         "_system_prompt",
         "_tools",
@@ -97,6 +101,7 @@ class Agent:
         max_tokens: int = 16384,
         max_response_tokens: int = 1024,
         max_rounds: int = 10,
+        allow_skill_scripts: bool = False,
     ) -> None:
         if llm is not None:
             self._llm: LLMProvider = llm
@@ -111,13 +116,16 @@ class Agent:
         self._last_result: ContextResult | None = None
         self._skill_registry = SkillRegistry()
         self._activate_tool: AgentTool | None = None
+        self._read_file_tool: AgentTool | None = None
+        self._script_tool: AgentTool | None = None
+        self._allow_skill_scripts = allow_skill_scripts
         self._mcp_configs: list[Any] = []  # MCPServerConfig instances
         self._mcp_pool: Any = None  # MCPClientPool (lazy)
         self._mcp_tools: list[AgentTool] = []
 
         tokenizer = _WhitespaceTokenizer()
         self._pipeline = ContextPipeline(max_tokens=max_tokens, tokenizer=tokenizer)
-        self._pipeline.with_formatter(AnthropicFormatter())
+        self._pipeline.with_formatter(AnthropicFormatter(enable_caching=True))
 
     # -- Fluent configuration (all return self) --
 
@@ -141,21 +149,23 @@ class Agent:
 
     def with_skill(self, skill: Skill) -> Agent:
         """Register a skill. Returns self for chaining."""
+        self._check_tool_collisions(skill)
         self._skill_registry.register(skill)
-        self._ensure_activate_tool()
+        self._ensure_skill_meta_tools()
         return self
 
     def with_skills(self, skills: list[Skill]) -> Agent:
         """Register multiple skills. Returns self for chaining."""
         for skill in skills:
+            self._check_tool_collisions(skill)
             self._skill_registry.register(skill)
-        self._ensure_activate_tool()
+        self._ensure_skill_meta_tools()
         return self
 
     def with_skills_directory(self, path: str | Path) -> Agent:
         """Load all SKILL.md skills from a directory. Returns self for chaining."""
         self._skill_registry.load_from_directory(Path(path))
-        self._ensure_activate_tool()
+        self._ensure_skill_meta_tools()
         return self
 
     def with_mcp_servers(
@@ -179,7 +189,7 @@ class Agent:
     def with_skill_from_path(self, path: str | Path) -> Agent:
         """Load one SKILL.md skill from a directory. Returns self for chaining."""
         self._skill_registry.load_from_path(Path(path))
-        self._ensure_activate_tool()
+        self._ensure_skill_meta_tools()
         return self
 
     # -- Accessors --
@@ -202,18 +212,67 @@ class Agent:
     # -- Internal helpers --
 
     def _all_active_tools(self) -> list[AgentTool]:
-        """Return direct tools + skill tools + activate_skill meta-tool."""
+        """Return direct tools + skill tools + skill meta-tools + MCP tools."""
         tools: list[AgentTool] = list(self._tools)
         tools.extend(self._skill_registry.active_tools())
         if self._activate_tool is not None:
             tools.append(self._activate_tool)
+        if self._read_file_tool is not None:
+            tools.append(self._read_file_tool)
+        if self._script_tool is not None:
+            tools.append(self._script_tool)
         tools.extend(self._mcp_tools)
         return tools
 
-    def _ensure_activate_tool(self) -> None:
-        """Create the activate_skill meta-tool if on-demand skills exist."""
-        if self._skill_registry.on_demand_skills() and self._activate_tool is None:
-            self._activate_tool = _make_activate_skill_tool(self._skill_registry)
+    def _check_tool_collisions(self, skill: Skill) -> None:
+        """Raise if a skill tool name collides with a direct agent tool."""
+        direct_names = {t.name for t in self._tools}
+        for tool in skill.tools:
+            if tool.name in direct_names:
+                msg = (
+                    f"Tool name collision: skill '{skill.name}' provides "
+                    f"'{tool.name}', already registered via with_tools()"
+                )
+                raise ValueError(msg)
+
+    def _ensure_skill_meta_tools(self) -> None:
+        """Create skill meta-tools as they become relevant.
+
+        ``activate_skill`` appears once an on-demand skill is registered;
+        ``read_skill_file`` once any skill has an on-disk directory;
+        ``run_skill_script`` additionally requires ``allow_skill_scripts=True``
+        and at least one bundled script.
+        """
+        registry = self._skill_registry
+        if registry.on_demand_skills() and self._activate_tool is None:
+            self._activate_tool = _make_activate_skill_tool(registry)
+
+        has_paths = any(s.path is not None for s in registry.all_skills())
+        if has_paths and self._read_file_tool is None:
+            self._read_file_tool = _make_read_skill_file_tool(registry)
+
+        has_scripts = any(s.script_files() for s in registry.all_skills())
+        if self._allow_skill_scripts and has_scripts and self._script_tool is None:
+            self._script_tool = _make_run_skill_script_tool(registry)
+
+    def _skill_system_suffix(self) -> str:
+        """Static skill text appended to the system prompt each turn.
+
+        Contains always-skill instructions plus the on-demand discovery
+        listing. Built once per turn (not per round) and stable across
+        activation state — prompt-cache friendly. The listing is capped at
+        roughly 1% of the pipeline's token budget.
+        """
+        parts: list[str] = []
+        always = self._skill_registry.always_instructions()
+        if always:
+            parts.append(always)
+        # ~4 chars/token heuristic; 1% of the context budget for the listing.
+        max_chars = max(400, (self._pipeline.max_tokens * 4) // 100)
+        discovery = self._skill_registry.skill_discovery_prompt(max_chars=max_chars)
+        if discovery:
+            parts.append(discovery)
+        return "\n\n".join(parts)
 
     def _execute_tool(self, name: str, tool_input: dict[str, Any]) -> str:
         """Look up and execute a tool by name.
@@ -380,6 +439,15 @@ class Agent:
 
         base_messages, base_system = self._formatted_to_messages(formatted)
 
+        # Skill text (always-skill instructions + discovery listing) is static
+        # per turn: compute once, join with newlines, keep the prompt stable
+        # across rounds so provider prompt caching can hit.
+        skill_suffix = self._skill_system_suffix()
+        if base_system and skill_suffix:
+            full_system = f"{base_system}\n\n{skill_suffix}"
+        else:
+            full_system = base_system or skill_suffix
+
         # Working message list for the tool loop
         messages: list[Message] = list(base_messages)
 
@@ -392,19 +460,10 @@ class Agent:
                 [t.to_tool_schema() for t in all_tools] if all_tools else None
             )
 
-            # Append skill discovery prompt to system message
-            discovery = self._skill_registry.skill_discovery_prompt()
-            round_system = base_system
-            if discovery:
-                if round_system:
-                    round_system = round_system + " " + discovery
-                else:
-                    round_system = discovery
-
             # Build messages with system message prepended
             llm_messages: list[Message] = []
-            if round_system:
-                llm_messages.append(Message(role=Role.SYSTEM, content=round_system))
+            if full_system:
+                llm_messages.append(Message(role=Role.SYSTEM, content=full_system))
             llm_messages.extend(messages)
 
             # Stream from provider
@@ -488,6 +547,15 @@ class Agent:
 
         base_messages, base_system = self._formatted_to_messages(formatted)
 
+        # Skill text (always-skill instructions + discovery listing) is static
+        # per turn: compute once, join with newlines, keep the prompt stable
+        # across rounds so provider prompt caching can hit.
+        skill_suffix = self._skill_system_suffix()
+        if base_system and skill_suffix:
+            full_system = f"{base_system}\n\n{skill_suffix}"
+        else:
+            full_system = base_system or skill_suffix
+
         # Working message list for the tool loop
         messages: list[Message] = list(base_messages)
 
@@ -500,19 +568,10 @@ class Agent:
                 [t.to_tool_schema() for t in all_tools] if all_tools else None
             )
 
-            # Append skill discovery prompt to system message
-            discovery = self._skill_registry.skill_discovery_prompt()
-            round_system = base_system
-            if discovery:
-                if round_system:
-                    round_system = round_system + " " + discovery
-                else:
-                    round_system = discovery
-
             # Build messages with system message prepended
             llm_messages: list[Message] = []
-            if round_system:
-                llm_messages.append(Message(role=Role.SYSTEM, content=round_system))
+            if full_system:
+                llm_messages.append(Message(role=Role.SYSTEM, content=full_system))
             llm_messages.extend(messages)
 
             # Stream from provider

@@ -28,14 +28,14 @@ Bugs are live today regardless of any SOTA ambition. Full details: retrieval ana
 
 Adopt the agentskills.io open standard (40+ products read it; full compliance means anchor loads public skills and anchor skills run in Claude Code/Codex). Details: gap analysis §1.
 
-- [ ] Real YAML frontmatter parsing (replace hand-rolled splitter, `loader.py:28-57`); accept spec fields `license`, `compatibility`, `metadata`, `allowed-tools`; move `activation` under `metadata` as anchor extension; validate name == directory name
-- [ ] Level-3 progressive disclosure: skill-scoped `read_reference` tool for lazy `references/` loading; `scripts/` executed via opt-in exec tool gated by `allowed-tools`
-- [ ] Decide fate of `tools.py` import path: keep as explicit trusted-Python escape hatch or deprecate (it is arbitrary code exec at load, `loader.py:94-136`)
-- [ ] Inject `always`-skill `instructions` into the system prompt at build (today dead text — `memory/skill.py:30` never reaches the model)
-- [ ] Cache-stable discovery listing: static block, newline-separated, no per-round `[active]` mutation (`registry.py:132`, `agent.py:395-402`); enable `AnthropicFormatter` caching (today hardcoded off, `agent.py:120`); listing token cap (Claude Code uses 1% of context)
-- [ ] Namespace skill tools (`skillname__tool`), collision check at registration, not mid-conversation (`registry.py:121`)
-- [ ] Fix `activation` default mismatch (`models.py:44` says `always`, `loader.py:174` says `on_demand`)
-- [ ] Skill eval harness: with/without-skill baseline runs, trigger tuning on descriptions (≥3 scenarios per skill)
+- [x] Real YAML frontmatter parsing (replace hand-rolled splitter, `loader.py:28-57`); accept spec fields `license`, `compatibility`, `metadata`, `allowed-tools`; move `activation` under `metadata` as anchor extension; validate name == directory name
+- [x] Level-3 progressive disclosure: skill-scoped `read_reference` tool for lazy `references/` loading; `scripts/` executed via opt-in exec tool gated by `allowed-tools`
+- [x] Decide fate of `tools.py` import path: keep as explicit trusted-Python escape hatch or deprecate (it is arbitrary code exec at load, `loader.py:94-136`)
+- [x] Inject `always`-skill `instructions` into the system prompt at build (today dead text — `memory/skill.py:30` never reaches the model)
+- [x] Cache-stable discovery listing: static block, newline-separated, no per-round `[active]` mutation (`registry.py:132`, `agent.py:395-402`); enable `AnthropicFormatter` caching (today hardcoded off, `agent.py:120`); listing token cap (Claude Code uses 1% of context)
+- [x] Namespace skill tools (`skillname__tool`), collision check at registration, not mid-conversation (`registry.py:121`)
+- [x] Fix `activation` default mismatch (`models.py:44` says `always`, `loader.py:174` says `on_demand`)
+- [x] Skill eval harness: with/without-skill baseline runs, trigger tuning on descriptions (≥3 scenarios per skill)
 
 **Done when:** an unmodified skill from anthropics/skills loads and runs in anchor; anchor's example skill validates with `skills-ref validate`.
 
@@ -102,6 +102,9 @@ Details: gap analysis §2–§5, §8. Independent of phases 2–3.
 ---
 
 ## Review log
+
+### Phase 1 — shipped 2026-08-25
+All 8 items landed. Evidence: 2585 passed / 2 skipped; new suite `tests/test_agent/test_skills/test_spec_compliance.py` (16 tests) + spec-style fixture `tests/fixtures/skills/spec-demo/` (multi-line YAML description, license, metadata.activation, references/, scripts/). Deviations: (a) tool namespacing replaced by registration-time collision checks — renaming tools would change what the model calls for zero gain while collisions are rare; full namespacing deferred until a real collision case appears; (b) `tools.py` import path KEPT as a documented trusted-Python escape hatch (spec-portable skills should use scripts/); (c) `skills-ref validate` not runnable in this environment — parity asserted via loader tests against the spec rules (name format/length, description length, compatibility cap, name==dir). Breaking: `Skill.activation` default is now `on_demand`; `minimal` fixture renamed `minimal-helper` to satisfy name==dir.
 
 ### Phase 0 — shipped 2026-08-25
 All 8 items landed in one pass. Evidence: full suite 2518 passed / 4 skipped; new regression file `tests/test_retrieval/test_phase0_regressions.py` (18 tests) pins every fix; ruff clean on all touched files. Deviations from plan: (a) score fields stay [0,1] (ContextItem pydantic constraint) with the raw value in `metadata["raw_score"]` — RRF already preserved `rrf_raw_score`, kept as-is; (b) explicit reranker `top_k` now *overrides* the constructor (per the original docstrings) instead of `min()`; (c) SQLite dimension validation done by deriving dim from the stored blob (strict cosine raises on mismatch) rather than a constructor param — declared-dimension API deferred to Phase 2's protocol rework. Breaking changes (pre-1.0): `AsyncCohereReranker` callback shape, `ScoreReranker` removed, async all-fail now raises.

@@ -1,7 +1,8 @@
-"""SKILL.md loader for the Agent Skills standard.
+"""SKILL.md loader for the Agent Skills open standard.
 
-Parses SKILL.md files into native Skill instances, with optional
-tool discovery from tools.py in the same directory.
+Parses SKILL.md files (YAML frontmatter + markdown body, per
+https://agentskills.io/specification) into native Skill instances, with
+optional tool discovery from tools.py in the same directory.
 """
 
 from __future__ import annotations
@@ -11,7 +12,9 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+import yaml
 
 from anchor.agent.skills.models import Skill
 
@@ -23,18 +26,41 @@ logger = logging.getLogger(__name__)
 _NAME_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 _MAX_NAME_LENGTH = 64
 _MAX_DESCRIPTION_LENGTH = 1024
+_MAX_COMPATIBILITY_LENGTH = 500
+
+# Spec fields (agentskills.io) + anchor extensions accepted at top level.
+_KNOWN_KEYS = frozenset(
+    {
+        "name",
+        "description",
+        "license",
+        "compatibility",
+        "metadata",
+        "allowed-tools",
+        # anchor extensions (also accepted under metadata)
+        "activation",
+        "tags",
+    }
+)
+
+_VALID_ACTIVATIONS = ("always", "on_demand")
 
 
-def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
-    """Split SKILL.md content into frontmatter dict and markdown body.
+def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """Split SKILL.md content into a YAML frontmatter dict and markdown body.
 
-    Frontmatter is delimited by ``---`` lines at the start of the file.
-    Returns (frontmatter_dict, body_text).
+    Frontmatter is delimited by ``---`` lines at the start of the file and
+    parsed with a real YAML parser (multi-line values, quoting, and nested
+    maps all work).  Returns ``(frontmatter_dict, body_text)``.
+
+    Raises ``ValueError`` when the frontmatter is not valid YAML or not a
+    mapping.
     """
-    lines = text.strip().splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}, text.strip()
+    stripped = text.strip()
+    if not stripped.startswith("---"):
+        return {}, stripped
 
+    lines = stripped.splitlines()
     end_line = None
     for i, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
@@ -42,31 +68,58 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
             break
 
     if end_line is None:
-        return {}, text.strip()
+        return {}, stripped
 
-    raw_fm = "\n".join(lines[1:end_line]).strip()
-    body = "\n".join(lines[end_line + 1:]).strip()
+    raw_fm = "\n".join(lines[1:end_line])
+    body = "\n".join(lines[end_line + 1 :]).strip()
 
-    fm: dict[str, str] = {}
-    for line in raw_fm.splitlines():
-        line = line.strip()
-        if not line or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        fm[key.strip()] = value.strip()
-    return fm, body
+    try:
+        parsed = yaml.safe_load(raw_fm)
+    except yaml.YAMLError as exc:
+        msg = f"Invalid YAML frontmatter in SKILL.md: {exc}"
+        raise ValueError(msg) from exc
+
+    if parsed is None:
+        return {}, body
+    if not isinstance(parsed, dict):
+        msg = f"SKILL.md frontmatter must be a YAML mapping, got {type(parsed).__name__}"
+        raise ValueError(msg)
+    return parsed, body
 
 
-def _parse_tags(raw: str) -> tuple[str, ...]:
-    """Parse a YAML-style inline list like ``[creative, tools]``."""
-    raw = raw.strip()
+def _parse_tags(raw: Any) -> tuple[str, ...]:
+    """Normalize tags from a YAML list or comma-separated string."""
+    if raw is None:
+        return ()
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(t).strip() for t in raw if str(t).strip())
+    raw = str(raw).strip()
     if raw.startswith("[") and raw.endswith("]"):
         raw = raw[1:-1]
     return tuple(t.strip() for t in raw.split(",") if t.strip())
 
 
-def _validate_name(name: str) -> None:
-    """Validate skill name: lowercase, hyphens, digits, max 64 chars."""
+def _parse_allowed_tools(raw: Any) -> tuple[str, ...]:
+    """Normalize allowed-tools: space-separated string (spec) or YAML list."""
+    if raw is None:
+        return ()
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(t).strip() for t in raw if str(t).strip())
+    return tuple(t for t in str(raw).split() if t)
+
+
+def _parse_metadata(raw: Any) -> dict[str, str]:
+    """Normalize the spec ``metadata`` map to string -> string."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        msg = f"SKILL.md 'metadata' must be a mapping, got {type(raw).__name__}"
+        raise ValueError(msg)
+    return {str(k): str(v) for k, v in raw.items()}
+
+
+def _validate_name(name: str, skill_dir: Path) -> None:
+    """Validate skill name per spec: format, length, matches directory name."""
     if not name:
         msg = "SKILL.md frontmatter missing required field: 'name'"
         raise ValueError(msg)
@@ -77,6 +130,12 @@ def _validate_name(name: str) -> None:
         msg = (
             f"Invalid skill name '{name}': must be lowercase letters, "
             "digits, and hyphens only (no leading/trailing/consecutive hyphens)"
+        )
+        raise ValueError(msg)
+    if name != skill_dir.name:
+        msg = (
+            f"Skill name '{name}' must match its directory name "
+            f"'{skill_dir.name}' (agentskills.io spec)"
         )
         raise ValueError(msg)
 
@@ -91,8 +150,32 @@ def _validate_description(description: str) -> None:
         raise ValueError(msg)
 
 
+def _resolve_activation(fm: dict[str, Any], metadata: dict[str, str], name: str) -> str:
+    """Resolve activation mode: ``metadata.activation`` (canonical anchor
+    extension) wins over a legacy top-level ``activation`` key; defaults to
+    ``on_demand``.
+    """
+    raw = metadata.get("activation") or fm.get("activation") or "on_demand"
+    raw = str(raw)
+    if raw not in _VALID_ACTIVATIONS:
+        logger.warning(
+            "Invalid activation '%s' in SKILL.md for '%s': must be one of %s, "
+            "defaulting to 'on_demand'",
+            raw,
+            name,
+            _VALID_ACTIVATIONS,
+        )
+        raw = "on_demand"
+    return raw
+
+
 def _discover_tools(skill_dir: Path, skill_name: str) -> tuple[AgentTool, ...]:
-    """Import tools.py from skill directory and collect AgentTool instances."""
+    """Import tools.py from skill directory and collect AgentTool instances.
+
+    This is an anchor extension for trusted, Python-authored skills — it
+    executes arbitrary code at load time. Spec-portable skills should ship
+    ``scripts/`` (executed on demand via ``run_skill_script``) instead.
+    """
     from anchor.agent.models import AgentTool as AgentToolCls
 
     tools_path = skill_dir / "tools.py"
@@ -164,24 +247,31 @@ def load_skill(path: str | Path) -> Skill:
     text = skill_file.read_text(encoding="utf-8")
     fm, body = _parse_frontmatter(text)
 
-    name = fm.get("name", "")
-    _validate_name(name)
+    unknown = set(fm) - _KNOWN_KEYS
+    if unknown:
+        logger.warning(
+            "SKILL.md in %s has unknown frontmatter keys (ignored): %s",
+            skill_dir.name,
+            ", ".join(sorted(unknown)),
+        )
 
-    description = fm.get("description", "")
+    name = str(fm.get("name", "") or "")
+    _validate_name(name, skill_dir)
+
+    description = str(fm.get("description", "") or "").strip()
     _validate_description(description)
 
-    valid_activations = ("always", "on_demand")
-    activation_raw = fm.get("activation", "on_demand")
-    if activation_raw not in valid_activations:
-        msg = (
-            f"Invalid activation '{activation_raw}' in SKILL.md for '{name}': "
-            f"must be one of {valid_activations}, defaulting to 'on_demand'"
-        )
-        logger.warning(msg)
-        activation_raw = "on_demand"
-    activation = cast(Literal["always", "on_demand"], activation_raw)
+    compatibility = str(fm.get("compatibility", "") or "").strip()
+    if len(compatibility) > _MAX_COMPATIBILITY_LENGTH:
+        msg = f"Skill compatibility exceeds {_MAX_COMPATIBILITY_LENGTH} characters"
+        raise ValueError(msg)
 
-    tags = _parse_tags(fm.get("tags", ""))
+    metadata = _parse_metadata(fm.get("metadata"))
+    activation = cast(
+        Literal["always", "on_demand"], _resolve_activation(fm, metadata, name)
+    )
+
+    tags = _parse_tags(fm.get("tags"))
     tools = _discover_tools(skill_dir, name)
 
     return Skill(
@@ -191,6 +281,11 @@ def load_skill(path: str | Path) -> Skill:
         tools=tools,
         activation=activation,
         tags=tags,
+        license=str(fm.get("license", "") or "").strip(),
+        compatibility=compatibility,
+        metadata=metadata,
+        allowed_tools=_parse_allowed_tools(fm.get("allowed-tools")),
+        path=skill_dir,
     )
 
 

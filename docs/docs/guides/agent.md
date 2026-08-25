@@ -265,7 +265,7 @@ my_skill = Skill(
 | `description` | `str` | required | Shown in discovery prompt |
 | `instructions` | `str` | `""` | Injected when skill is activated |
 | `tools` | `tuple[AgentTool, ...]` | `()` | Tools this skill provides |
-| `activation` | `Literal["always", "on_demand"]` | `"always"` | When tools become available |
+| `activation` | `Literal["always", "on_demand"]` | `"on_demand"` | When tools become available |
 | `tags` | `tuple[str, ...]` | `()` | Grouping/filtering tags |
 
 ### Activation Modes

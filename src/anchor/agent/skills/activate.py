@@ -45,7 +45,17 @@ def _make_activate_skill_tool(registry: SkillRegistry) -> AgentTool:
         parts = [f"Skill '{skill.name}' activated."]
         if skill.instructions:
             parts.append(f"\n{skill.instructions}")
-        parts.append(f"\nNew tools available: {', '.join(tool_names)}")
+        if tool_names:
+            parts.append(f"\nNew tools available: {', '.join(tool_names)}")
+        references = skill.reference_files()
+        if references:
+            parts.append(
+                "\nBundled reference files (load on demand with "
+                f"read_skill_file): {', '.join(references)}"
+            )
+        scripts = skill.script_files()
+        if scripts:
+            parts.append(f"\nBundled scripts: {', '.join(scripts)}")
         return "\n".join(parts)
 
     return activate_skill
