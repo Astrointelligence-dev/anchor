@@ -14,7 +14,15 @@ from anchor.agent.events import (
     TurnStarted,
     UsageLimitReached,
 )
-from anchor.agent.hooks import AgentCallback, HookResult, PostToolHook, PreToolHook
+from anchor.agent.hooks import (
+    AgentCallback,
+    ApprovalCallback,
+    ApprovalDecision,
+    ApprovalRequest,
+    HookResult,
+    PostToolHook,
+    PreToolHook,
+)
 from anchor.agent.models import AgentTool, RoundUsage, TurnDiagnostics, UsageLimits
 from anchor.agent.skills import (
     Skill,
@@ -34,6 +42,9 @@ __all__ = [
     "AgentCallback",
     "AgentEvent",
     "AgentTool",
+    "ApprovalCallback",
+    "ApprovalDecision",
+    "ApprovalRequest",
     "CompactionFinished",
     "CompactionStarted",
     "HookResult",

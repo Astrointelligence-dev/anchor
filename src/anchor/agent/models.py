@@ -31,6 +31,7 @@ class AgentTool(BaseModel):
     timeout: float | None = None
     defer_loading: bool = False
     input_examples: tuple[dict[str, Any], ...] = ()
+    requires_approval: bool = False
 
     def to_tool_schema(self) -> ToolSchema:
         """Convert to provider-agnostic ToolSchema."""

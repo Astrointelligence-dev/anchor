@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from collections.abc import AsyncGenerator, Callable, Iterator
@@ -45,7 +46,14 @@ from .events import (
     TurnStarted,
     UsageLimitReached,
 )
-from .hooks import AgentCallback, PostToolHook, PreToolHook
+from .hooks import (
+    AgentCallback,
+    ApprovalCallback,
+    ApprovalDecision,
+    ApprovalRequest,
+    PostToolHook,
+    PreToolHook,
+)
 from .models import AgentTool, RoundUsage, TurnDiagnostics, UsageLimits
 from .skills.activate import _make_activate_skill_tool
 from .skills.models import Skill
@@ -146,6 +154,7 @@ class Agent:
         "_activate_tool",
         "_agent_callbacks",
         "_allow_skill_scripts",
+        "_approval_callback",
         "_compact_fn",
         "_compaction_keep",
         "_compaction_trigger",
@@ -223,6 +232,7 @@ class Agent:
         self._compaction_keep = 4
         self._compact_fn: Callable[[str], str] | None = None
         self._usage_limits: UsageLimits | None = None
+        self._approval_callback: ApprovalCallback | None = None
 
         self._tokenizer: Tokenizer = tokenizer or _default_tokenizer()
         self._pipeline = ContextPipeline(
@@ -290,6 +300,20 @@ class Agent:
         """
         self._pre_hooks.extend(pre_tool_use or [])
         self._post_hooks.extend(post_tool_use or [])
+        return self
+
+    def with_approval(self, callback: ApprovalCallback) -> Agent:
+        """Set the inline human-in-the-loop approval callback. Returns self.
+
+        Called for tools marked ``requires_approval=True`` and for
+        calls a pre-hook answered ``"ask"`` — the tool call pauses
+        until the callback returns an :class:`ApprovalDecision` (deny
+        becomes an ``is_error`` tool result carrying the reason; an
+        approval may rewrite the input). An async callback requires
+        the async loop. Without a callback, approval-gated calls fail
+        closed.
+        """
+        self._approval_callback = callback
         return self
 
     def with_callbacks(self, callbacks: list[AgentCallback]) -> Agent:
@@ -582,22 +606,29 @@ class Agent:
 
     def _apply_pre_hooks(
         self, name: str, tool_input: dict[str, Any],
-    ) -> tuple[dict[str, Any], str | None]:
-        """Run pre-hooks. Returns (possibly-updated input, deny reason)."""
+    ) -> tuple[dict[str, Any], str | None, bool]:
+        """Run pre-hooks. Returns (input, deny reason, ask).
+
+        ``ask`` routes the call to the approval callback; a later
+        hook's deny still wins over an earlier ask.
+        """
+        ask = False
         for hook in self._pre_hooks:
             try:
                 result = hook(name, tool_input)
             except Exception as exc:  # fail closed: a broken gate stays shut
                 logger.exception("Pre-tool hook failed for '%s'", name)
                 reason = f"pre-tool hook raised {type(exc).__name__}: {exc}"
-                return tool_input, reason
+                return tool_input, reason, ask
             if result is None:
                 continue
             if result.decision == "deny":
-                return tool_input, result.reason or "denied by pre-tool hook"
+                return tool_input, result.reason or "denied by pre-tool hook", ask
+            if result.decision == "ask":
+                ask = True
             if result.updated_input is not None:
                 tool_input = result.updated_input
-        return tool_input, None
+        return tool_input, None, ask
 
     def _apply_post_hooks(
         self, name: str, tool_input: dict[str, Any], output: str,
@@ -615,23 +646,101 @@ class Agent:
 
     def _resolve_call(
         self, name: str, tool_input: dict[str, Any],
-    ) -> tuple[AgentTool | None, dict[str, Any], str | None]:
+    ) -> tuple[AgentTool | None, dict[str, Any], str | None, bool]:
         """Look up the tool, validate input, and run pre-hooks.
 
-        Returns ``(tool, updated_input, error_text)``; when
-        ``error_text`` is set the call must not execute.
+        Returns ``(tool, updated_input, error_text, needs_approval)``;
+        when ``error_text`` is set the call must not execute.
         """
         tool = self._find_tool(name)
         if tool is None:
-            return None, tool_input, f"Unknown tool: {name}"
+            return None, tool_input, f"Unknown tool: {name}", False
         valid, err = tool.validate_input(tool_input)
         if not valid:
             logger.warning("Tool '%s' input validation failed: %s", name, err)
-            return tool, tool_input, f"Error: invalid input for tool '{name}': {err}"
-        tool_input, deny = self._apply_pre_hooks(name, tool_input)
+            return (
+                tool, tool_input,
+                f"Error: invalid input for tool '{name}': {err}", False,
+            )
+        tool_input, deny, ask = self._apply_pre_hooks(name, tool_input)
         if deny is not None:
-            return tool, tool_input, f"Error: tool '{name}' denied: {deny}"
-        return tool, tool_input, None
+            return tool, tool_input, f"Error: tool '{name}' denied: {deny}", False
+        return tool, tool_input, None, ask or tool.requires_approval
+
+    def _approval_request(
+        self, tc: ToolCall, tool_input: dict[str, Any],
+    ) -> tuple[Any, str | None]:
+        """Invoke the approval callback. Returns (raw result, deny text).
+
+        The raw result may be an awaitable (async callback) — the
+        async caller awaits it; the sync caller rejects it. No
+        callback configured fails closed.
+        """
+        if self._approval_callback is None:
+            return None, (
+                f"Error: tool '{tc.name}' denied: approval required but no "
+                "approval callback is configured (Agent.with_approval)"
+            )
+        request = ApprovalRequest(
+            tool_call_id=tc.id, name=tc.name, tool_input=tool_input,
+        )
+        try:
+            return self._approval_callback(request), None
+        except Exception as exc:  # fail closed, like pre-hooks
+            logger.exception("Approval callback failed for '%s'", tc.name)
+            return None, (
+                f"Error: tool '{tc.name}' denied: approval callback raised "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    @staticmethod
+    def _apply_decision(
+        tc: ToolCall, tool_input: dict[str, Any], decision: ApprovalDecision,
+    ) -> tuple[dict[str, Any], str | None]:
+        """Turn an ApprovalDecision into (input, deny text)."""
+        if not decision.approved:
+            reason = decision.reason or "denied by approval callback"
+            return tool_input, f"Error: tool '{tc.name}' denied: {reason}"
+        if decision.updated_input is not None:
+            return decision.updated_input, None
+        return tool_input, None
+
+    def _approve(
+        self, tc: ToolCall, tool_input: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        """Sync approval resolution: (input, deny text)."""
+        raw, deny = self._approval_request(tc, tool_input)
+        if deny is not None:
+            return tool_input, deny
+        if inspect.isawaitable(raw):
+            raw.close()
+            msg = (
+                "Async approval callback requires async execution. "
+                "Use agent.astream()/agent.achat()."
+            )
+            raise TypeError(msg)
+        return self._apply_decision(tc, tool_input, raw)
+
+    async def _aapprove(
+        self, tc: ToolCall, tool_input: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        """Async approval resolution: (input, deny text).
+
+        Deliberately outside the tool timeout: an approval may stay
+        pending indefinitely — the turn waits.
+        """
+        raw, deny = self._approval_request(tc, tool_input)
+        if deny is not None:
+            return tool_input, deny
+        try:
+            decision = await raw if inspect.isawaitable(raw) else raw
+        except Exception as exc:  # fail closed
+            logger.exception("Approval callback failed for '%s'", tc.name)
+            return tool_input, (
+                f"Error: tool '{tc.name}' denied: approval callback "
+                f"raised {type(exc).__name__}: {exc}"
+            )
+        return self._apply_decision(tc, tool_input, decision)
 
     @staticmethod
     def _tool_failure_text(name: str, exc: BaseException) -> str:
@@ -654,9 +763,15 @@ class Agent:
 
     def _execute_call(self, tc: ToolCall) -> ToolResult:
         """Execute one tool call synchronously."""
-        tool, tool_input, err = self._resolve_call(tc.name, tc.arguments)
+        tool, tool_input, err, needs_approval = self._resolve_call(
+            tc.name, tc.arguments,
+        )
         if tool is None or err is not None:
             return self._error_result(tc, tool_input, err or f"Unknown tool: {tc.name}")
+        if needs_approval:
+            tool_input, deny = self._approve(tc, tool_input)
+            if deny is not None:
+                return self._error_result(tc, tool_input, deny)
         self._fire("on_tool_start", tc.name, tool_input)
         try:
             # ponytail: no timeout on sync tools — cancelling a sync call
@@ -671,9 +786,15 @@ class Agent:
 
     async def _aexecute_call(self, tc: ToolCall) -> ToolResult:
         """Execute one tool call asynchronously (MCP/subagent-aware)."""
-        tool, tool_input, err = self._resolve_call(tc.name, tc.arguments)
+        tool, tool_input, err, needs_approval = self._resolve_call(
+            tc.name, tc.arguments,
+        )
         if tool is None or err is not None:
             return self._error_result(tc, tool_input, err or f"Unknown tool: {tc.name}")
+        if needs_approval:
+            tool_input, deny = await self._aapprove(tc, tool_input)
+            if deny is not None:
+                return self._error_result(tc, tool_input, deny)
         self._fire("on_tool_start", tc.name, tool_input)
         async_caller = getattr(tool, "_mcp_async_caller", None) or getattr(
             tool, "_anchor_async_caller", None,

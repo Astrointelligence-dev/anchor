@@ -26,6 +26,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     input_model: type[BaseModel] | None = None,
+    requires_approval: bool = False,
 ) -> Callable[[Callable[..., str]], AgentTool]: ...
 
 
@@ -35,6 +36,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     input_model: type[BaseModel] | None = None,
+    requires_approval: bool = False,
 ) -> AgentTool | Callable[[Callable[..., str]], AgentTool]:
     """Create an :class:`AgentTool` from a decorated function.
 
@@ -67,11 +69,17 @@ def tool(
     """
     if fn is not None:
         # Bare @tool usage
-        return _build_agent_tool(fn, name=name, description=description, input_model=input_model)
+        return _build_agent_tool(
+            fn, name=name, description=description, input_model=input_model,
+            requires_approval=requires_approval,
+        )
 
     # Parameterised @tool(...) usage — return a decorator
     def decorator(func: Callable[..., str]) -> AgentTool:
-        return _build_agent_tool(func, name=name, description=description, input_model=input_model)
+        return _build_agent_tool(
+            func, name=name, description=description, input_model=input_model,
+            requires_approval=requires_approval,
+        )
 
     return decorator
 
@@ -82,6 +90,7 @@ def _build_agent_tool(
     name: str | None,
     description: str | None,
     input_model: type[BaseModel] | None,
+    requires_approval: bool = False,
 ) -> AgentTool:
     """Internal helper that builds the AgentTool from a function."""
     tool_name = name or fn.__name__
@@ -101,4 +110,5 @@ def _build_agent_tool(
         input_schema=input_schema,
         fn=fn,
         input_model=model,
+        requires_approval=requires_approval,
     )
