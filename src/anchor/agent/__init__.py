@@ -23,6 +23,7 @@ from anchor.agent.hooks import (
     PostToolHook,
     PreToolHook,
 )
+from anchor.agent.memory_tool import FileMemoryBackend, memory_tool
 from anchor.agent.models import AgentTool, RoundUsage, TurnDiagnostics, UsageLimits
 from anchor.agent.skills import (
     Skill,
@@ -47,6 +48,7 @@ __all__ = [
     "ApprovalRequest",
     "CompactionFinished",
     "CompactionStarted",
+    "FileMemoryBackend",
     "HookResult",
     "PostToolHook",
     "PreToolHook",
@@ -67,6 +69,7 @@ __all__ = [
     "load_skill",
     "load_skills_directory",
     "memory_skill",
+    "memory_tool",
     "memory_tools",
     "rag_skill",
     "rag_tools",

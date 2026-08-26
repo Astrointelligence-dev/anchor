@@ -54,6 +54,7 @@ from .hooks import (
     PostToolHook,
     PreToolHook,
 )
+from .memory_tool import MEMORY_INSTRUCTIONS, FileMemoryBackend, memory_tool
 from .models import AgentTool, RoundUsage, TurnDiagnostics, UsageLimits
 from .skills.activate import _make_activate_skill_tool
 from .skills.models import Skill
@@ -173,6 +174,7 @@ class Agent:
         "_mcp_pool",
         "_mcp_tools",
         "_memory",
+        "_memory_tool",
         "_output_failures",
         "_output_mode",
         "_output_model",
@@ -247,6 +249,7 @@ class Agent:
         self._max_output_retries = 1
         self._output_failures = 0
         self._last_output: str | None = None
+        self._memory_tool: AgentTool | None = None
 
         self._tokenizer: Tokenizer = tokenizer or _default_tokenizer()
         self._pipeline = ContextPipeline(
@@ -430,6 +433,24 @@ class Agent:
         self._compact_fn = compact_fn
         return self
 
+    def with_memory_tool(
+        self, backend: FileMemoryBackend | str | Path,
+    ) -> Agent:
+        """Attach the client-side memory tool (memory_20250818-compatible).
+
+        Accepts a :class:`FileMemoryBackend` or a base path. Registers
+        the ``memory`` tool and appends the memory protocol to the
+        system prompt (multi-provider — no automatic API injection
+        here). Returns self.
+        """
+        if any(t.name == "memory" for t in self._all_active_tools()):
+            msg = "Tool name collision: 'memory' is already registered"
+            raise ValueError(msg)
+        if not isinstance(backend, FileMemoryBackend):
+            backend = FileMemoryBackend(backend)
+        self._memory_tool = memory_tool(backend)
+        return self
+
     def with_skill(self, skill: Skill) -> Agent:
         """Register a skill. Returns self for chaining."""
         self._check_tool_collisions(skill)
@@ -591,6 +612,8 @@ class Agent:
             tools.append(self._search_tool)
         if self._output_tool is not None:
             tools.append(self._output_tool)
+        if self._memory_tool is not None:
+            tools.append(self._memory_tool)
         tools.extend(self._mcp_tools)
         return tools
 
@@ -669,6 +692,8 @@ class Agent:
         subagents = _subagent_listing(self._subagents)
         if subagents:
             parts.append(subagents)
+        if self._memory_tool is not None:
+            parts.append(MEMORY_INSTRUCTIONS)
         return "\n\n".join(parts)
 
     def _fire(self, method: str, *args: Any) -> None:
