@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shlex
 from typing import Any, Self
 
 from anchor.agent.models import AgentTool
@@ -72,12 +71,17 @@ class FastMCPClientBridge:
                     kwargs["headers"] = dict(self._config.headers)
                 client = Client(self._config.url, **kwargs)
             elif self._config.command is not None:
-                cmd = self._config.command
-                if self._config.args:
-                    cmd = f"{cmd} {' '.join(shlex.quote(a) for a in self._config.args)}"
-                if self._config.env:
-                    kwargs["env"] = dict(self._config.env)
-                client = Client(cmd, **kwargs)
+                # Explicit stdio transport: fastmcp's string inference
+                # does not accept a "command arg arg" string (found by
+                # the live smoke test — the mocked suite never saw it).
+                from fastmcp.client.transports import StdioTransport
+
+                transport = StdioTransport(
+                    command=self._config.command,
+                    args=list(self._config.args or []),
+                    env=dict(self._config.env) if self._config.env else None,
+                )
+                client = Client(transport, **kwargs)
             else:
                 msg = "No command or URL configured"
                 raise MCPConnectionError(
