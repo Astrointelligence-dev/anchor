@@ -4,7 +4,6 @@ from .cache import CacheBackend
 from .classifier import QueryClassifier
 from .evaluation import HumanEvaluator, RAGEvaluator, RetrievalEvaluator
 from .ingestion import Chunker, DocumentParser
-from .late_interaction import TokenLevelEncoder
 from .memory import (
     AsyncCompactionStrategy,
     AsyncMemoryExtractor,
@@ -76,7 +75,6 @@ __all__ = [
     "Retriever",
     "SpanExporter",
     "TableExtractor",
-    "TokenLevelEncoder",
     "Tokenizer",
     "VectorStore",
 ]

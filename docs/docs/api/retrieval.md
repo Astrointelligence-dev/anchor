@@ -335,41 +335,6 @@ MaxSimScorer()
 |---|---|---|
 | `score` | `(query_tokens: list[list[float]], doc_tokens: list[list[float]]) -> float` | Sum of per-query-token maximum cosine similarities. |
 
-### LateInteractionScorer
-
-Configurable wrapper for token-level scoring. Defaults to MaxSim.
-
-```python
-LateInteractionScorer(
-    score_fn: Callable[[list[list[float]], list[list[float]]], float] | None = None,
-)
-```
-
-| Method | Signature | Description |
-|---|---|---|
-| `score` | `(query_tokens: list[list[float]], doc_tokens: list[list[float]]) -> float` | Delegate to configured scoring function. |
-
-### LateInteractionRetriever
-
-Two-stage retriever: first-stage candidate generation + token-level re-scoring.
-
-```python
-LateInteractionRetriever(
-    first_stage: Retriever,
-    encoder: TokenLevelEncoder,
-    scorer: LateInteractionScorer | None = None,
-    first_stage_k: int = 100,
-)
-```
-
-| Method | Signature | Description |
-|---|---|---|
-| `retrieve` | `(query: QueryBundle, top_k: int = 10) -> list[ContextItem]` | Generate candidates then re-score with token-level similarity. |
-
----
-
-## Memory Retrieval
-
 ### ScoredMemoryRetriever
 
 Multi-signal retriever combining recency, relevance, and importance.

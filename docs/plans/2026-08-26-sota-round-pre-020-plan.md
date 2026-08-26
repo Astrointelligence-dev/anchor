@@ -18,9 +18,9 @@ Contrato (estilo `can_use_tool` do Claude SDK, adaptado às convenções do repo
 - Ponto de execução: dentro de `_execute_call`/`_aexecute_call` após `_resolve_call` (o callback roda no frame da task; consumidor async fica suspenso no `__anext__` enquanto o approver decide — TUI mostra o diálogo no próprio callback).
 - Deliberado (YAGNI): sem evento `ApprovalRequested` no stream (o approver É o dono do callback); sem timeout embutido (nenhum SDK tem — aplicação decide); pausa durável fica para pós-ConversationStore.
 
-- [ ] Models + `with_approval` + `"ask"` no HookResult + `requires_approval` no AgentTool + exports
-- [ ] Roteamento em `_execute_call`/`_aexecute_call`; fail-closed; updated_input
-- [ ] Testes: allow/deny/rewrite, ask via hook, fail-closed, callback async, tools paralelas com decisões distintas, reason chega ao modelo, sync+async
+- [x] Models + `with_approval` + `"ask"` no HookResult + `requires_approval` no AgentTool + exports
+- [x] Roteamento em `_execute_call`/`_aexecute_call`; fail-closed; updated_input
+- [x] Testes: allow/deny/rewrite, ask via hook, fail-closed, callback async, tools paralelas com decisões distintas, reason chega ao modelo, sync+async
 
 **Done when:** um agent com tool `requires_approval=True` pausa no callback, deny devolve reason ao modelo, allow executa — nos dois caminhos.
 
@@ -33,42 +33,42 @@ Contrato (modo tool, default Pydantic AI):
 - Consumo: `Agent.run(message) -> BaseModel` / `Agent.arun(message)` — consomem o stream internamente e retornam a instância validada; `TurnFinished` ganha `output: str | None` (JSON normalizado) e `agent.last_output`. `chat`/`achat` seguem intocados (agents de texto).
 - Collision check: `final_result` vs tools existentes (padrão `task`/`search_tools`).
 
-- [ ] `with_output_model` + tool sintética + special-case no fluxo de tools + captura/validação/retry
-- [ ] `run`/`arun` + `TurnFinished.output` + exports
-- [ ] Testes: happy path, retry por validação, nudge de texto→tool, convivência com tools reais no mesmo turno, prompted mode, sync+async
+- [x] `with_output_model` + tool sintética + special-case no fluxo de tools + captura/validação/retry
+- [x] `run`/`arun` + `TurnFinished.output` + exports
+- [x] Testes: happy path, retry por validação, nudge de texto→tool, convivência com tools reais no mesmo turno, prompted mode, sync+async
 
 **Done when:** `agent.with_output_model(Report).arun("...")` devolve `Report` validado com tools reais no meio do caminho.
 
 ## Fase 3 — MCP bridge gaps (fastmcp 3.x)
 
-- [ ] `MCPServerConfig.defer_tools: bool = False` → `defer_loading` no `mcp_tool_to_agent_tool` (wire de uma linha + teste)
-- [ ] Collision check de nomes MCP vs tools ativos no `_ensure_mcp` (hoje first-match-wins silencioso)
-- [ ] Prompts/resources agregados: `MCPClientPool.all_prompts()/get_prompt()/all_resources()/read_resource()` + acessores no Agent (`mcp_prompts()`, `mcp_get_prompt()`, `mcp_resources()`, `mcp_read_resource()`) — **app-facing, nunca automático no contexto** (padrão dos clients de referência); exposição model-facing fica por demanda
-- [ ] Atualizar pin para `fastmcp>=3.4,<4` (estável atual); follow-up 4.x registrado no backlog
+- [x] `MCPServerConfig.defer_tools: bool = False` → `defer_loading` no `mcp_tool_to_agent_tool` (wire de uma linha + teste)
+- [x] Collision check de nomes MCP vs tools ativos no `_ensure_mcp` (hoje first-match-wins silencioso)
+- [x] Prompts/resources agregados: `MCPClientPool.all_prompts()/get_prompt()/all_resources()/read_resource()` + acessores no Agent (`mcp_prompts()`, `mcp_get_prompt()`, `mcp_resources()`, `mcp_read_resource()`) — **app-facing, nunca automático no contexto** (padrão dos clients de referência); exposição model-facing fica por demanda
+- [x] Atualizar pin para `fastmcp>=3.4,<4` (estável atual); follow-up 4.x registrado no backlog
 
 **Done when:** um server com `defer_tools=True` não polui o prompt até o `search_tools` carregar; prompts/resources acessíveis pela API do pool.
 
 ## Fase 4 — Memory tool compat `memory_20250818`
 
-- [ ] `FileMemoryBackend(base_path)`: os 6 comandos com as strings de resultado de referência (view com line numbers 6-char, erros literais do spec); guards: prefixo `/memories` + canonicalização + contenção (padrão `_resolve_in_skill`), rejeição de traversal urlencoded, raiz protegida contra delete/rename, rename sem overwrite, truncação de view (16k chars + view_range)
-- [ ] `memory_tool(backend) -> AgentTool` (tool única `memory`, schema com discriminador `command`) + `Agent.with_memory_tool(backend)` que registra o tool E appenda a instrução de uso ao system suffix (multi-provider não ganha a injeção automática da API)
-- [ ] Testes: cada comando, traversal attempts, raiz, rename collision, round-trip com o loop (modelo chama via FakeLLM)
+- [x] `FileMemoryBackend(base_path)`: os 6 comandos com as strings de resultado de referência (view com line numbers 6-char, erros literais do spec); guards: prefixo `/memories` + canonicalização + contenção (padrão `_resolve_in_skill`), rejeição de traversal urlencoded, raiz protegida contra delete/rename, rename sem overwrite, truncação de view (16k chars + view_range)
+- [x] `memory_tool(backend) -> AgentTool` (tool única `memory`, schema com discriminador `command`) + `Agent.with_memory_tool(backend)` que registra o tool E appenda a instrução de uso ao system suffix (multi-provider não ganha a injeção automática da API)
+- [x] Testes: cada comando, traversal attempts, raiz, rename collision, round-trip com o loop (modelo chama via FakeLLM)
 
 **Done when:** um turno com o memory tool cria/lê/edita arquivos sob o backend em qualquer provider; nenhum path escapa do base_path.
 
 ## Fase 5 — Smoke tests live
 
-- [ ] `tests/live/` no padrão pgvector (importorskip + `pytestmark` por env): Anthropic (`ANTHROPIC_API_KEY`): 1 turno E2E com tool + event stream + caching + tool_choice; structured output; memory tool. OpenAI/Gemini (gated pelas keys): 1 turno com tool cada
-- [ ] MCP live **sem credencial**: server fastmcp real via stdio subprocess — list_tools/call_tool/prompts/resources reais (roda no CI)
-- [ ] CI: job opcional documentado (env vars não injetadas por default — suites gated ficam para execução local/manual)
+- [x] `tests/live/` no padrão pgvector (importorskip + `pytestmark` por env): Anthropic (`ANTHROPIC_API_KEY`): 1 turno E2E com tool + event stream + caching + tool_choice; structured output; memory tool. OpenAI/Gemini (gated pelas keys): 1 turno com tool cada
+- [x] MCP live **sem credencial**: server fastmcp real via stdio subprocess — list_tools/call_tool/prompts/resources reais (roda no CI)
+- [x] CI: job opcional documentado (env vars não injetadas por default — suites gated ficam para execução local/manual)
 
 **Done when:** `ANTHROPIC_API_KEY=... pytest tests/live` passa localmente; o MCP live roda verde no CI sem credenciais.
 
 ## Fase 6 — Deleções de retrieval + docs da rodada
 
-- [ ] Deletar late-interaction retriever + testes (decisão: sem uso, reescrita não justificada); changelog
-- [ ] Dropar Redis do roadmap/docs (grep por menções); changelog
-- [ ] Guia do agent: seções Approval e Structured Output; guia MCP: prompts/resources + defer_tools; guia memory: memory tool; CHANGELOG consolidado da rodada
+- [x] Deletar late-interaction retriever + testes (decisão: sem uso, reescrita não justificada); changelog
+- [x] Dropar Redis do roadmap/docs (grep por menções); changelog
+- [x] Guia do agent: seções Approval e Structured Output; guia MCP: prompts/resources + defer_tools; guia memory: memory tool; CHANGELOG consolidado da rodada
 
 ## Fora de escopo (registrado)
 

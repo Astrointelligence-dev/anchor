@@ -49,7 +49,7 @@ Retrieval:
     RoundRobinReranker, RerankerPipeline,
     ScoredMemoryRetriever, MemoryRetrieverAdapter, rrf_fuse,
     CallbackRouter, KeywordRouter, MetadataRouter, RoutedRetriever,
-    LateInteractionRetriever, SharedSpaceRetriever, CrossModalEncoder
+    SharedSpaceRetriever, CrossModalEncoder
 
 Formatting:
     AnthropicFormatter, OpenAIFormatter, GenericTextFormatter, BaseFormatter
@@ -332,7 +332,6 @@ from anchor.protocols import (
     SpanExporter,
     TableExtractor,
     Tokenizer,
-    TokenLevelEncoder,
     VectorStore,
 )
 from anchor.query import (
@@ -360,9 +359,6 @@ from anchor.retrieval import (
     FlashRankReranker,
     HybridRetriever,
     KeywordRouter,
-    LateInteractionRetriever,
-    LateInteractionScorer,
-    MaxSimScorer,
     MemoryRetrieverAdapter,
     MetadataRouter,
     RerankerPipeline,
@@ -541,14 +537,11 @@ __all__ = [
     "LLMProvider",
     "LLMRAGEvaluator",
     "LLMResponse",
-    "LateInteractionRetriever",
-    "LateInteractionScorer",
     "LinearDecay",
     "LinearRecencyScorer",
     "LoggingMetricsCollector",
     "MarkdownParser",
     "MarkdownTableParser",
-    "MaxSimScorer",
     "MemoryCallback",
     "MemoryConsolidator",
     "MemoryContextEnricher",
@@ -644,7 +637,6 @@ __all__ = [
     "TiktokenCounter",
     "TimeoutError",
     "TokenBudget",
-    "TokenLevelEncoder",
     "Tokenizer",
     "ToolCall",
     "ToolCallDelta",

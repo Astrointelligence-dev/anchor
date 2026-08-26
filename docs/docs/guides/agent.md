@@ -227,6 +227,77 @@ The limit covers the turn's own rounds; LLM calls made outside them —
 compaction summarization and a subagent's internal rounds — are not
 counted (a subagent enforces its own limits, if configured).
 
+### Approval (Human-in-the-Loop)
+
+Mark tools that need a human decision and register an approval
+callback — the tool call pauses until it resolves:
+
+```python
+from anchor import ApprovalDecision, ApprovalRequest, tool
+
+@tool(requires_approval=True)
+def delete_records(table: str) -> str:
+    """Delete all records from a table."""
+    ...
+
+async def approve(request: ApprovalRequest) -> ApprovalDecision:
+    ok = await show_dialog(request.name, request.tool_input)
+    return ApprovalDecision(
+        approved=ok, reason=None if ok else "user declined — suggest a dry run",
+    )
+
+agent.with_tools([delete_records]).with_approval(approve)
+```
+
+A pre-hook can also route any call to the callback with
+`HookResult(decision="ask")`. Deny becomes an `is_error` tool result
+carrying the reason, so the model adjusts instead of retrying blindly;
+approve may rewrite the input via `updated_input`. A gated call with no
+callback configured fails closed. Async callbacks require
+`astream()`/`achat()` and may stay pending indefinitely — approval
+timeouts are the application's decision. Durable pause (ending the turn
+with pending approvals and resuming later) is planned on top of the
+conversation store.
+
+### Structured Output
+
+```python
+from pydantic import BaseModel
+
+class Report(BaseModel):
+    summary: str
+    severity: int
+
+report = agent.with_output_model(Report).run("Assess the incident.")
+```
+
+The default tool mode adds a synthetic `final_result` tool carrying the
+schema and forces `tool_choice="any"` — the model cannot stop in plain
+text; calling `final_result` with valid arguments ends the turn.
+Invalid arguments come back as an error tool result (the loop's own
+retry mechanic), bounded by `max_output_retries`. Real tools still run
+in the same turn. The normalized JSON is also available in
+`TurnFinished.output` and `agent.last_output`. `mode="prompted"`
+injects the schema into the prompt instead and validates the text reply
+(the subagent mechanic) — the portable fallback for models without tool
+calling.
+
+### Memory Tool
+
+`with_memory_tool(path)` gives the model persistent memory compatible
+with Anthropic's `memory_20250818` command set — on every provider:
+
+```python
+agent.with_memory_tool("./agent-memory")
+```
+
+The model sees one `memory` tool (view / create / str_replace / insert /
+delete / rename) rooted at the virtual `/memories` directory, mapped
+into the given path with strict containment (path traversal is
+rejected). The memory protocol is appended to the system prompt. Pairs
+naturally with `with_compaction`/`with_context_management`: memory
+holds what must survive summarization.
+
 ### Accessing the Last Result
 
 After calling `chat()` or `achat()`, the full `ContextResult` is available:

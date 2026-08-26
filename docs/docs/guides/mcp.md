@@ -311,6 +311,29 @@ config = MCPServerConfig(
 )
 ```
 
+## Deferred Tools
+
+`MCPServerConfig(defer_tools=True)` registers the server's tools with
+`defer_loading=True`: their schemas stay out of the prompt until the
+model loads them through the auto-registered `search_tools` meta-tool —
+useful for servers with large tool surfaces.
+
+## Prompts and Resources
+
+MCP prompts are user-controlled and resources are application-controlled
+(the reference-client pattern) — anchor exposes both to your
+application and never injects them automatically:
+
+```python
+prompts = await agent.mcp_prompts()            # {server: [MCPPrompt]}
+text = await agent.mcp_get_prompt("github", "pr_review", {"pr": "42"})
+resources = await agent.mcp_resources()        # {server: [MCPResource]}
+readme = await agent.mcp_read_resource("docs", "file://readme")
+# your app decides: send `text` as a user message, attach `readme`, ...
+```
+
+The same surface exists on `MCPClientPool` directly.
+
 ## Error Handling
 
 All MCP errors inherit from `MCPError`, which itself inherits from

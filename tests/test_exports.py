@@ -74,7 +74,6 @@ class TestTopLevelExports:
             Reranker,
             Retriever,
             Tokenizer,
-            TokenLevelEncoder,
             VectorStore,
         )
 
@@ -88,7 +87,6 @@ class TestTopLevelExports:
         assert PostProcessor is not None
         assert Reranker is not None
         assert Retriever is not None
-        assert TokenLevelEncoder is not None
         assert Tokenizer is not None
         assert VectorStore is not None
 
@@ -117,9 +115,6 @@ class TestTopLevelExports:
             DenseRetriever,
             FlashRankReranker,
             HybridRetriever,
-            LateInteractionRetriever,
-            LateInteractionScorer,
-            MaxSimScorer,
             RerankerPipeline,
             RoundRobinReranker,
             SharedSpaceRetriever,
@@ -137,9 +132,6 @@ class TestTopLevelExports:
         assert DenseRetriever is not None
         assert FlashRankReranker is not None
         assert HybridRetriever is not None
-        assert LateInteractionRetriever is not None
-        assert LateInteractionScorer is not None
-        assert MaxSimScorer is not None
         assert RerankerPipeline is not None
         assert RoundRobinReranker is not None
         assert SharedSpaceRetriever is not None
