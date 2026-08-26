@@ -21,6 +21,7 @@ def mcp_tool_to_agent_tool(
     async_caller: Callable[[str, dict[str, Any]], Coroutine[Any, Any, str]],
     server_name: str,
     prefix: bool,
+    defer_loading: bool = False,
 ) -> AgentTool:
     """Convert an MCP ToolSchema into an anchor AgentTool.
 
@@ -43,6 +44,7 @@ def mcp_tool_to_agent_tool(
         description=schema.description,
         input_schema=schema.input_schema,
         fn=_sync_sentinel,
+        defer_loading=defer_loading,
     )
 
     # Attach async caller for _aexecute_tool() to use

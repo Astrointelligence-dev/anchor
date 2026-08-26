@@ -917,11 +917,57 @@ class Agent:
         pool = MCPClientPool(self._mcp_configs)
         try:
             await pool.connect_all()
-            self._mcp_tools = await pool.all_agent_tools()
+            mcp_tools = await pool.all_agent_tools()
+            # _find_tool is first-match-wins: a silent shadow would be
+            # a debugging nightmare — fail loudly at connect instead.
+            taken = {t.name for t in self._all_active_tools()}
+            for t in mcp_tools:
+                if t.name in taken:
+                    msg = (
+                        f"Tool name collision: MCP tool '{t.name}' shadows an "
+                        "existing tool (set prefix_tools=True or rename)"
+                    )
+                    raise ValueError(msg)
+            self._mcp_tools = mcp_tools
             self._mcp_pool = pool
         except Exception:
             await pool.disconnect_all()
             raise
+
+    def _require_mcp_pool(self) -> Any:
+        if self._mcp_pool is None:
+            msg = (
+                "No connected MCP servers. Configure with_mcp_servers() and "
+                "run a turn (or await agent._ensure_mcp()) first."
+            )
+            raise RuntimeError(msg)
+        return self._mcp_pool
+
+    async def mcp_prompts(self) -> dict[str, list[Any]]:
+        """MCP prompt templates per server (app-facing; never automatic)."""
+        await self._ensure_mcp()
+        return await self._require_mcp_pool().all_prompts()
+
+    async def mcp_get_prompt(
+        self, server: str, name: str, arguments: dict[str, Any] | None = None,
+    ) -> str:
+        """Render an MCP prompt template as message text.
+
+        Reference-client pattern: prompts are user-controlled — the
+        application decides to send the result as a user message.
+        """
+        await self._ensure_mcp()
+        return await self._require_mcp_pool().get_prompt(server, name, arguments)
+
+    async def mcp_resources(self) -> dict[str, list[Any]]:
+        """MCP resources per server (app-facing; never automatic)."""
+        await self._ensure_mcp()
+        return await self._require_mcp_pool().all_resources()
+
+    async def mcp_read_resource(self, server: str, uri: str) -> str:
+        """Read an MCP resource by URI — application-controlled context."""
+        await self._ensure_mcp()
+        return await self._require_mcp_pool().read_resource(server, uri)
 
     def _should_run_tools(self, state: _RoundState, *, final_round: bool) -> bool:
         """Whether this round's tool calls execute.

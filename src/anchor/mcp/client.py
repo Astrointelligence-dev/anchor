@@ -12,7 +12,7 @@ from typing import Any, Self
 
 from anchor.agent.models import AgentTool
 from anchor.llm.models import ToolSchema
-from anchor.mcp.errors import MCPConnectionError, MCPToolError
+from anchor.mcp.errors import MCPConnectionError, MCPError, MCPToolError
 from anchor.mcp.models import (
     MCPPrompt,
     MCPPromptArgument,
@@ -224,6 +224,7 @@ class FastMCPClientBridge:
                 async_caller=self.call_tool,
                 server_name=self._config.name,
                 prefix=self._config.prefix_tools,
+                defer_loading=self._config.defer_tools,
             )
             for schema in schemas
         ]
@@ -303,6 +304,46 @@ class MCPClientPool:
             *(c.as_agent_tools() for c in self._clients),
         )
         return [tool for tools in tool_lists for tool in tools]
+
+    def _bridge(self, server: str) -> FastMCPClientBridge:
+        for client in self._clients:
+            if client._config.name == server:
+                return client
+        available = ", ".join(c._config.name for c in self._clients) or "none"
+        msg = f"Unknown MCP server: '{server}'. Connected: {available}"
+        raise MCPError(msg)
+
+    async def all_prompts(self) -> dict[str, list[MCPPrompt]]:
+        """Prompt templates per connected server, keyed by server name."""
+        prompt_lists = await asyncio.gather(
+            *(c.list_prompts() for c in self._clients),
+        )
+        return {
+            client._config.name: prompts
+            for client, prompts in zip(self._clients, prompt_lists, strict=True)
+        }
+
+    async def get_prompt(
+        self, server: str, name: str, arguments: dict[str, Any] | None = None,
+    ) -> str:
+        """Render a prompt template from *server* as message text."""
+        return await self._bridge(server).get_prompt(name, arguments)
+
+    async def all_resources(self) -> dict[str, list[MCPResource]]:
+        """Resources per connected server, keyed by server name."""
+        resource_lists = await asyncio.gather(
+            *(c.list_resources() for c in self._clients),
+        )
+        return {
+            client._config.name: resources
+            for client, resources in zip(
+                self._clients, resource_lists, strict=True,
+            )
+        }
+
+    async def read_resource(self, server: str, uri: str) -> str:
+        """Read a resource from *server* by URI."""
+        return await self._bridge(server).read_resource(uri)
 
     async def __aenter__(self) -> Self:
         await self.connect_all()

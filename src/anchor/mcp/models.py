@@ -42,6 +42,11 @@ class MCPServerConfig(BaseModel, frozen=True):
     prefix_tools: bool = True
     """Prefix tool names with server name to prevent collisions."""
 
+    defer_tools: bool = False
+    """Register this server's tools with ``defer_loading=True``: their
+    schemas stay out of the prompt until the ``search_tools`` meta-tool
+    loads them."""
+
     timeout: float | None = 30.0
     """Timeout in seconds for MCP server operations. None disables timeout."""
 
