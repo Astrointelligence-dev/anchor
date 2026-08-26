@@ -106,12 +106,14 @@ class TurnFinished(_BaseEvent):
     """Terminal event: the final text and per-round diagnostics.
 
     The diagnostics are also available after the turn as
-    ``agent.last_turn``.
+    ``agent.last_turn``. ``output`` carries the normalized structured
+    output JSON when the agent has an ``output_model`` (tool mode).
     """
 
     type: Literal["turn_finished"] = "turn_finished"
     text: str
     diagnostics: TurnDiagnostics
+    output: str | None = None
 
 
 AgentEvent = (

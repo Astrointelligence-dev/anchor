@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from anchor._callbacks import fire_callbacks
 from anchor.formatters.anthropic import AnthropicFormatter
@@ -64,6 +64,8 @@ from .subagent import (
     _is_subagent_tool,
     _make_subagent_tool,
     _make_task_tool,
+    _run_async,
+    _run_sync,
     _subagent_listing,
 )
 from .tool_search import _make_search_tools_tool
@@ -160,15 +162,21 @@ class Agent:
         "_compaction_trigger",
         "_context_management",
         "_deferred_loaded",
+        "_last_output",
         "_last_result",
         "_last_turn",
         "_llm",
+        "_max_output_retries",
         "_max_response_tokens",
         "_max_rounds",
         "_mcp_configs",
         "_mcp_pool",
         "_mcp_tools",
         "_memory",
+        "_output_failures",
+        "_output_mode",
+        "_output_model",
+        "_output_tool",
         "_pipeline",
         "_post_hooks",
         "_pre_hooks",
@@ -233,6 +241,12 @@ class Agent:
         self._compact_fn: Callable[[str], str] | None = None
         self._usage_limits: UsageLimits | None = None
         self._approval_callback: ApprovalCallback | None = None
+        self._output_model: type[BaseModel] | None = None
+        self._output_mode = "tool"
+        self._output_tool: AgentTool | None = None
+        self._max_output_retries = 1
+        self._output_failures = 0
+        self._last_output: str | None = None
 
         self._tokenizer: Tokenizer = tokenizer or _default_tokenizer()
         self._pipeline = ContextPipeline(
@@ -258,8 +272,10 @@ class Agent:
     def with_tools(self, tools: list[AgentTool]) -> Agent:
         """Add tools (additive). Returns self for chaining."""
         for t in tools:
-            if (t.name == "task" and self._task_tool is not None) or (
-                t.name == "search_tools" and self._search_tool is not None
+            if (
+                (t.name == "task" and self._task_tool is not None)
+                or (t.name == "search_tools" and self._search_tool is not None)
+                or (t.name == "final_result" and self._output_tool is not None)
             ):
                 msg = (
                     f"Tool name collision: '{t.name}' is already registered "
@@ -315,6 +331,63 @@ class Agent:
         """
         self._approval_callback = callback
         return self
+
+    def with_output_model(
+        self,
+        output_model: type[BaseModel],
+        *,
+        mode: str = "tool",
+        max_output_retries: int = 1,
+    ) -> Agent:
+        """Require schema-validated structured output. Returns self.
+
+        ``mode="tool"`` (default, portable): a synthetic ``final_result``
+        tool carries the schema; ``tool_choice="any"`` keeps the model
+        from stopping in plain text; calling it with valid arguments
+        ends the turn (``TurnFinished.output`` / ``agent.last_output`` /
+        :meth:`run`). Invalid arguments come back as an error tool
+        result — the loop's own retry mechanic — bounded by
+        ``max_output_retries``, then ``ValueError``.
+
+        ``mode="prompted"``: the schema is appended to the prompt and
+        the reply is validated, with self-contained retry turns (the
+        subagent mechanic). Use :meth:`run`/:meth:`arun`.
+        """
+        if mode not in ("tool", "prompted"):
+            msg = f"Unknown output mode: {mode!r} (expected 'tool' or 'prompted')"
+            raise ValueError(msg)
+        if mode == "tool":
+            if any(t.name == "final_result" for t in self._all_active_tools()):
+                msg = (
+                    "Tool name collision: 'final_result' is reserved for "
+                    "the structured-output tool"
+                )
+                raise ValueError(msg)
+            self._output_tool = self._make_output_tool(output_model)
+        self._output_model = output_model
+        self._output_mode = mode
+        self._max_output_retries = max_output_retries
+        return self
+
+    def _make_output_tool(self, output_model: type[BaseModel]) -> AgentTool:
+        def record(**kwargs: Any) -> str:
+            try:
+                parsed = output_model.model_validate(kwargs)
+            except ValidationError as exc:
+                self._output_failures += 1
+                raise ValueError(str(exc)) from exc
+            self._last_output = parsed.model_dump_json()
+            return "Final answer recorded."
+
+        return AgentTool(
+            name="final_result",
+            description=(
+                "Record your final answer. Call this exactly once, when "
+                "you are done, with the complete answer as arguments."
+            ),
+            input_schema=output_model.model_json_schema(),
+            fn=record,
+        )
 
     def with_callbacks(self, callbacks: list[AgentCallback]) -> Agent:
         """Add observer callbacks for loop events (additive). Returns self.
@@ -495,6 +568,11 @@ class Agent:
         """Per-round token accounting for the most recent turn."""
         return self._last_turn
 
+    @property
+    def last_output(self) -> str | None:
+        """Normalized structured-output JSON from the most recent turn."""
+        return self._last_output
+
     # -- Internal helpers --
 
     def _all_active_tools(self) -> list[AgentTool]:
@@ -511,6 +589,8 @@ class Agent:
             tools.append(self._task_tool)
         if self._search_tool is not None:
             tools.append(self._search_tool)
+        if self._output_tool is not None:
+            tools.append(self._output_tool)
         tools.extend(self._mcp_tools)
         return tools
 
@@ -1171,6 +1251,10 @@ class Agent:
             # Belt over the final-round notice: providers that support
             # tool_choice force a text answer; others just ignore it.
             call_extra["tool_choice"] = "none"
+        elif self._output_tool is not None and schemas:
+            # Structured output: the model may not stop in plain text —
+            # it must call a tool, ultimately final_result.
+            call_extra["tool_choice"] = "any"
         return llm_messages, schemas, schema_tokens, call_extra
 
     @staticmethod
@@ -1434,6 +1518,53 @@ class Agent:
     def _stop_cause(stop_reason: StopReason | None) -> str:
         return "max_tokens" if stop_reason == StopReason.MAX_TOKENS else "stop"
 
+    def _round_verdict(
+        self,
+        state: _RoundState,
+        messages: list[Message],
+        *,
+        run_tools: bool,
+        stopped_by: str,
+    ) -> tuple[bool, str]:
+        """Post-round control: ``(stop_loop, stopped_by)``.
+
+        Structured output (tool mode) hooks in here: a captured
+        ``final_result`` stops the loop; a model that stopped in plain
+        text with output still pending gets a retry nudge appended to
+        *messages*; exhausted retries raise ``ValueError``.
+        """
+        if self._last_output is not None:
+            return True, "stop"
+        output_pending = (
+            self._output_model is not None and self._output_mode == "tool"
+        )
+        if output_pending and self._output_failures > self._max_output_retries:
+            msg = (
+                "structured output failed validation after "
+                f"{self._max_output_retries} retries"
+            )
+            raise ValueError(msg)
+        if not run_tools:
+            if output_pending and stopped_by not in ("usage_limit",):
+                self._output_failures += 1
+                if self._output_failures > self._max_output_retries:
+                    msg = (
+                        "model ended the turn without calling final_result "
+                        f"after {self._max_output_retries} retries"
+                    )
+                    raise ValueError(msg)
+                messages.append(Message(
+                    role=Role.USER,
+                    content=(
+                        "[system] You must record your final answer by "
+                        "calling the final_result tool — do not answer in "
+                        "plain text."
+                    ),
+                ))
+                return False, stopped_by
+            return True, stopped_by
+        return False, stopped_by
+
     # -- Chat --
 
     def stream(self, message: str) -> Iterator[AgentEvent]:
@@ -1457,6 +1588,8 @@ class Agent:
             self._memory.add_user_message(message)
 
         self._last_turn = None
+        self._last_output = None
+        self._output_failures = 0
         messages, full_system = self._prepare_turn(
             self._pipeline.build(message), message,
         )
@@ -1501,7 +1634,10 @@ class Agent:
                 round_open = None
                 rounds.append(usage)
                 yield RoundFinished(round=round_index, usage=usage)
-                if not run_tools:
+                stop_loop, stopped_by = self._round_verdict(
+                    state, messages, run_tools=run_tools, stopped_by=stopped_by,
+                )
+                if stop_loop:
                     break
                 breach = self._check_usage_limits(rounds)
                 if breach is not None:
@@ -1518,7 +1654,9 @@ class Agent:
             if round_open is not None:
                 self._fire("on_round_end", round_open)
             diagnostics = self._finish_turn(rounds, stopped_by, final_text)
-        yield TurnFinished(text=final_text, diagnostics=diagnostics)
+        yield TurnFinished(
+            text=final_text, diagnostics=diagnostics, output=self._last_output,
+        )
 
     async def astream(self, message: str) -> AsyncGenerator[AgentEvent, None]:
         """Send a message and stream typed agent events asynchronously.
@@ -1534,6 +1672,8 @@ class Agent:
         await self._ensure_mcp()
 
         self._last_turn = None
+        self._last_output = None
+        self._output_failures = 0
         messages, full_system = self._prepare_turn(
             await self._pipeline.abuild(message), message,
         )
@@ -1580,7 +1720,10 @@ class Agent:
                 round_open = None
                 rounds.append(usage)
                 yield RoundFinished(round=round_index, usage=usage)
-                if not run_tools:
+                stop_loop, stopped_by = self._round_verdict(
+                    state, messages, run_tools=run_tools, stopped_by=stopped_by,
+                )
+                if stop_loop:
                     break
                 breach = self._check_usage_limits(rounds)
                 if breach is not None:
@@ -1597,7 +1740,9 @@ class Agent:
             if round_open is not None:
                 self._fire("on_round_end", round_open)
             diagnostics = self._finish_turn(rounds, stopped_by, final_text)
-        yield TurnFinished(text=final_text, diagnostics=diagnostics)
+        yield TurnFinished(
+            text=final_text, diagnostics=diagnostics, output=self._last_output,
+        )
 
     def chat(self, message: str) -> Iterator[str]:
         """Send a message and stream the response text.
@@ -1618,6 +1763,45 @@ class Agent:
         async for event in self.astream(message):
             if isinstance(event, TextDelta) and event.parent_tool_call_id is None:
                 yield event.text
+
+    def _require_output_model(self) -> type[BaseModel]:
+        if self._output_model is None:
+            msg = "run() requires with_output_model()"
+            raise ValueError(msg)
+        return self._output_model
+
+    def run(self, message: str) -> BaseModel:
+        """Run a turn and return the validated structured output.
+
+        Requires :meth:`with_output_model`. Sync mirror of :meth:`arun`.
+        """
+        output_model = self._require_output_model()
+        if self._output_mode == "prompted":
+            normalized = _run_sync(
+                self, message, output_model, self._max_output_retries,
+            )
+            return output_model.model_validate_json(normalized)
+        for _ in self.stream(message):
+            pass
+        if self._last_output is None:
+            msg = "turn ended without structured output"
+            raise ValueError(msg)
+        return output_model.model_validate_json(self._last_output)
+
+    async def arun(self, message: str) -> BaseModel:
+        """Async mirror of :meth:`run`."""
+        output_model = self._require_output_model()
+        if self._output_mode == "prompted":
+            normalized = await _run_async(
+                self, message, output_model, self._max_output_retries,
+            )
+            return output_model.model_validate_json(normalized)
+        async for _ in self.astream(message):
+            pass
+        if self._last_output is None:
+            msg = "turn ended without structured output"
+            raise ValueError(msg)
+        return output_model.model_validate_json(self._last_output)
 
     async def aclose(self) -> None:
         """Clean up MCP connections and other async resources."""
