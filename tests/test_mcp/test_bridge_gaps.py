@@ -104,6 +104,24 @@ async def test_mcp_name_shadowing_fails_loudly():
     assert agent._mcp_tools == []
 
 
+async def test_two_servers_with_same_tool_name_collide():
+    configs = [
+        MCPServerConfig(name="a", command="echo", prefix_tools=False),
+        MCPServerConfig(name="b", command="echo", prefix_tools=False),
+    ]
+    agent = Agent(llm=FakeLLMProvider([]), tokenizer=_Tok())
+    agent.with_mcp_servers(configs)
+
+    def _client(*_args: object, **_kwargs: object) -> AsyncMock:
+        return _mock_fastmcp_client([_mcp_tool_stub("dup")])
+
+    with (
+        patch("anchor.mcp.client.Client", side_effect=_client),
+        pytest.raises(ValueError, match="collision"),
+    ):
+        await agent._ensure_mcp()
+
+
 # ---------------------------------------------------------------------------
 # Prompts / resources aggregation (app-facing)
 # ---------------------------------------------------------------------------

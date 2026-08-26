@@ -154,6 +154,20 @@ def test_breach_on_penultimate_round_gets_no_extra_round():
 # ---------------------------------------------------------------------------
 
 
+def test_used_equal_to_limit_does_not_breach():
+    # Post-hoc semantics are strict: used == limit continues the turn.
+    agent, _ = _agent(
+        _looping_tool_responses(1), tools=[_echo_tool()],
+    )
+    agent.with_usage_limits(UsageLimits(tool_calls_limit=1))
+
+    events = list(agent.stream("Go"))
+
+    assert not any(isinstance(e, UsageLimitReached) for e in events)
+    assert agent.last_turn is not None
+    assert agent.last_turn.stopped_by == "stop"
+
+
 def test_tool_calls_breach_triggers_wrap_up():
     agent, provider = _agent(
         _looping_tool_responses(5), tools=[_echo_tool()],

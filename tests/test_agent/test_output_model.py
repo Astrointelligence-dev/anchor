@@ -186,6 +186,131 @@ def test_text_agents_unaffected():
 
 
 # ---------------------------------------------------------------------------
+# Final round / wrap-up (the P1 of the round review)
+# ---------------------------------------------------------------------------
+
+
+def test_final_round_forces_and_executes_final_result():
+    # max_rounds=2: round 0 uses a real tool, round 1 (final) must
+    # still record the answer — tool_choice names final_result and the
+    # call executes even on the final round.
+    agent, provider = _agent(
+        [
+            _tool_use_response("tu_1", "echo", {"x": "hi"}),
+            _tool_use_response(
+                "tu_2", "final_result", {"answer": "hi", "confidence": 1.0},
+            ),
+        ],
+        tools=[_echo_tool()],
+        max_rounds=2,
+    )
+    agent.with_output_model(Finding)
+
+    result = agent.run("Question?")
+
+    assert isinstance(result, Finding)
+    assert provider.seen_kwargs[1]["tool_choice"] == {
+        "type": "tool", "name": "final_result",
+    }
+    # The output-aware notice asks for the call (not "do not call tools").
+    final_messages = provider.seen_messages[1]
+    assert any(
+        "calling the final_result tool" in str(m.content)
+        for m in final_messages
+    )
+
+
+def test_wrap_up_with_output_keeps_usage_limit_cause():
+    from anchor.agent import UsageLimits
+
+    agent, provider = _agent(
+        [
+            _tool_use_response("tu_1", "echo", {"x": "hi"}),
+            _tool_use_response(
+                "tu_2", "final_result", {"answer": "hi", "confidence": 1.0},
+            ),
+        ],
+        tools=[_echo_tool()],
+    )
+    agent.with_output_model(Finding)
+    agent.with_usage_limits(UsageLimits(tool_calls_limit=0))
+
+    result = agent.run("Question?")
+
+    assert isinstance(result, Finding)
+    # Output was delivered, but the budget cut stays visible.
+    assert agent.last_turn is not None
+    assert agent.last_turn.stopped_by == "usage_limit"
+    assert provider.seen_kwargs[1]["tool_choice"] == {
+        "type": "tool", "name": "final_result",
+    }
+
+
+def test_mixed_batch_on_final_round_falls_back_to_error():
+    # A provider that ignores tool_choice and mixes final_result with a
+    # real tool on the final round: nothing executes, run() raises.
+    from tests.test_agent.test_phase4_loop import _multi_tool_use_response
+
+    agent, _ = _agent(
+        [
+            _multi_tool_use_response([
+                ("tu_1", "final_result", {"answer": "hi", "confidence": 1.0}),
+                ("tu_2", "echo", {"x": "side effect"}),
+            ]),
+        ],
+        tools=[_echo_tool()],
+        max_rounds=1,
+    )
+    agent.with_output_model(Finding)
+
+    with pytest.raises(ValueError, match="without structured output"):
+        agent.run("Question?")
+
+
+def test_invalid_args_on_final_round_raises():
+    agent, _ = _agent(
+        [_tool_use_response("tu_1", "final_result", {"answer": "hi"})],
+        max_rounds=1,
+    )
+    agent.with_output_model(Finding)
+
+    with pytest.raises(ValueError, match="structured output"):
+        agent.run("Question?")
+
+
+# ---------------------------------------------------------------------------
+# Reconfiguration + memory guard
+# ---------------------------------------------------------------------------
+
+
+def test_reconfigure_tool_to_prompted_drops_the_tool():
+    agent, provider = _agent([
+        _text_response('{"answer": "42", "confidence": 0.9}'),
+    ])
+    agent.with_output_model(Finding)  # tool mode first
+    agent.with_output_model(Finding, mode="prompted")  # reconfigure
+
+    result = agent.run("Question?")
+
+    assert isinstance(result, Finding)
+    assert provider.seen_kwargs[0].get("tools") is None
+    assert "tool_choice" not in provider.seen_kwargs[0]
+    # And tool mode can be configured again without self-collision.
+    agent.with_output_model(Finding)
+
+
+def test_prompted_mode_with_memory_is_refused():
+    from anchor.memory.manager import MemoryManager
+
+    agent, _ = _agent([])
+    agent.with_memory(MemoryManager())
+    agent.with_output_model(Finding, mode="prompted")
+
+    with pytest.raises(ValueError, match="without memory"):
+        agent.run("Question?")
+
+
+# ---------------------------------------------------------------------------
 # Prompted mode
 # ---------------------------------------------------------------------------
 

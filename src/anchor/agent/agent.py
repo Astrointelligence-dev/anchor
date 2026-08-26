@@ -81,6 +81,11 @@ _FINAL_ROUND_NOTICE = (
     "Respond with your best final answer now — do not call tools."
 )
 
+_FINAL_ROUND_NOTICE_OUTPUT = (
+    "[system] Final round: the budget for this turn is exhausted. "
+    "Record your final answer by calling the final_result tool now."
+)
+
 
 class _WhitespaceTokenizer:
     """Minimal tokenizer that counts whitespace-separated words.
@@ -279,6 +284,7 @@ class Agent:
                 (t.name == "task" and self._task_tool is not None)
                 or (t.name == "search_tools" and self._search_tool is not None)
                 or (t.name == "final_result" and self._output_tool is not None)
+                or (t.name == "memory" and self._memory_tool is not None)
             ):
                 msg = (
                     f"Tool name collision: '{t.name}' is already registered "
@@ -330,7 +336,9 @@ class Agent:
         becomes an ``is_error`` tool result carrying the reason; an
         approval may rewrite the input). An async callback requires
         the async loop. Without a callback, approval-gated calls fail
-        closed.
+        closed. Parallel tool calls run their approval callbacks
+        concurrently — serialize inside the callback (e.g. a lock or a
+        queue) if your UI needs one prompt at a time.
         """
         self._approval_callback = callback
         return self
@@ -359,6 +367,7 @@ class Agent:
         if mode not in ("tool", "prompted"):
             msg = f"Unknown output mode: {mode!r} (expected 'tool' or 'prompted')"
             raise ValueError(msg)
+        self._output_tool = None  # reconfiguration replaces prior state
         if mode == "tool":
             if any(t.name == "final_result" for t in self._all_active_tools()):
                 msg = (
@@ -803,6 +812,11 @@ class Agent:
         tc: ToolCall, tool_input: dict[str, Any], decision: ApprovalDecision,
     ) -> tuple[dict[str, Any], str | None]:
         """Turn an ApprovalDecision into (input, deny text)."""
+        if not isinstance(decision, ApprovalDecision):
+            return tool_input, (
+                f"Error: tool '{tc.name}' denied: approval callback returned "
+                f"{type(decision).__name__}, expected ApprovalDecision"
+            )
         if not decision.approved:
             reason = decision.reason or "denied by approval callback"
             return tool_input, f"Error: tool '{tc.name}' denied: {reason}"
@@ -818,7 +832,8 @@ class Agent:
         if deny is not None:
             return tool_input, deny
         if inspect.isawaitable(raw):
-            raw.close()
+            if inspect.iscoroutine(raw):
+                raw.close()
             msg = (
                 "Async approval callback requires async execution. "
                 "Use agent.astream()/agent.achat()."
@@ -953,6 +968,7 @@ class Agent:
                         "existing tool (set prefix_tools=True or rename)"
                     )
                     raise ValueError(msg)
+                taken.add(t.name)
             self._mcp_tools = mcp_tools
             self._mcp_pool = pool
         except Exception:
@@ -998,9 +1014,20 @@ class Agent:
         """Whether this round's tool calls execute.
 
         A final round that still asked for tools runs none: the model
-        would never see their results.
+        would never see their results. Exception: a final round whose
+        every call is the terminal ``final_result`` — capturing it ends
+        the turn, so the model never needs a result back.
         """
-        return state.stop_reason == StopReason.TOOL_USE and not final_round
+        if state.stop_reason != StopReason.TOOL_USE:
+            return False
+        if not final_round:
+            return True
+        if self._output_tool is None or not state.accumulators:
+            return False
+        return all(
+            acc.get("name") == "final_result"
+            for acc in state.accumulators.values()
+        )
 
     def _close_round(
         self,
@@ -1319,9 +1346,17 @@ class Agent:
         if self._context_management:
             call_extra["context_management"] = self._context_management
         if final_round and schemas:
-            # Belt over the final-round notice: providers that support
-            # tool_choice force a text answer; others just ignore it.
-            call_extra["tool_choice"] = "none"
+            if self._output_tool is not None:
+                # A final round with structured output pending must
+                # still record the answer — force the output tool.
+                call_extra["tool_choice"] = {
+                    "type": "tool", "name": "final_result",
+                }
+            else:
+                # Belt over the final-round notice: providers that
+                # support tool_choice force a text answer; others just
+                # ignore it.
+                call_extra["tool_choice"] = "none"
         elif self._output_tool is not None and schemas:
             # Structured output: the model may not stop in plain text —
             # it must call a tool, ultimately final_result.
@@ -1445,7 +1480,12 @@ class Agent:
         tool budget to exhaust (relevant for ``max_rounds=1``).
         """
         if final_round and self._all_active_tools():
-            messages.append(Message(role=Role.USER, content=_FINAL_ROUND_NOTICE))
+            notice = (
+                _FINAL_ROUND_NOTICE_OUTPUT
+                if self._output_tool is not None
+                else _FINAL_ROUND_NOTICE
+            )
+            messages.append(Message(role=Role.USER, content=notice))
 
     def _check_usage_limits(
         self, rounds: list[RoundUsage],
@@ -1591,7 +1631,6 @@ class Agent:
 
     def _round_verdict(
         self,
-        state: _RoundState,
         messages: list[Message],
         *,
         run_tools: bool,
@@ -1602,9 +1641,13 @@ class Agent:
         Structured output (tool mode) hooks in here: a captured
         ``final_result`` stops the loop; a model that stopped in plain
         text with output still pending gets a retry nudge appended to
-        *messages*; exhausted retries raise ``ValueError``.
+        *messages*; exhausted retries raise ``ValueError``. Output
+        captured during a usage-limit wrap-up keeps
+        ``stopped_by="usage_limit"`` — the budget cut stays visible.
         """
         if self._last_output is not None:
+            if stopped_by == "usage_limit":
+                return True, "usage_limit"
             return True, "stop"
         output_pending = (
             self._output_model is not None and self._output_mode == "tool"
@@ -1706,7 +1749,7 @@ class Agent:
                 rounds.append(usage)
                 yield RoundFinished(round=round_index, usage=usage)
                 stop_loop, stopped_by = self._round_verdict(
-                    state, messages, run_tools=run_tools, stopped_by=stopped_by,
+                    messages, run_tools=run_tools, stopped_by=stopped_by,
                 )
                 if stop_loop:
                     break
@@ -1792,7 +1835,7 @@ class Agent:
                 rounds.append(usage)
                 yield RoundFinished(round=round_index, usage=usage)
                 stop_loop, stopped_by = self._round_verdict(
-                    state, messages, run_tools=run_tools, stopped_by=stopped_by,
+                    messages, run_tools=run_tools, stopped_by=stopped_by,
                 )
                 if stop_loop:
                     break
@@ -1838,6 +1881,15 @@ class Agent:
     def _require_output_model(self) -> type[BaseModel]:
         if self._output_model is None:
             msg = "run() requires with_output_model()"
+            raise ValueError(msg)
+        if self._output_mode == "prompted" and self._memory is not None:
+            # Same rationale as the subagent clean-context guard: the
+            # prompted mechanic persists the schema, invalid replies,
+            # and retry prompts as real conversation turns.
+            msg = (
+                "prompted output mode requires an agent without memory "
+                "(use tool mode, or drop with_memory)"
+            )
             raise ValueError(msg)
         return self._output_model
 

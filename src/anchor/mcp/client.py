@@ -318,14 +318,25 @@ class MCPClientPool:
         raise MCPError(msg)
 
     async def all_prompts(self) -> dict[str, list[MCPPrompt]]:
-        """Prompt templates per connected server, keyed by server name."""
-        prompt_lists = await asyncio.gather(
+        """Prompt templates per connected server, keyed by server name.
+
+        Best-effort: a server without the prompts capability is logged
+        and omitted instead of failing the aggregate.
+        """
+        results = await asyncio.gather(
             *(c.list_prompts() for c in self._clients),
+            return_exceptions=True,
         )
-        return {
-            client._config.name: prompts
-            for client, prompts in zip(self._clients, prompt_lists, strict=True)
-        }
+        out: dict[str, list[MCPPrompt]] = {}
+        for client, result in zip(self._clients, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "MCP server '%s' prompts unavailable: %s",
+                    client._config.name, result,
+                )
+                continue
+            out[client._config.name] = result
+        return out
 
     async def get_prompt(
         self, server: str, name: str, arguments: dict[str, Any] | None = None,
@@ -334,16 +345,25 @@ class MCPClientPool:
         return await self._bridge(server).get_prompt(name, arguments)
 
     async def all_resources(self) -> dict[str, list[MCPResource]]:
-        """Resources per connected server, keyed by server name."""
-        resource_lists = await asyncio.gather(
+        """Resources per connected server, keyed by server name.
+
+        Best-effort: a server without the resources capability is
+        logged and omitted instead of failing the aggregate.
+        """
+        results = await asyncio.gather(
             *(c.list_resources() for c in self._clients),
+            return_exceptions=True,
         )
-        return {
-            client._config.name: resources
-            for client, resources in zip(
-                self._clients, resource_lists, strict=True,
-            )
-        }
+        out: dict[str, list[MCPResource]] = {}
+        for client, result in zip(self._clients, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "MCP server '%s' resources unavailable: %s",
+                    client._config.name, result,
+                )
+                continue
+            out[client._config.name] = result
+        return out
 
     async def read_resource(self, server: str, uri: str) -> str:
         """Read a resource from *server* by URI."""

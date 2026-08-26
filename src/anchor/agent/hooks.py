@@ -24,7 +24,7 @@ Two distinct mechanisms:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
@@ -73,7 +73,9 @@ class ApprovalDecision(BaseModel, frozen=True):
     updated_input: dict[str, Any] | None = None
 
 
-ApprovalCallback = Callable[[ApprovalRequest], "ApprovalDecision | Any"]
+ApprovalCallback = Callable[
+    [ApprovalRequest], "ApprovalDecision | Awaitable[ApprovalDecision]"
+]
 """Sync or async ``(ApprovalRequest) -> ApprovalDecision``.
 
 An async callback requires the async loop (``astream``/``achat``); it

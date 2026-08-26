@@ -255,7 +255,9 @@ carrying the reason, so the model adjusts instead of retrying blindly;
 approve may rewrite the input via `updated_input`. A gated call with no
 callback configured fails closed. Async callbacks require
 `astream()`/`achat()` and may stay pending indefinitely — approval
-timeouts are the application's decision. Durable pause (ending the turn
+timeouts are the application's decision. Parallel tool calls run their
+callbacks concurrently; serialize inside the callback if your UI needs
+one prompt at a time. Durable pause (ending the turn
 with pending approvals and resuming later) is planned on top of the
 conversation store.
 

@@ -253,6 +253,29 @@ async def test_parallel_tools_with_distinct_decisions():
     assert "beta is blocked" in second.content
 
 
+def test_mistyped_callback_return_fails_closed():
+    agent, provider = _agent(_turn_responses(), tools=[_guarded_echo()])
+    agent.with_approval(lambda request: True)  # type: ignore[arg-type,return-value]
+
+    list(agent.chat("Go"))
+
+    (result,) = _tool_results_of(provider, 1)
+    assert result.is_error is True
+    assert "expected ApprovalDecision" in result.content
+
+
+def test_non_coroutine_awaitable_on_sync_loop_raises_typeerror():
+    class _Awaitable:
+        def __await__(self):  # pragma: no cover - never driven
+            yield
+
+    agent, _ = _agent(_turn_responses(), tools=[_guarded_echo()])
+    agent.with_approval(lambda request: _Awaitable())  # type: ignore[arg-type,return-value]
+
+    with pytest.raises(TypeError, match="astream"):
+        list(agent.chat("Go"))
+
+
 def test_async_callback_on_sync_loop_raises():
     agent, _ = _agent(_turn_responses(), tools=[_guarded_echo()])
 

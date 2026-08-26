@@ -161,6 +161,33 @@ def test_agent_round_trip_via_loop(tmp_path: Path) -> None:
     assert "/memories" in system
 
 
+def test_edge_cases_return_error_strings_without_host_paths(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    backend.create("/memories/sub/file.md", "x")
+    tool = memory_tool(backend)
+
+    bad_range = tool.fn(command="view", path="/memories/sub/file.md", view_range=[2])
+    assert bad_range.startswith("Error:")
+
+    over_dir = tool.fn(command="create", path="/memories/sub", file_text="x")
+    assert over_dir.startswith("Error:")
+    assert str(tmp_path) not in over_dir  # never leak the host base_path
+
+    null_byte = tool.fn(command="view", path="/memories/a\x00b")
+    assert null_byte.startswith("Error:")
+    assert str(tmp_path) not in null_byte
+
+
+def test_str_replace_multiline_occurrences_list_lines(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    backend.create("/memories/n.md", "a\nb\nc\na\nb\n")
+    out = backend.str_replace("/memories/n.md", "a\nb", "x")
+    assert "Multiple occurrences" in out
+    assert "1, 4" in out
+
+
 def test_memory_tool_unknown_command(tmp_path: Path) -> None:
     tool = memory_tool(_backend(tmp_path))
     assert "unknown memory command" in tool.fn(command="explode")

@@ -79,4 +79,14 @@ Contrato (modo tool, default Pydantic AI):
 
 ## Review
 
-(preencher pós-implementação — ritual no diff acumulado da rodada)
+### Shipped 2026-08-26 — rodada completa + condições (`78be97a..HEAD`)
+
+**6 fases entregues** + condições do ritual. Suite: 2709 verdes (+16 testes de condição; 8 skips = 3 base + 5 live gated). Zero lint novo.
+
+**Ritual** (ponytail reviewer + juiz adversarial): 13 findings do reviewer, **13/13 confirmados pelo juiz** (nenhum refutado) + 2 achados do sweep próprio do juiz. Destaques:
+
+- **P1 (o grande)**: structured output × round final/wrap-up era falha garantida por construção — o `tool_choice="none"` do round final vencia o `"any"` e `_should_run_tools` recusava o round final, então `run()` levantava ValueError mesmo com modelo obediente (reproduzido nas 3 variantes). Fix validado por protótipo do juiz: round final com output pendente força `{"type":"tool","name":"final_result"}` (os 3 mapeadores suportam), `_should_run_tools` executa o round final quando todas as calls são `final_result` (terminal — o modelo nunca precisa ver resultado), e notice variante pede a call em vez de "do not call tools". Decisão pinada: output capturado durante wrap-up de usage limit mantém `stopped_by="usage_limit"` (o corte de budget fica visível).
+- **P2s**: collision intra-MCP (`taken` congelado — dois servers com a mesma tool passavam); `run()` prompted + memory agora é recusado (precedente `_guard_clean_context` — schema/retries poluíam a conversa persistida); 3 seções de docs com API deletada removidas.
+- **P3s aplicados em lote**: isinstance no retorno do approval callback (lixo virava AttributeError escapando o turno; agora deny fail-closed) + tipo `ApprovalCallback` apertado; `iscoroutine` no close do guard sync; reconfiguração de output model limpa estado; memory tool com try/except retornando strings de erro **sem vazar o base_path do host** + fix da lista de linhas multiline no str_replace + validação de view_range; `all_prompts`/`all_resources` best-effort (um server sem a capability não derruba o agregado); `state` morto removido do `_round_verdict`; `with_tools` protege o nome `memory` (achado N1 do juiz); concorrência de approvals documentada (Lock julgado seguro mas desnecessário — o app serializa no callback se quiser); testes de borda `used == limit` e awaitable não-corrotina.
+
+**Corretos-mas-suspeitos registrados** (sem ação): `_output_failures` mistura nudges e validação num budget só; `ToolStarted` emitido antes da resolução do approval (formato pré-existente do stream); `as_tool`/`SubagentDefinition` sem `requires_approval` (YAGNI); nomes de server MCP duplicados no pool (N2 — nota).

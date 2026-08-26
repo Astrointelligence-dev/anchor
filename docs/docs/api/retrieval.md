@@ -20,9 +20,6 @@ class Reranker(Protocol):
 
 class AsyncReranker(Protocol):
     async def arerank(self, query: QueryBundle, items: list[ContextItem], top_k: int = 10) -> list[ContextItem]: ...
-
-class TokenLevelEncoder(Protocol):
-    def encode_tokens(self, text: str) -> list[list[float]]: ...
 ```
 
 ---
@@ -318,64 +315,6 @@ SharedSpaceRetriever(
 |---|---|---|
 | `index` | `(items: list[ContextItem], modality: str \| None = None) -> None` | Embed and store items. Uses `metadata["modality"]` if `modality` is `None`. |
 | `retrieve` | `(query: QueryBundle, top_k: int = 10) -> list[ContextItem]` | Retrieve by similarity in shared space. |
-
----
-
-## Late Interaction
-
-### MaxSimScorer
-
-ColBERT-style MaxSim scoring over per-token embeddings.
-
-```python
-MaxSimScorer()
-```
-
-| Method | Signature | Description |
-|---|---|---|
-| `score` | `(query_tokens: list[list[float]], doc_tokens: list[list[float]]) -> float` | Sum of per-query-token maximum cosine similarities. |
-
-### ScoredMemoryRetriever
-
-Multi-signal retriever combining recency, relevance, and importance.
-
-```python
-ScoredMemoryRetriever(
-    store: MemoryEntryStore,
-    embed_fn: Callable[[str], list[float]] | None = None,
-    vector_store: VectorStore | None = None,
-    decay: MemoryDecay | None = None,
-    alpha: float = 0.3,
-    beta: float = 0.5,
-    gamma: float = 0.2,
-)
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `store` | `MemoryEntryStore` | -- | Backing store for entries. |
-| `embed_fn` | `Callable \| None` | `None` | Embedding function for relevance. |
-| `vector_store` | `VectorStore \| None` | `None` | Vector index for relevance scoring. |
-| `decay` | `MemoryDecay \| None` | `None` | Custom decay. Defaults to 7-day half-life. |
-| `alpha` / `beta` / `gamma` | `float` | `0.3` / `0.5` / `0.2` | Recency / relevance / importance weights. |
-
-| Method | Signature | Description |
-|---|---|---|
-| `retrieve` | `(query: str, top_k: int = 5, *, user_id: str \| None, memory_type: str \| None) -> list[MemoryEntry]` | Retrieve by composite score with optional filters. |
-| `add_entry` | `(entry: MemoryEntry) -> None` | Add entry and optionally index embedding. |
-| `as_retriever` | `() -> MemoryRetrieverAdapter` | Return `Retriever`-protocol adapter for pipeline use. |
-
-### MemoryRetrieverAdapter
-
-Bridges `ScoredMemoryRetriever` to the `Retriever` protocol.
-
-```python
-MemoryRetrieverAdapter(retriever: ScoredMemoryRetriever)
-```
-
-| Method | Signature | Description |
-|---|---|---|
-| `retrieve` | `(query: QueryBundle, top_k: int = 10) -> list[ContextItem]` | Convert `MemoryEntry` to `ContextItem` with `source=MEMORY`, `priority=7`. |
 
 ---
 

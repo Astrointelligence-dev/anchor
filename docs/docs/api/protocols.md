@@ -185,29 +185,8 @@ class AsyncReranker(Protocol):
 
 ---
 
-## Late Interaction
 
-### TokenLevelEncoder
-
-Encodes text into per-token embeddings for late interaction scoring
-(e.g., ColBERT MaxSim).
-
-```python
-@runtime_checkable
-class TokenLevelEncoder(Protocol):
-    def encode_tokens(self, text: str) -> list[list[float]]: ...
-```
-
-| Parameter | Type | Description |
-|---|---|---|
-| `text` | `str` | Text to encode into per-token embeddings |
-
-**Returns:** A list of embeddings, one per token. Each embedding is a list
-of floats.
-
----
-
-## Memory
+### ## Memory
 
 ### ConversationMemory
 

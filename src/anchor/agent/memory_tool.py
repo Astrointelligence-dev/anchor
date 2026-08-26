@@ -140,6 +140,8 @@ class FileMemoryBackend:
         if len(lines) > _MAX_LINES:
             return f"File {path} exceeds maximum line limit of 999,999 lines."
         start, end = 1, len(lines)
+        if view_range and len(view_range) != 2:
+            return "Error: `view_range` must be [start_line, end_line]."
         if view_range:
             start = max(1, view_range[0])
             end = len(lines) if view_range[1] == -1 else min(
@@ -179,11 +181,11 @@ class FileMemoryBackend:
                 f"not appear verbatim in {path}."
             )
         if count > 1:
-            occurrences = [
-                str(i)
-                for i, line in enumerate(text.splitlines(), start=1)
-                if old_str in line
-            ]
+            occurrences: list[str] = []
+            offset = 0
+            while (index := text.find(old_str, offset)) != -1:
+                occurrences.append(str(text.count("\n", 0, index) + 1))
+                offset = index + 1
             return (
                 f"No replacement was performed. Multiple occurrences of "
                 f"old_str `{old_str}` in lines: {', '.join(occurrences)}. "
@@ -245,6 +247,13 @@ def memory_tool(backend: FileMemoryBackend) -> AgentTool:
     """Build the ``memory`` tool over *backend*."""
 
     def memory(command: str, **kwargs: Any) -> str:
+        try:
+            return _dispatch(command, kwargs)
+        except (OSError, ValueError) as exc:
+            # Never leak the host base_path into model-visible text.
+            return f"Error: memory {command} failed ({type(exc).__name__})."
+
+    def _dispatch(command: str, kwargs: dict[str, Any]) -> str:
         if command == "view":
             return backend.view(kwargs.get("path", ""), kwargs.get("view_range"))
         if command == "create":
