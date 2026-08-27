@@ -303,7 +303,8 @@ class Agent:
         """Enforce per-turn usage limits in the tool loop. Returns self.
 
         Crossing a limit grants the model one wrap-up round (final-round
-        notice + ``tool_choice="none"``) and ends the turn with
+        notice; ``tool_choice="none"``, or the ``final_result`` tool when
+        structured output is still pending) and ends the turn with
         ``stopped_by="usage_limit"`` — no exception. Complements the
         pipeline's :class:`TokenBudget`, which governs what enters the
         context window; this caps what the whole turn may spend.
@@ -362,20 +363,29 @@ class Agent:
 
         ``mode="prompted"``: the schema is appended to the prompt and
         the reply is validated, with self-contained retry turns (the
-        subagent mechanic). Use :meth:`run`/:meth:`arun`.
+        subagent mechanic). Use :meth:`run`/:meth:`arun`. Requires an
+        agent without :meth:`with_memory` — the retry turns would
+        otherwise persist as real conversation.
         """
         if mode not in ("tool", "prompted"):
             msg = f"Unknown output mode: {mode!r} (expected 'tool' or 'prompted')"
             raise ValueError(msg)
-        self._output_tool = None  # reconfiguration replaces prior state
+        # Reconfiguration replaces prior state, but only past the point
+        # where this can raise — a rejected call must leave the agent as
+        # it was, not with an output model and no tool to satisfy it.
         if mode == "tool":
-            if any(t.name == "final_result" for t in self._all_active_tools()):
+            if any(
+                t.name == "final_result" and t is not self._output_tool
+                for t in self._all_active_tools()
+            ):
                 msg = (
                     "Tool name collision: 'final_result' is reserved for "
                     "the structured-output tool"
                 )
                 raise ValueError(msg)
             self._output_tool = self._make_output_tool(output_model)
+        else:
+            self._output_tool = None
         self._output_model = output_model
         self._output_mode = mode
         self._max_output_retries = max_output_retries
@@ -386,7 +396,6 @@ class Agent:
             try:
                 parsed = output_model.model_validate(kwargs)
             except ValidationError as exc:
-                self._output_failures += 1
                 raise ValueError(str(exc)) from exc
             self._last_output = parsed.model_dump_json()
             return "Final answer recorded."
@@ -398,6 +407,7 @@ class Agent:
                 "you are done, with the complete answer as arguments."
             ),
             input_schema=output_model.model_json_schema(),
+            input_model=output_model,
             fn=record,
         )
 
@@ -834,6 +844,8 @@ class Agent:
         if inspect.isawaitable(raw):
             if inspect.iscoroutine(raw):
                 raw.close()
+            elif callable(cancel := getattr(raw, "cancel", None)):
+                cancel()  # Future/Task: release it rather than leave it pending
             msg = (
                 "Async approval callback requires async execution. "
                 "Use agent.astream()/agent.achat()."
@@ -871,6 +883,11 @@ class Agent:
     ) -> ToolResult:
         self._fire("on_tool_error", tc.name, tool_input, error_text)
         self._record_tool_call(tc.name, tool_input, error_text)
+        if self._output_tool is not None and tc.name == self._output_tool.name:
+            # Every way final_result can fail funnels here — schema
+            # rejection, a hook deny, approval failing closed. Counting
+            # anywhere else leaves max_output_retries dead on the rest.
+            self._output_failures += 1
         return ToolResult(tool_call_id=tc.id, content=error_text, is_error=True)
 
     def _ok_result(
@@ -1015,19 +1032,24 @@ class Agent:
 
         A final round that still asked for tools runs none: the model
         would never see their results. Exception: a final round whose
-        every call is the terminal ``final_result`` — capturing it ends
+        single call is the terminal ``final_result`` — capturing it ends
         the turn, so the model never needs a result back.
         """
         if state.stop_reason != StopReason.TOOL_USE:
             return False
-        if not final_round:
-            return True
-        if self._output_tool is None or not state.accumulators:
-            return False
-        return all(
+        if self._output_tool is not None and sum(
             acc.get("name") == "final_result"
             for acc in state.accumulators.values()
-        )
+        ) > 1:
+            # Two final answers is the model failing to decide, not a
+            # choice to arbitrate: run neither, on any round.
+            return False
+        if not final_round:
+            return True
+        if self._output_tool is None or len(state.accumulators) != 1:
+            return False
+        acc = next(iter(state.accumulators.values()))
+        return acc.get("name") == "final_result"
 
     def _close_round(
         self,
@@ -1645,9 +1667,12 @@ class Agent:
         captured during a usage-limit wrap-up keeps
         ``stopped_by="usage_limit"`` — the budget cut stays visible.
         """
+        if stopped_by == "usage_limit":
+            # Arriving here with the breach already recorded means the
+            # wrap-up round has run. The grant is exactly one round and
+            # it never raises, output captured or not.
+            return True, "usage_limit"
         if self._last_output is not None:
-            if stopped_by == "usage_limit":
-                return True, "usage_limit"
             return True, "stop"
         output_pending = (
             self._output_model is not None and self._output_mode == "tool"
@@ -1659,7 +1684,7 @@ class Agent:
             )
             raise ValueError(msg)
         if not run_tools:
-            if output_pending and stopped_by not in ("usage_limit",):
+            if output_pending:
                 self._output_failures += 1
                 if self._output_failures > self._max_output_retries:
                     msg = (

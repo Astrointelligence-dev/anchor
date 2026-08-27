@@ -331,3 +331,202 @@ def test_prompted_mode_validates_and_retries():
     assert any("schema" in str(m.content) for m in first_turn)
     # No synthetic tool in prompted mode.
     assert provider.seen_kwargs[0].get("tools") is None
+
+
+# ---------------------------------------------------------------------------
+# Final-round and structured-output conditions (2026-08-27 review)
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_up_with_invalid_output_ends_the_turn():
+    """The wrap-up grant is one round even when final_result misses."""
+    from anchor.agent import UsageLimits
+    from anchor.agent.events import UsageLimitReached
+
+    agent, provider = _agent(
+        [_tool_use_response("tu_0", "echo", {"x": "hi"})]
+        + [
+            _tool_use_response(f"tu_{i}", "final_result", {"answer": "hi"})
+            for i in range(1, 10)
+        ],
+        tools=[_echo_tool()],
+    )
+    agent.with_output_model(Finding)
+    agent.with_usage_limits(UsageLimits(tool_calls_limit=0))
+
+    events = list(agent.stream("Question?"))
+
+    # Round 0 ran the tool and breached; round 1 is the wrap-up — it
+    # executes final_result, fails to capture, and the turn ends anyway.
+    assert len(provider.seen_messages) == 2
+    assert sum(isinstance(e, UsageLimitReached) for e in events) == 1
+    final = events[-1]
+    assert isinstance(final, TurnFinished)
+    assert final.diagnostics.stopped_by == "usage_limit"
+    assert final.output is None
+    # And the final-round notice landed exactly once.
+    assert sum(
+        "Final round" in str(m.content) for m in provider.seen_messages[1]
+    ) == 1
+
+
+def test_invalid_args_count_against_max_output_retries():
+    # Rejected by the schema before record() runs — still a retry.
+    agent, provider = _agent([
+        _tool_use_response(f"tu_{i}", "final_result", {"answer": "42"})
+        for i in range(5)
+    ])
+    agent.with_output_model(Finding, max_output_retries=1)
+
+    with pytest.raises(ValueError, match="failed validation"):
+        agent.run("Question?")
+
+    assert len(provider.seen_messages) == 2  # bounded by retries, not rounds
+
+
+def test_failed_reconfiguration_leaves_prior_config_intact():
+    clashing = tool(lambda: "x", name="final_result", description="clash")
+    agent, _ = _agent([
+        _tool_use_response(
+            "tu_1", "final_result", {"answer": "42", "confidence": 0.9},
+        ),
+    ])
+    agent.with_output_model(Finding)
+    # An MCP server exposing final_result is the one path past
+    # with_tools' own collision guard.
+    agent._mcp_tools = [clashing]
+
+    with pytest.raises(ValueError, match="final_result"):
+        agent.with_output_model(Finding)
+
+    agent._mcp_tools = []
+    # The rejected call must not have left an output model with no tool
+    # to satisfy it.
+    assert agent._output_tool is not None
+    assert isinstance(agent.run("Question?"), Finding)
+
+    # And tool mode reconfigured onto itself does not self-collide.
+    agent2, _ = _agent([])
+    agent2.with_output_model(Finding)
+    agent2.with_output_model(Finding)
+
+
+def test_duplicate_final_result_is_refused_on_any_round():
+    from tests.test_agent.test_phase4_loop import _multi_tool_use_response
+
+    hedged = _multi_tool_use_response([
+        ("tu_1", "final_result", {"answer": "1st", "confidence": 1.0}),
+        ("tu_2", "final_result", {"answer": "2nd", "confidence": 0.0}),
+    ])
+
+    # Final round: two answers would race over last_output — neither
+    # executes, and the turn ends without output rather than picking one.
+    agent, _ = _agent([hedged], max_rounds=1)
+    agent.with_output_model(Finding)
+    with pytest.raises(ValueError, match="without structured output"):
+        agent.run("Question?")
+
+    # Non-final round: same refusal, then the model gets to try again.
+    agent2, _ = _agent(
+        [
+            hedged,
+            _tool_use_response(
+                "tu_3", "final_result", {"answer": "decided", "confidence": 1.0},
+            ),
+        ],
+        max_rounds=5,
+    )
+    agent2.with_output_model(Finding)
+    assert agent2.run("Question?").answer == "decided"
+
+
+def test_wrap_up_never_raises_even_with_retries_exhausted():
+    """The usage-limit contract is "no exception" — output or not."""
+    from anchor.agent import UsageLimits
+
+    agent, provider = _agent(
+        [_tool_use_response("tu_0", "echo", {"x": "hi"})]
+        + [
+            _tool_use_response(f"tu_{i}", "final_result", {"answer": "hi"})
+            for i in range(1, 10)
+        ],
+        tools=[_echo_tool()],
+    )
+    agent.with_output_model(Finding, max_output_retries=0)
+    agent.with_usage_limits(UsageLimits(tool_calls_limit=0))
+
+    list(agent.stream("Question?"))  # must not raise
+
+    assert len(provider.seen_messages) == 2
+    assert agent.last_turn is not None
+    assert agent.last_turn.stopped_by == "usage_limit"
+
+
+async def test_wrap_up_with_invalid_output_ends_the_turn_async_mirror():
+    from anchor.agent import UsageLimits
+    from anchor.agent.events import UsageLimitReached
+
+    agent, provider = _agent(
+        [_tool_use_response("tu_0", "echo", {"x": "hi"})]
+        + [
+            _tool_use_response(f"tu_{i}", "final_result", {"answer": "hi"})
+            for i in range(1, 10)
+        ],
+        tools=[_echo_tool()],
+    )
+    agent.with_output_model(Finding)
+    agent.with_usage_limits(UsageLimits(tool_calls_limit=0))
+
+    events = [e async for e in agent.astream("Question?")]
+
+    assert len(provider.seen_messages) == 2
+    assert sum(isinstance(e, UsageLimitReached) for e in events) == 1
+    assert agent.last_turn is not None
+    assert agent.last_turn.stopped_by == "usage_limit"
+
+
+def test_max_rounds_exhaustion_still_raises_loudly():
+    # The wrap-up exemption must not swallow the max_rounds error.
+    agent, _ = _agent([_text_response("plain")], max_rounds=1)
+    agent.with_output_model(Finding, max_output_retries=0)
+
+    with pytest.raises(ValueError, match="without calling final_result"):
+        list(agent.stream("Question?"))
+
+
+def test_invalid_output_error_carries_pydantic_detail():
+    # final_result is validated once, by the output model itself — not
+    # by the lenient schema fallback with its own error dialect.
+    agent, provider = _agent([
+        _tool_use_response("tu_1", "final_result", {"answer": "42"}),
+        _tool_use_response(
+            "tu_2", "final_result", {"answer": "42", "confidence": 0.9},
+        ),
+    ])
+    agent.with_output_model(Finding)
+
+    agent.run("Question?")
+
+    (err,) = _tool_results_of(provider, 1)
+    assert "confidence" in err.content
+    assert "Field required" in err.content  # pydantic, not _basic_validate
+
+
+def test_denied_final_result_counts_against_max_output_retries():
+    from anchor.agent import HookResult
+
+    agent, provider = _agent([
+        _tool_use_response(
+            f"tu_{i}", "final_result", {"answer": "42", "confidence": 0.9},
+        )
+        for i in range(8)
+    ])
+    agent.with_output_model(Finding, max_output_retries=1)
+    agent.with_hooks(pre_tool_use=[
+        lambda name, _input: HookResult(decision="deny", reason="nope"),
+    ])
+
+    # A deny never reaches record() either — it still spends the budget.
+    with pytest.raises(ValueError, match="failed validation"):
+        agent.run("Question?")
+    assert len(provider.seen_messages) == 2

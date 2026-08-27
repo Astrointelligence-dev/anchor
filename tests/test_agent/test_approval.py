@@ -285,3 +285,22 @@ def test_async_callback_on_sync_loop_raises():
     agent.with_approval(approve)
     with pytest.raises(TypeError, match="astream"):
         list(agent.chat("Go"))
+
+
+def test_non_coroutine_awaitable_is_released_on_sync_loop():
+    """A Future/Task gets cancelled, not abandoned pending."""
+    released: list[bool] = []
+
+    class _Future:
+        def __await__(self):  # pragma: no cover - never driven
+            yield
+
+        def cancel(self) -> None:
+            released.append(True)
+
+    agent, _ = _agent(_turn_responses(), tools=[_guarded_echo()])
+    agent.with_approval(lambda request: _Future())  # type: ignore[arg-type,return-value]
+
+    with pytest.raises(TypeError, match="astream"):
+        list(agent.chat("Go"))
+    assert released == [True]

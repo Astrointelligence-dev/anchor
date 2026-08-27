@@ -191,3 +191,35 @@ def test_str_replace_multiline_occurrences_list_lines(tmp_path: Path) -> None:
 def test_memory_tool_unknown_command(tmp_path: Path) -> None:
     tool = memory_tool(_backend(tmp_path))
     assert "unknown memory command" in tool.fn(command="explode")
+
+
+def test_str_replace_occurrences_do_not_overlap(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    backend.create("/memories/n.md", "aaaa")
+
+    # "aaaa" holds two non-overlapping "aa" — the reported list must
+    # agree with the count that triggered the branch.
+    multi = backend.str_replace("/memories/n.md", "aa", "b")
+    assert "in lines: 1, 1." in multi
+    assert "`old_str` is empty" in backend.str_replace("/memories/n.md", "", "x")
+
+
+def test_view_range_rejects_reversed_and_out_of_range(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    backend.create("/memories/a.md", "1\n2\n3\n4")
+
+    assert "Invalid `view_range`" in backend.view("/memories/a.md", [3, 2])
+    assert "Invalid `view_range`" in backend.view("/memories/a.md", [100, 200])
+    # A window running past EOF still reads to the end.
+    assert "3" in backend.view("/memories/a.md", [3, 99])
+
+
+def test_memory_tool_sanitizes_unexpected_errors(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    backend.create("/memories/a.md", "x")
+
+    # Non-integer view_range raises TypeError inside the backend.
+    out = memory_tool(backend).fn(
+        command="view", path="/memories/a.md", view_range=["1", "5"],
+    )
+    assert out == "Error: memory view failed (TypeError)."

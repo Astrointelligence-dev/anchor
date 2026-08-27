@@ -282,7 +282,8 @@ in the same turn. The normalized JSON is also available in
 `TurnFinished.output` and `agent.last_output`. `mode="prompted"`
 injects the schema into the prompt instead and validates the text reply
 (the subagent mechanic) — the portable fallback for models without tool
-calling.
+calling; it requires an agent without `with_memory`, since the schema
+and the retry turns would otherwise land in the persisted conversation.
 
 ### Memory Tool
 

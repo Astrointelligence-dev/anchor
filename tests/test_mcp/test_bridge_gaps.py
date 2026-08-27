@@ -7,6 +7,7 @@ loudly at connect; pool-level prompt/resource aggregation is app-facing.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,7 +15,7 @@ import pytest
 
 from anchor.agent import Agent
 from anchor.llm.models import ToolSchema
-from anchor.mcp.client import MCPClientPool
+from anchor.mcp.client import FastMCPClientBridge, MCPClientPool
 from anchor.mcp.errors import MCPError
 from anchor.mcp.models import MCPServerConfig
 from anchor.mcp.tools import mcp_tool_to_agent_tool
@@ -209,3 +210,27 @@ def test_agent_accessor_without_servers_raises():
     agent = Agent(llm=FakeLLMProvider([]), tokenizer=_Tok())
     with pytest.raises(RuntimeError, match="No connected MCP servers"):
         agent._require_mcp_pool()
+
+
+async def test_pool_prompts_skip_failures_but_not_cancellation():
+    configs = [MCPServerConfig(name="srv", command="echo")]
+    with patch(
+        "anchor.mcp.client.Client",
+        return_value=_client_with_prompts_and_resources(),
+    ):
+        pool = MCPClientPool(configs)
+        await pool.connect_all()
+
+        # A missing capability is best-effort: logged, server omitted.
+        with patch.object(
+            FastMCPClientBridge, "list_prompts",
+            AsyncMock(side_effect=MCPError("no prompts")),
+        ):
+            assert await pool.all_prompts() == {}
+
+        # A cancellation is not a missing capability.
+        with patch.object(
+            FastMCPClientBridge, "list_prompts",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        ), pytest.raises(asyncio.CancelledError):
+            await pool.all_prompts()

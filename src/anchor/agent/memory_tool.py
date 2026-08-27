@@ -4,7 +4,12 @@ One ``memory`` tool with the spec's six commands (view / create /
 str_replace / insert / delete / rename) over a file-based backend, as a
 regular :class:`AgentTool` — it works on every provider, not only
 Anthropic. Result and error strings follow the Anthropic reference
-implementation so models keep their trained behavior.
+implementation so models keep their trained behavior, with three
+deliberate divergences: ``view_range`` reports a reversed or
+out-of-range window instead of silently returning nothing, an empty
+``old_str`` is refused, and the ``str_replace`` occurrence scan is
+non-overlapping so the lines it reports match the count that triggered
+the report.
 
 The model addresses paths under the virtual ``/memories`` root; the
 backend maps them into ``base_path`` with strict containment (path
@@ -14,11 +19,14 @@ spec's security guidance).
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
 
 from anchor.agent.models import AgentTool
+
+logger = logging.getLogger(__name__)
 
 _ROOT = "/memories"
 _MAX_VIEW_CHARS = 16_000
@@ -140,13 +148,23 @@ class FileMemoryBackend:
         if len(lines) > _MAX_LINES:
             return f"File {path} exceeds maximum line limit of 999,999 lines."
         start, end = 1, len(lines)
-        if view_range and len(view_range) != 2:
-            return "Error: `view_range` must be [start_line, end_line]."
         if view_range:
-            start = max(1, view_range[0])
-            end = len(lines) if view_range[1] == -1 else min(
-                len(lines), view_range[1],
-            )
+            if len(view_range) != 2:
+                return "Error: `view_range` must be [start_line, end_line]."
+            start, stop = view_range
+            end = len(lines) if stop == -1 else min(len(lines), stop)
+            if lines and not 1 <= start <= len(lines):
+                return (
+                    f"Error: Invalid `view_range` parameter: {view_range}. Its "
+                    f"first element `{start}` should be within the range of "
+                    f"lines of the file: [1, {len(lines)}]"
+                )
+            if lines and end < start:
+                return (
+                    f"Error: Invalid `view_range` parameter: {view_range}. Its "
+                    f"second element `{stop}` should be larger or equal than "
+                    f"its first `{start}`"
+                )
         numbered = "\n".join(
             f"{i:>6}\t{line}"
             for i, line in enumerate(lines[start - 1 : end], start=start)
@@ -173,6 +191,13 @@ class FileMemoryBackend:
             return err
         if not resolved.is_file():
             return self._missing(path)
+        if not old_str:
+            # Also keeps the occurrence scan below terminating: a
+            # zero-length needle would never advance the offset.
+            return (
+                f"No replacement was performed, `old_str` is empty. Provide "
+                f"the exact text to replace in {path}."
+            )
         text = resolved.read_text(encoding="utf-8")
         count = text.count(old_str)
         if count == 0:
@@ -185,7 +210,7 @@ class FileMemoryBackend:
             offset = 0
             while (index := text.find(old_str, offset)) != -1:
                 occurrences.append(str(text.count("\n", 0, index) + 1))
-                offset = index + 1
+                offset = index + len(old_str)
             return (
                 f"No replacement was performed. Multiple occurrences of "
                 f"old_str `{old_str}` in lines: {', '.join(occurrences)}. "
@@ -249,8 +274,11 @@ def memory_tool(backend: FileMemoryBackend) -> AgentTool:
     def memory(command: str, **kwargs: Any) -> str:
         try:
             return _dispatch(command, kwargs)
-        except (OSError, ValueError) as exc:
-            # Never leak the host base_path into model-visible text.
+        except Exception as exc:
+            # Model-facing boundary: never leak the host base_path into
+            # model-visible text — but a real backend bug still needs a
+            # trace on the host side.
+            logger.exception("memory %s failed", command)
             return f"Error: memory {command} failed ({type(exc).__name__})."
 
     def _dispatch(command: str, kwargs: dict[str, Any]) -> str:

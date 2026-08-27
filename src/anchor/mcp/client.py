@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, Self
 
 from anchor.agent.models import AgentTool
@@ -317,26 +318,42 @@ class MCPClientPool:
         msg = f"Unknown MCP server: '{server}'. Connected: {available}"
         raise MCPError(msg)
 
+    async def _per_server(
+        self,
+        call: Callable[[FastMCPClientBridge], Awaitable[Any]],
+        noun: str,
+    ) -> dict[str, Any]:
+        """Gather *call* over every connected server, best-effort.
+
+        A server that fails (typically: no such capability) is logged
+        and omitted. A ``BaseException`` that is not an ``Exception``
+        — cancellation, ``KeyboardInterrupt`` — is re-raised rather
+        than mistaken for a missing capability.
+        """
+        results = await asyncio.gather(
+            *(call(c) for c in self._clients),
+            return_exceptions=True,
+        )
+        out: dict[str, Any] = {}
+        for client, result in zip(self._clients, results, strict=True):
+            if isinstance(result, BaseException):
+                if not isinstance(result, Exception):
+                    raise result
+                logger.warning(
+                    "MCP server '%s' %s unavailable: %s",
+                    client._config.name, noun, result,
+                )
+                continue
+            out[client._config.name] = result
+        return out
+
     async def all_prompts(self) -> dict[str, list[MCPPrompt]]:
         """Prompt templates per connected server, keyed by server name.
 
         Best-effort: a server without the prompts capability is logged
         and omitted instead of failing the aggregate.
         """
-        results = await asyncio.gather(
-            *(c.list_prompts() for c in self._clients),
-            return_exceptions=True,
-        )
-        out: dict[str, list[MCPPrompt]] = {}
-        for client, result in zip(self._clients, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.warning(
-                    "MCP server '%s' prompts unavailable: %s",
-                    client._config.name, result,
-                )
-                continue
-            out[client._config.name] = result
-        return out
+        return await self._per_server(lambda c: c.list_prompts(), "prompts")
 
     async def get_prompt(
         self, server: str, name: str, arguments: dict[str, Any] | None = None,
@@ -350,20 +367,7 @@ class MCPClientPool:
         Best-effort: a server without the resources capability is
         logged and omitted instead of failing the aggregate.
         """
-        results = await asyncio.gather(
-            *(c.list_resources() for c in self._clients),
-            return_exceptions=True,
-        )
-        out: dict[str, list[MCPResource]] = {}
-        for client, result in zip(self._clients, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.warning(
-                    "MCP server '%s' resources unavailable: %s",
-                    client._config.name, result,
-                )
-                continue
-            out[client._config.name] = result
-        return out
+        return await self._per_server(lambda c: c.list_resources(), "resources")
 
     async def read_resource(self, server: str, uri: str) -> str:
         """Read a resource from *server* by URI."""

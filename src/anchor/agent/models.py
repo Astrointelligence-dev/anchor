@@ -142,7 +142,8 @@ class UsageLimits(BaseModel, frozen=True):
     """Per-turn usage limits enforced by the agent loop.
 
     When a limit is crossed mid-turn the loop grants the model one
-    wrap-up round (final-round notice + ``tool_choice="none"``) and
+    wrap-up round (final-round notice; ``tool_choice="none"``, or the
+    ``final_result`` tool when structured output is still pending) and
     stops with ``stopped_by="usage_limit"`` — no exception is raised.
     Checks are post-hoc, so a turn may overshoot by the round in
     flight plus the bounded wrap-up call. Rounds are capped separately
