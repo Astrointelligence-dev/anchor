@@ -158,7 +158,9 @@ class TurnDiagnostics(BaseModel, frozen=True):
     """Accounting and outcome for one full ``chat()``/``achat()`` turn."""
 
     rounds: tuple[RoundUsage, ...] = ()
-    stopped_by: Literal["stop", "max_rounds", "max_tokens", "usage_limit"] = "stop"
+    stopped_by: Literal[
+        "stop", "max_rounds", "max_tokens", "usage_limit", "output_missing",
+    ] = "stop"
 
     @property
     def total_prompt_tokens(self) -> int:

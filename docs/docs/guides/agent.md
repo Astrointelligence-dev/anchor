@@ -277,7 +277,9 @@ The default tool mode adds a synthetic `final_result` tool carrying the
 schema and forces `tool_choice="any"` — the model cannot stop in plain
 text; calling `final_result` with valid arguments ends the turn.
 Invalid arguments come back as an error tool result (the loop's own
-retry mechanic), bounded by `max_output_retries`. Real tools still run
+retry mechanic), bounded by `max_output_retries`; exhausting it ends
+the turn with `stopped_by="output_missing"` — `stream()`/`chat()` see
+that in the diagnostics, `run()` raises. Real tools still run
 in the same turn. The normalized JSON is also available in
 `TurnFinished.output` and `agent.last_output`. `mode="prompted"`
 injects the schema into the prompt instead and validates the text reply

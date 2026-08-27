@@ -359,7 +359,8 @@ class Agent:
         ends the turn (``TurnFinished.output`` / ``agent.last_output`` /
         :meth:`run`). Invalid arguments come back as an error tool
         result — the loop's own retry mechanic — bounded by
-        ``max_output_retries``, then ``ValueError``.
+        ``max_output_retries``; the turn then ends with
+        ``stopped_by="output_missing"`` and :meth:`run` raises.
 
         ``mode="prompted"``: the schema is appended to the prompt and
         the reply is validated, with self-contained retry turns (the
@@ -1663,7 +1664,9 @@ class Agent:
         Structured output (tool mode) hooks in here: a captured
         ``final_result`` stops the loop; a model that stopped in plain
         text with output still pending gets a retry nudge appended to
-        *messages*; exhausted retries raise ``ValueError``. Output
+        *messages*; exhausted retries end the turn with
+        ``stopped_by="output_missing"`` — the verdict is returned, never
+        raised, so the stream always reaches ``TurnFinished``. Output
         captured during a usage-limit wrap-up keeps
         ``stopped_by="usage_limit"`` — the budget cut stays visible.
         """
@@ -1678,20 +1681,12 @@ class Agent:
             self._output_model is not None and self._output_mode == "tool"
         )
         if output_pending and self._output_failures > self._max_output_retries:
-            msg = (
-                "structured output failed validation after "
-                f"{self._max_output_retries} retries"
-            )
-            raise ValueError(msg)
+            return True, "output_missing"
         if not run_tools:
             if output_pending:
                 self._output_failures += 1
                 if self._output_failures > self._max_output_retries:
-                    msg = (
-                        "model ended the turn without calling final_result "
-                        f"after {self._max_output_retries} retries"
-                    )
-                    raise ValueError(msg)
+                    return True, "output_missing"
                 messages.append(Message(
                     role=Role.USER,
                     content=(
@@ -1918,6 +1913,14 @@ class Agent:
             raise ValueError(msg)
         return self._output_model
 
+    def _missing_output_error(self) -> ValueError:
+        """The single error for "the turn produced no structured output"."""
+        return ValueError(
+            "turn ended without structured output: final_result was never "
+            f"recorded with valid arguments (max_output_retries="
+            f"{self._max_output_retries}; see last_turn.stopped_by)"
+        )
+
     def run(self, message: str) -> BaseModel:
         """Run a turn and return the validated structured output.
 
@@ -1932,8 +1935,7 @@ class Agent:
         for _ in self.stream(message):
             pass
         if self._last_output is None:
-            msg = "turn ended without structured output"
-            raise ValueError(msg)
+            raise self._missing_output_error()
         return output_model.model_validate_json(self._last_output)
 
     async def arun(self, message: str) -> BaseModel:
@@ -1947,8 +1949,7 @@ class Agent:
         async for _ in self.astream(message):
             pass
         if self._last_output is None:
-            msg = "turn ended without structured output"
-            raise ValueError(msg)
+            raise self._missing_output_error()
         return output_model.model_validate_json(self._last_output)
 
     async def aclose(self) -> None:

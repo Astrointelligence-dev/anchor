@@ -378,10 +378,12 @@ def test_invalid_args_count_against_max_output_retries():
     ])
     agent.with_output_model(Finding, max_output_retries=1)
 
-    with pytest.raises(ValueError, match="failed validation"):
+    with pytest.raises(ValueError, match="final_result was never recorded"):
         agent.run("Question?")
 
     assert len(provider.seen_messages) == 2  # bounded by retries, not rounds
+    assert agent.last_turn is not None
+    assert agent.last_turn.stopped_by == "output_missing"
 
 
 def test_failed_reconfiguration_leaves_prior_config_intact():
@@ -485,13 +487,23 @@ async def test_wrap_up_with_invalid_output_ends_the_turn_async_mirror():
     assert agent.last_turn.stopped_by == "usage_limit"
 
 
-def test_max_rounds_exhaustion_still_raises_loudly():
-    # The wrap-up exemption must not swallow the max_rounds error.
+def test_missing_output_is_a_verdict_not_a_raise():
+    # The loop returns a verdict so the stream still reaches
+    # TurnFinished; run() is the single place that raises.
     agent, _ = _agent([_text_response("plain")], max_rounds=1)
     agent.with_output_model(Finding, max_output_retries=0)
 
-    with pytest.raises(ValueError, match="without calling final_result"):
-        list(agent.stream("Question?"))
+    events = list(agent.stream("Question?"))  # must not raise
+
+    final = events[-1]
+    assert isinstance(final, TurnFinished)
+    assert final.diagnostics.stopped_by == "output_missing"
+    assert final.output is None
+
+    agent2, _ = _agent([_text_response("plain")], max_rounds=1)
+    agent2.with_output_model(Finding, max_output_retries=0)
+    with pytest.raises(ValueError, match="final_result was never recorded"):
+        agent2.run("Question?")
 
 
 def test_invalid_output_error_carries_pydantic_detail():
@@ -527,6 +539,8 @@ def test_denied_final_result_counts_against_max_output_retries():
     ])
 
     # A deny never reaches record() either — it still spends the budget.
-    with pytest.raises(ValueError, match="failed validation"):
+    with pytest.raises(ValueError, match="final_result was never recorded"):
         agent.run("Question?")
     assert len(provider.seen_messages) == 2
+    assert agent.last_turn is not None
+    assert agent.last_turn.stopped_by == "output_missing"
