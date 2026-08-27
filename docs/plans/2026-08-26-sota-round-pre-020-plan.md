@@ -90,3 +90,28 @@ Contrato (modo tool, default Pydantic AI):
 - **P3s aplicados em lote**: isinstance no retorno do approval callback (lixo virava AttributeError escapando o turno; agora deny fail-closed) + tipo `ApprovalCallback` apertado; `iscoroutine` no close do guard sync; reconfiguração de output model limpa estado; memory tool com try/except retornando strings de erro **sem vazar o base_path do host** + fix da lista de linhas multiline no str_replace + validação de view_range; `all_prompts`/`all_resources` best-effort (um server sem a capability não derruba o agregado); `state` morto removido do `_round_verdict`; `with_tools` protege o nome `memory` (achado N1 do juiz); concorrência de approvals documentada (Lock julgado seguro mas desnecessário — o app serializa no callback se quiser); testes de borda `used == limit` e awaitable não-corrotina.
 
 **Corretos-mas-suspeitos registrados** (sem ação): `_output_failures` mistura nudges e validação num budget só; `ToolStarted` emitido antes da resolução do approval (formato pré-existente do stream); `as_tool`/`SubagentDefinition` sem `requires_approval` (YAGNI); nomes de server MCP duplicados no pool (N2 — nota).
+
+### Shipped 2026-08-27 — review do próprio commit da rodada (`3464dea..79ddb13`)
+
+`/code-review` de `3464dea` (o commit de condições acima): **14 findings, 14 confirmados por probe executado**. Três deles eram a mesma cadeia, criada pelo fix P1 da rodada anterior:
+
+- **Round final deixou de ser terminal.** `_round_verdict` só parava o loop com `run_tools=False`, e a exceção nova ("round final executa `final_result`") tornou `run_tools=True` alcançável num round final. Um wrap-up de usage limit cujo `final_result` **não** capturava output rodava até `max_rounds`: 10 chamadas de LLM, 10 `UsageLimitReached` duplicados, e `_maybe_final_round_notice` re-anexando o mesmo aviso a cada round.
+- **`max_output_retries` era letra morta.** `_make_output_tool` cria a tool sem `input_model`, então `validate_input` caía no `_basic_validate` e rejeitava os args **antes** de `record()` — o único lugar que incrementava `_output_failures`. O amplificador que tornava o item acima ilimitado.
+- **`with_output_model` que levanta deixava o agent inconfigurável**: `_output_tool = None` rodava antes do collision check, sobrando `_output_model` setado, `_output_mode="tool"` e nenhuma tool pra satisfazer.
+
+**Ritual (reviewer + juiz + discussão).** O juiz voltou APPROVE WITH CONDITIONS e pegou uma **regressão introduzida pelo próprio fix**: o parâmetro `final_round` que eu adicionei a `_round_verdict` colapsava duas condições com **contratos opostos** — usage limit (nunca levanta, decidido em 2026-08-25) e `max_rounds` (levanta alto) — e a colocação abaixo do raise fazia o wrap-up levantar `ValueError`, contradizendo a docstring do mesmo diff. Discussão de 4 pontos: o juiz moveu em 3 (retirou a recomendação de restaurar o raise ao descobrir que **raise dentro do `try` faz o `yield TurnFinished` nunca acontecer**; separou `input_model` do fix de contagem; retirou o argumento de "recuperar" na ambiguidade de duas `final_result`, mantendo só a crítica de colocação — que estava certa: o guard vale em qualquer round).
+
+**Aplicado:**
+- Terminação keyed no **wrap-up** (`stopped_by == "usage_limit"`), não em "round final" — parâmetro deletado, `max_rounds` mantém o erro alto. A duplicação do notice cai fora sozinha.
+- Contagem de falha de output em **`_error_result`**, o funil por onde toda falha de `final_result` passa (schema, deny de hook, approval fail-closed) — e **por último**, para que um `_record_tool_call` que levante não conte duas vezes pelo retry do `_astream_tools`. `input_model=output_model` na output tool: **um validador só**, em vez de `_basic_validate` e `model_validate` com dois dialetos de erro pro mesmo schema.
+- Duas `final_result` num round = ambiguidade recusada **em qualquer round** (antes só no último; ambas executavam e a segunda sobrescrevia `_last_output` em silêncio).
+- MCP: `all_prompts`/`all_resources` viram um helper `_per_server` que re-levanta o que não é `Exception` — `CancelledError` deixava de ser cancelamento e virava "capability indisponível".
+- Memory tool: scan não-sobreposto, `old_str` vazio recusado (o scan não avançava — loop infinito), `view_range` com a especificidade da referência, `except Exception` com log antes de sanitizar. **Docstring do módulo passa a nomear as 3 divergências** — a referência Anthropic não erra em `view_range` inválido e o scan dela se sobrepõe (bug real), então "paridade string-por-string" era falso.
+- **`stopped_by="output_missing"`** (commit separado, breaking): `_round_verdict` não levanta mais, devolve veredito; `run()`/`arun()` viram o único ponto que levanta. Aplica ao caso "output nunca chegou" a convenção já decidida na rodada de usage limits.
+- CLAUDE.md apontava pra `tasks/todo.md` e `tasks/lessons.md`, inexistentes → `docs/plans/`.
+
+**SOTA lido via context7** (Pydantic AI, OpenAI Agents SDK, LangGraph, referência Anthropic, fastmcp): o wrap-up round do anchor segue **inédito** — os outros levantam, e o LangGraph para graceful mas descarta a resposta do modelo. Retry budget: Pydantic AI **separa** `retries={'tools': N, 'output': M}`; o anchor usa contador único. Best-effort do MCP bate com o `AggregateProvider` do fastmcp (e o anchor é mais estrito).
+
+**Follow-ups registrados:** separar retry budget de tools vs output (estilo Pydantic AI) — `input_model` abriu a porta; `ProxyProvider` do fastmcp distingue `METHOD_NOT_FOUND` de "server quebrou", o anchor conflata (pré-existente).
+
+Suite: **2723 verdes** (+14 testes de condição, cada um verificado falhando contra o estado anterior). ruff 157 / mypy 144 = baseline do HEAD, sem regressão.
