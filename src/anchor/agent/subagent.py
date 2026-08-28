@@ -159,16 +159,23 @@ async def _one_turn_async(sub: Agent, prompt: str) -> tuple[str, str]:
     return text, stopped_by
 
 
-# Appended to a plain-text child result cut by a usage limit — the
-# child's own per-turn limit or the run's shared pool — so the
-# orchestrating model knows the answer is partial.
-_PARTIAL_RESULT_NOTE = (
-    "\n\n[subagent stopped early: usage limit reached — partial result]"
-)
+# Appended to a plain-text child result the loop cut early — a usage
+# limit (the child's own per-turn limit or the run's shared pool) or a
+# stuck loop of identical tool calls — so the orchestrating model
+# knows the answer is partial.
+_PARTIAL_RESULT_NOTES = {
+    "usage_limit": (
+        "\n\n[subagent stopped early: usage limit reached — partial result]"
+    ),
+    "stuck": (
+        "\n\n[subagent stopped early: stuck repeating identical tool "
+        "calls — partial result]"
+    ),
+}
 
 
 def _partial(text: str, stopped_by: str) -> str:
-    return text + _PARTIAL_RESULT_NOTE if stopped_by == "usage_limit" else text
+    return text + _PARTIAL_RESULT_NOTES.get(stopped_by, "")
 
 
 def _guard_retry_budget(err: str) -> None:
@@ -263,7 +270,11 @@ def _make_subagent_tool(
     # @tool decorator is applied functionally — it derives the schema
     # and the Pydantic input model from signature + Args section.
     run.__doc__ = f"Delegate a task to this subagent.\n\nArgs:\n    task: {_TASK_PARAM_DESCRIPTION}"
-    subagent_tool = tool(name=name, description=description)(run)
+    # read_only: dispatching subagents concurrently is the point of
+    # fan-out (Claude Code runs its Task calls the same way); whether
+    # the children's own tools may overlap is governed per-tool inside
+    # each child's loop.
+    subagent_tool = tool(name=name, description=description, read_only=True)(run)
 
     async def acall(_original_name: str, tool_input: dict[str, Any]) -> str:
         _guard_no_nesting(sub)
@@ -295,6 +306,9 @@ def _make_task_tool(
             "subagents list. The subagent starts with a clean context: "
             "write a complete, self-contained task prompt."
         ),
+        # Parallel fan-out is the point of the task tool; each child's
+        # own tools still serialize their writes inside the child loop.
+        read_only=True,
     )
     def task(agent_name: str, task: str) -> str:
         """Delegate a task to a subagent.

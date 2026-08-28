@@ -131,7 +131,12 @@ def test_unknown_tool_marked_error():
 
 
 def _async_sleep_tool(
-    name: str, delay: float, reply: str, *, timeout: float | None = None,
+    name: str,
+    delay: float,
+    reply: str,
+    *,
+    timeout: float | None = None,
+    read_only: bool = False,
 ) -> AgentTool:
     tool = AgentTool(
         name=name,
@@ -139,6 +144,7 @@ def _async_sleep_tool(
         input_schema={"type": "object", "properties": {}},
         fn=lambda **_: reply,
         timeout=timeout,
+        read_only=read_only,
     )
 
     async def acall(_name: str, _input: dict[str, Any]) -> str:
@@ -157,9 +163,10 @@ async def test_parallel_tool_calls_ordered_and_concurrent():
         ]),
         _text_response("done"),
     ]
+    # read_only opt-in: only declared reads fan out (writes serialize).
     tools = [
-        _async_sleep_tool("slow_a", 0.05, "A"),
-        _async_sleep_tool("slow_b", 0.05, "B"),
+        _async_sleep_tool("slow_a", 0.05, "A", read_only=True),
+        _async_sleep_tool("slow_b", 0.05, "B", read_only=True),
     ]
     agent, provider = _agent(responses, tools=tools)
 

@@ -51,12 +51,15 @@ def _agent(
     return agent, provider
 
 
-def _async_sleep_tool(name: str, delay: float, reply: str) -> AgentTool:
+def _async_sleep_tool(
+    name: str, delay: float, reply: str, *, read_only: bool = False,
+) -> AgentTool:
     tool = AgentTool(
         name=name,
         description="sleeps then replies",
         input_schema={"type": "object", "properties": {}},
         fn=lambda **_: reply,
+        read_only=read_only,
     )
 
     async def acall(_name: str, _input: dict[str, Any]) -> str:
@@ -144,9 +147,10 @@ async def test_astream_parallel_tools_finish_live_in_completion_order():
         ]),
         _text_response("done"),
     ]
+    # read_only: only declared reads run concurrently (writes serialize).
     tools = [
-        _async_sleep_tool("slow", 0.08, "A"),
-        _async_sleep_tool("fast", 0.01, "B"),
+        _async_sleep_tool("slow", 0.08, "A", read_only=True),
+        _async_sleep_tool("fast", 0.01, "B", read_only=True),
     ]
     agent, provider = _agent(responses, tools=tools)
 
@@ -172,7 +176,7 @@ async def test_astream_exception_escaping_call_becomes_error_event(monkeypatch):
     recorder = _Recorder()
     agent.with_callbacks([recorder])
 
-    async def boom(self: Agent, tc: Any) -> Any:
+    async def boom(self: Agent, tc: Any, gate: Any = None) -> Any:
         msg = "kaput"
         raise RuntimeError(msg)
 

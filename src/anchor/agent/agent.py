@@ -85,14 +85,29 @@ logger = logging.getLogger(__name__)
 # Maximum character length for tool input/result recorded in memory.
 _TOOL_MEMORY_TRUNCATE = 200
 
-_FINAL_ROUND_NOTICE = (
-    "[system] Final round: the budget for this turn is exhausted. "
-    "Respond with your best final answer now — do not call tools."
-)
+# Read-only tool calls in one batch run concurrently up to this cap
+# (Claude Code's production value); writes always run alone.
+_TOOL_CONCURRENCY = 10
 
-_FINAL_ROUND_NOTICE_OUTPUT = (
-    "[system] Final round: the budget for this turn is exhausted. "
-    "Record your final answer by calling the final_result tool now."
+# Stuck detection: consecutive rounds repeating an identical
+# (tool, args, result) call before the model gets a nudge — repeating
+# again right after the nudge ends the turn with stopped_by="stuck".
+# Identical errors nudge earlier. Thresholds match OpenHands'
+# StuckDetector; the result being part of the signal is what keeps
+# legitimate polling (same call, changing observations) out of the
+# streak.
+_STUCK_ERROR_STREAK = 3
+_STUCK_RESULT_STREAK = 4
+
+# One entry in the stuck ledger: (tool name, canonical args JSON,
+# pre-cap result digest, is_error).
+_StuckKey = tuple[str, str, int, bool]
+
+_STUCK_NUDGE = (
+    "[system] You have called tool '{name}' with the same arguments "
+    "{count} times in a row and received the identical {outcome} each "
+    "time. Repeating the call will not make progress — change the "
+    "arguments or take a different approach."
 )
 
 # Models no price source knows — warned once each, then their rounds
@@ -174,6 +189,7 @@ class _RoundState:
         "raw_blocks",
         "stop_reason",
         "text",
+        "tool_calls",
     )
 
     def __init__(self) -> None:
@@ -186,6 +202,9 @@ class _RoundState:
         self.cache_read_tokens = 0
         self.cost_usd = 0.0
         self.raw_blocks: list[dict[str, Any]] = []
+        # Set by the tool phase; consumed by the stuck ledger so the
+        # accumulators are parsed into ToolCalls exactly once.
+        self.tool_calls: list[ToolCall] = []
 
 
 class Agent:
@@ -239,13 +258,17 @@ class Agent:
         "_post_hooks",
         "_pre_hooks",
         "_read_file_tool",
+        "_result_digests",
         "_script_tool",
         "_search_tool",
         "_skill_registry",
+        "_stuck_counts",
+        "_stuck_nudged",
         "_subagents",
         "_system_prompt",
         "_task_tool",
         "_tokenizer",
+        "_tool_result_max_tokens",
         "_tool_timeout",
         "_tools",
         "_usage_limits",
@@ -263,8 +286,15 @@ class Agent:
         max_rounds: int = 10,
         allow_skill_scripts: bool = False,
         tool_timeout: float | None = None,
+        tool_result_max_tokens: int | None = 10_000,
         tokenizer: Tokenizer | None = None,
     ) -> None:
+        if tool_result_max_tokens is not None and tool_result_max_tokens <= 0:
+            msg = (
+                "tool_result_max_tokens must be positive "
+                "(pass None to disable the cap)"
+            )
+            raise ValueError(msg)
         if llm is not None:
             self._llm: LLMProvider = llm
         else:
@@ -286,6 +316,7 @@ class Agent:
         self._mcp_pool: Any = None  # MCPClientPool (lazy)
         self._mcp_tools: list[AgentTool] = []
         self._tool_timeout = tool_timeout
+        self._tool_result_max_tokens = tool_result_max_tokens
         self._pre_hooks: list[PreToolHook] = []
         self._post_hooks: list[PostToolHook] = []
         self._agent_callbacks: list[AgentCallback] = []
@@ -308,6 +339,9 @@ class Agent:
         self._output_failures = 0
         self._last_output: str | None = None
         self._memory_tool: AgentTool | None = None
+        self._stuck_counts: dict[_StuckKey, int] = {}
+        self._stuck_nudged: _StuckKey | None = None
+        self._result_digests: dict[str, int] = {}
 
         self._tokenizer: Tokenizer = tokenizer or _default_tokenizer()
         self._pipeline = ContextPipeline(
@@ -950,9 +984,79 @@ class Agent:
     def _tool_failure_text(name: str, exc: BaseException) -> str:
         return f"Error: tool '{name}' failed: {type(exc).__name__}: {exc}"
 
+    def _fallback_slice(self, data: bytes, budget: int, *, tail: bool) -> str:
+        """One side of the char-fallback cut, for foreign tokenizers.
+
+        A byte-estimated slice (~4 bytes/token), clamped to under half
+        the data so head and tail can never overlap, then trimmed until
+        the tokenizer accepts it — each pass drops at least one char,
+        so it always terminates.
+        """
+        n = min(budget * 4, (len(data) - 1) // 2)
+        text = (data[len(data) - n:] if tail else data[:n]).decode(
+            "utf-8", "replace",
+        )
+        while text and self._tokenizer.count_tokens(text) > budget:
+            cut = max(1, len(text) // 2)
+            text = text[cut:] if tail else text[: len(text) - cut]
+        return text
+
+    def _cap_result(self, output: str, tool: AgentTool | None = None) -> str:
+        """Cap a tool result at ~limit tokens, keeping head and tail.
+
+        Head+tail beats a head-only cut — listings carry signal up
+        front, stack traces at the end; the marker in the middle names
+        what was dropped. Subagent results are exempt: they are
+        bounded by the child's own loop and a schema-validated JSON
+        return must arrive whole. The cap is approximate — the marker
+        adds a few tokens, and a tokenizer without ``split_head_tail``
+        falls back to a char cut (~4 chars/token, floored by length so
+        whitespace-free blobs a word counter undercounts still get cut).
+        """
+        limit = self._tool_result_max_tokens
+        if tool is not None:
+            if _is_subagent_tool(tool):
+                return output
+            if tool.max_result_tokens is not None:
+                limit = tool.max_result_tokens
+        # Fast path: a BPE token is at least one byte, so a result
+        # within `limit` bytes can never exceed `limit` tokens.
+        if limit is None or len(output.encode("utf-8", "replace")) <= limit:
+            return output
+        head_budget = limit // 2
+        tail_budget = limit - head_budget
+        split = getattr(self._tokenizer, "split_head_tail", None)
+        if split is not None:
+            parts: tuple[str, str, int] = split(output, head_budget, tail_budget)
+            head, tail, total = parts
+            if not tail:
+                return output
+        else:
+            data = output.encode("utf-8", "replace")
+            # Floor the count by bytes/8 so whitespace-free blobs a
+            # word counter undercounts still get cut.
+            total = max(self._tokenizer.count_tokens(output), len(data) // 8)
+            if total <= limit:
+                return output
+            head = self._fallback_slice(data, head_budget, tail=False)
+            tail = self._fallback_slice(data, tail_budget, tail=True)
+        marker = (
+            f"\n[... tool result truncated: ~{total} tokens exceeded the "
+            f"{limit}-token cap — head and tail shown ...]\n"
+        )
+        return head + marker + tail
+
     def _error_result(
-        self, tc: ToolCall, tool_input: dict[str, Any], error_text: str,
+        self,
+        tc: ToolCall,
+        tool_input: dict[str, Any],
+        error_text: str,
+        tool: AgentTool | None = None,
     ) -> ToolResult:
+        # Digest before capping: the stuck ledger must see the full
+        # content, or polling a large changing output looks identical.
+        self._result_digests[tc.id] = hash(error_text)
+        error_text = self._cap_result(error_text, tool)
         self._fire("on_tool_error", tc.name, tool_input, error_text)
         self._record_tool_call(tc.name, tool_input, error_text)
         if self._output_tool is not None and tc.name == self._output_tool.name:
@@ -963,9 +1067,19 @@ class Agent:
         return ToolResult(tool_call_id=tc.id, content=error_text, is_error=True)
 
     def _ok_result(
-        self, tc: ToolCall, tool_input: dict[str, Any], output: str,
+        self,
+        tc: ToolCall,
+        tool_input: dict[str, Any],
+        output: str,
+        tool: AgentTool | None = None,
     ) -> ToolResult:
         output = self._apply_post_hooks(tc.name, tool_input, output)
+        # Digest pre-cap (see _error_result), then cap after post-hooks:
+        # what hooks produce is what gets measured — this is the single
+        # point every successful result (sync, async, MCP, subagent)
+        # passes before entering the messages.
+        self._result_digests[tc.id] = hash(output)
+        output = self._cap_result(output, tool)
         self._fire("on_tool_end", tc.name, tool_input, output)
         self._record_tool_call(tc.name, tool_input, output)
         return ToolResult(tool_call_id=tc.id, content=output)
@@ -976,60 +1090,92 @@ class Agent:
             tc.name, tc.arguments,
         )
         if tool is None or err is not None:
-            return self._error_result(tc, tool_input, err or f"Unknown tool: {tc.name}")
+            return self._error_result(
+                tc, tool_input, err or f"Unknown tool: {tc.name}", tool,
+            )
         if needs_approval:
             tool_input, deny = self._approve(tc, tool_input)
             if deny is not None:
-                return self._error_result(tc, tool_input, deny)
+                return self._error_result(tc, tool_input, deny, tool)
         self._fire("on_tool_start", tc.name, tool_input)
         try:
-            # ponytail: no timeout on sync tools — cancelling a sync call
-            # needs a worker thread; the async path enforces tool.timeout.
+            # Sync tools run with no timeout — by design, not debt: a
+            # worker-thread "timeout" cannot cancel the call, it only
+            # abandons a thread whose side effects keep running. Use
+            # the async path for enforceable timeouts (tool.timeout).
             output = tool.fn(**tool_input)
         except Exception as exc:
             logger.exception("Tool '%s' failed", tc.name)
             return self._error_result(
-                tc, tool_input, self._tool_failure_text(tc.name, exc),
+                tc, tool_input, self._tool_failure_text(tc.name, exc), tool,
             )
-        return self._ok_result(tc, tool_input, output)
+        return self._ok_result(tc, tool_input, output, tool)
 
-    async def _aexecute_call(self, tc: ToolCall) -> ToolResult:
-        """Execute one tool call asynchronously (MCP/subagent-aware)."""
+    async def _arun_tool(
+        self,
+        tool: AgentTool,
+        tc: ToolCall,
+        tool_input: dict[str, Any],
+        timeout: float | None,
+    ) -> str:
+        """Run the tool body: async caller with timeout, or inline sync."""
+        async_caller = getattr(tool, "_mcp_async_caller", None) or getattr(
+            tool, "_anchor_async_caller", None,
+        )
+        if async_caller is not None:
+            original_name = getattr(tool, "_mcp_original_name", tc.name)
+            coro = async_caller(original_name, tool_input)
+            output: str = (
+                await asyncio.wait_for(coro, timeout)
+                if timeout is not None
+                else await coro
+            )
+            return output
+        # Sync tools run inline (blocking, no timeout) — by design: a
+        # thread-based timeout only abandons the running call, its side
+        # effects keep going. Async callers get real cancellation via
+        # tool.timeout above.
+        return tool.fn(**tool_input)
+
+    async def _aexecute_call(
+        self, tc: ToolCall, gate: asyncio.Semaphore | None = None,
+    ) -> ToolResult:
+        """Execute one tool call asynchronously (MCP/subagent-aware).
+
+        *gate* bounds concurrent execution only — approval resolves
+        before acquiring it, so a pending approval never holds an
+        execution slot (a batch of approval-gated calls could
+        otherwise deadlock a UI that collects requests before
+        answering any).
+        """
         tool, tool_input, err, needs_approval = self._resolve_call(
             tc.name, tc.arguments,
         )
         if tool is None or err is not None:
-            return self._error_result(tc, tool_input, err or f"Unknown tool: {tc.name}")
+            return self._error_result(
+                tc, tool_input, err or f"Unknown tool: {tc.name}", tool,
+            )
         if needs_approval:
             tool_input, deny = await self._aapprove(tc, tool_input)
             if deny is not None:
-                return self._error_result(tc, tool_input, deny)
+                return self._error_result(tc, tool_input, deny, tool)
         self._fire("on_tool_start", tc.name, tool_input)
-        async_caller = getattr(tool, "_mcp_async_caller", None) or getattr(
-            tool, "_anchor_async_caller", None,
-        )
         timeout = tool.timeout if tool.timeout is not None else self._tool_timeout
         try:
-            if async_caller is not None:
-                original_name = getattr(tool, "_mcp_original_name", tc.name)
-                coro = async_caller(original_name, tool_input)
-                if timeout is not None:
-                    output = await asyncio.wait_for(coro, timeout)
-                else:
-                    output = await coro
+            if gate is not None:
+                async with gate:
+                    output = await self._arun_tool(tool, tc, tool_input, timeout)
             else:
-                # ponytail: sync tools run inline (blocking, no timeout);
-                # switch to asyncio.to_thread if cancellation ever matters.
-                output = tool.fn(**tool_input)
+                output = await self._arun_tool(tool, tc, tool_input, timeout)
         except TimeoutError:
             error_text = f"Error: tool '{tc.name}' timed out after {timeout}s."
-            return self._error_result(tc, tool_input, error_text)
+            return self._error_result(tc, tool_input, error_text, tool)
         except Exception as exc:
             logger.exception("Tool '%s' failed", tc.name)
             return self._error_result(
-                tc, tool_input, self._tool_failure_text(tc.name, exc),
+                tc, tool_input, self._tool_failure_text(tc.name, exc), tool,
             )
-        return self._ok_result(tc, tool_input, output)
+        return self._ok_result(tc, tool_input, output, tool)
 
     async def _aexecute_tool(self, name: str, tool_input: dict[str, Any]) -> str:
         """Async tool execution by name; returns the result text."""
@@ -1138,14 +1284,16 @@ class Agent:
         """Account the round, debit the shared pool, fire ``on_round_end``.
 
         Returns ``(usage, stopped_by)``; ``stopped_by`` changes only
-        when the round ends the turn: ``usage_limit`` after a wrap-up
-        round, otherwise the model's own stop cause.
+        when the round ends the turn: after a wrap-up round it keeps
+        the cause set when the cut was detected (``usage_limit`` or
+        ``stuck``), otherwise the model's own stop cause.
         """
-        if not run_tools:
-            if wrap_up:
-                stopped_by = "usage_limit"
-            elif state.stop_reason != StopReason.TOOL_USE:
-                stopped_by = self._stop_cause(state.stop_reason)
+        if (
+            not run_tools
+            and not wrap_up
+            and state.stop_reason != StopReason.TOOL_USE
+        ):
+            stopped_by = self._stop_cause(state.stop_reason)
         usage = self._round_usage(
             round_index, state, schema_tokens, tool_results, llm_messages,
         )
@@ -1163,7 +1311,7 @@ class Agent:
         tool_results: list[ToolResult],
     ) -> Iterator[AgentEvent]:
         """Append the assistant turn, run its tools, append the results."""
-        tool_calls = self._build_tool_calls(state.accumulators)
+        tool_calls = state.tool_calls = self._build_tool_calls(state.accumulators)
         messages.append(
             Message(
                 role=Role.ASSISTANT,
@@ -1183,7 +1331,7 @@ class Agent:
         tool_results: list[ToolResult],
     ) -> AsyncGenerator[AgentEvent, None]:
         """Async mirror of :meth:`_stream_tool_phase`."""
-        tool_calls = self._build_tool_calls(state.accumulators)
+        tool_calls = state.tool_calls = self._build_tool_calls(state.accumulators)
         messages.append(
             Message(
                 role=Role.ASSISTANT,
@@ -1240,10 +1388,12 @@ class Agent:
     ) -> Iterator[AgentEvent]:
         """Execute calls sequentially, yielding started/finished events.
 
-        Completed ``ToolResult`` objects are appended to *results*.
-        Events a subagent forwards during the call are buffered and
-        yielded before its ``ToolFinished`` (a sync consumer is blocked
-        while the tool runs, so live delivery is impossible anyway).
+        The sync path is sequential by design — ``read_only`` has no
+        effect here; use the async path for read fan-out. Completed
+        ``ToolResult`` objects are appended to *results*. Events a
+        subagent forwards during the call are buffered and yielded
+        before its ``ToolFinished`` (a sync consumer is blocked while
+        the tool runs, so live delivery is impossible anyway).
         """
         for tc in tool_calls:
             yield ToolStarted(
@@ -1264,13 +1414,48 @@ class Agent:
             yield from forwarded
             yield self._tool_finished(tc, result)
 
+    def _tool_batches(
+        self, tool_calls: list[ToolCall],
+    ) -> list[list[tuple[int, ToolCall]]]:
+        """Group calls for execution: read runs fan out, writes go alone.
+
+        Consecutive calls to ``read_only`` tools form one concurrent
+        batch; any other call (a write, or an unknown tool) is its own
+        batch, preserving call order — the Claude Code scheduling model.
+        """
+        lookup: dict[str, AgentTool] = {}
+        for t in self._all_active_tools():
+            # First-match-wins, mirroring _find_tool's shadowing rule.
+            lookup.setdefault(t.name, t)
+        batches: list[list[tuple[int, ToolCall]]] = []
+        run: list[tuple[int, ToolCall]] = []
+        for index, tc in enumerate(tool_calls):
+            tool = lookup.get(tc.name)
+            if tool is not None and tool.read_only:
+                run.append((index, tc))
+                continue
+            if run:
+                batches.append(run)
+                run = []
+            batches.append([(index, tc)])
+        if run:
+            batches.append(run)
+        return batches
+
     async def _astream_tools(
         self, tool_calls: list[ToolCall], results: list[ToolResult],
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Execute calls concurrently, yielding finished events live.
+        """Execute calls in read/write batches, yielding events live.
 
-        All ``ToolStarted`` events are emitted up front (the calls do
-        start together); each ``ToolFinished`` is emitted as its call
+        Consecutive ``read_only`` calls run concurrently (capped at
+        ``_TOOL_CONCURRENCY``); every write runs alone, after the
+        previous batch finished — two write *tools* can never overlap.
+        (Subagent dispatches are read-only: two children may still
+        write concurrently — serializing across children is the
+        orchestrator's design choice.) ``ToolStarted`` events are
+        emitted as each call's batch begins; a call beyond the
+        concurrency cap is announced with its batch but executes when
+        a slot frees. Each ``ToolFinished`` is emitted as its call
         completes, interleaved with events subagents forward through
         the per-task event sink. *results* receives the ToolResults in
         call order. An exception escaping a call is converted through
@@ -1278,6 +1463,7 @@ class Agent:
         propagates and pending calls are cancelled.
         """
         queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
+        semaphore = asyncio.Semaphore(_TOOL_CONCURRENCY)
 
         async def _one(index: int, tc: ToolCall) -> tuple[int, ToolResult]:
             # Each task owns a context copy, so the sink and the pool
@@ -1285,25 +1471,24 @@ class Agent:
             _EVENT_SINK.set((self._child_sink(tc, queue.put_nowait), tc.id))
             _USAGE_POOL.set(self._active_pool)
             try:
-                return index, await self._aexecute_call(tc)
+                return index, await self._aexecute_call(tc, semaphore)
             except Exception as exc:
                 logger.exception("Tool '%s' failed", tc.name)
                 return index, self._error_result(
                     tc, tc.arguments, self._tool_failure_text(tc.name, exc),
                 )
 
-        for tc in tool_calls:
-            yield ToolStarted(
-                tool_call_id=tc.id, name=tc.name, tool_input=tc.arguments,
-            )
-        tasks = [
-            asyncio.ensure_future(_one(i, tc)) for i, tc in enumerate(tool_calls)
-        ]
         ordered: list[ToolResult | None] = [None] * len(tool_calls)
-        async for event in self._merge_tool_events(
-            tool_calls, tasks, queue, ordered,
-        ):
-            yield event
+        for batch in self._tool_batches(tool_calls):
+            for _, tc in batch:
+                yield ToolStarted(
+                    tool_call_id=tc.id, name=tc.name, tool_input=tc.arguments,
+                )
+            tasks = [asyncio.ensure_future(_one(i, tc)) for i, tc in batch]
+            async for event in self._merge_tool_events(
+                tool_calls, tasks, queue, ordered,
+            ):
+                yield event
         results.extend(r for r in ordered if r is not None)
 
     async def _merge_tool_events(
@@ -1627,20 +1812,109 @@ class Agent:
         return round_index == self._max_rounds - 1
 
     def _maybe_final_round_notice(
-        self, final_round: bool, messages: list[Message],
+        self, final_round: bool, messages: list[Message], stopped_by: str,
     ) -> None:
         """Warn the model its next answer must be the last so it wraps up.
 
         Only meaningful when tools exist — a tool-less agent has no
-        tool budget to exhaust (relevant for ``max_rounds=1``).
+        tool budget to exhaust (relevant for ``max_rounds=1``). The
+        notice names the actual cause: exhausted budget, or a stuck
+        loop of identical tool calls.
         """
         if final_round and self._all_active_tools():
-            notice = (
-                _FINAL_ROUND_NOTICE_OUTPUT
-                if self._output_tool is not None
-                else _FINAL_ROUND_NOTICE
+            reason = (
+                "repeated identical tool calls are making no progress"
+                if stopped_by == "stuck"
+                else "the budget for this turn is exhausted"
             )
+            action = (
+                "Record your final answer by calling the final_result "
+                "tool now."
+                if self._output_tool is not None
+                else "Respond with your best final answer now — do not "
+                "call tools."
+            )
+            notice = f"[system] Final round: {reason}. {action}"
             messages.append(Message(role=Role.USER, content=notice))
+
+    def _post_round_cuts(
+        self,
+        state: _RoundState,
+        tool_results: list[ToolResult],
+        messages: list[Message],
+        rounds: list[RoundUsage],
+        *,
+        run_tools: bool,
+        stopped_by: str,
+    ) -> tuple[bool, str, UsageLimitReached | None]:
+        """Post-verdict cut checks: the stuck ledger, then usage limits.
+
+        Returns ``(wrap_up, stopped_by, breach)``. Values are set
+        eagerly so an abandoned wrap-up still persists the true cause;
+        the wrap-up's ``_close_round`` keeps them on the happy path.
+        A usage breach landing on the same round as a stuck verdict
+        wins — the budget cut is the one to surface. Never reached
+        with a wrap-up already pending: the round verdict ends the
+        loop first. A round that ran no tools resets the ledger — the
+        model did something else, so nothing repeated "in a row".
+        """
+        wrap_up = False
+        if not run_tools:
+            self._stuck_counts = {}
+            self._stuck_nudged = None
+        elif self._track_stuck(state.tool_calls, tool_results, messages):
+            wrap_up, stopped_by = True, "stuck"
+        breach = self._check_usage_limits(rounds)
+        if breach is not None:
+            wrap_up, stopped_by = True, "usage_limit"
+        return wrap_up, stopped_by, breach
+
+    def _track_stuck(
+        self,
+        tool_calls: list[ToolCall],
+        tool_results: list[ToolResult],
+        messages: list[Message],
+    ) -> bool:
+        """Update the identical-call ledger; ``True`` means stuck.
+
+        A key is the full ``(tool, args, result, is_error)`` identity,
+        with the result hashed *pre-cap* — legitimate polling (same
+        call, changing observations) never counts, even when the
+        difference lives in the truncated middle. Counts track
+        consecutive rounds containing the key: duplicates within one
+        round count once, and a round without the key resets it. At
+        the threshold the model gets one nudge naming the repetition;
+        repeating it in the round right after the nudge is the stuck
+        verdict (2-stage, OpenHands-style).
+        """
+        keys: dict[_StuckKey, int] = {}
+        for tc, result in zip(tool_calls, tool_results, strict=True):
+            key = (
+                tc.name,
+                json.dumps(tc.arguments, sort_keys=True, default=str),
+                self._result_digests.get(result.tool_call_id, 0),
+                result.is_error,
+            )
+            keys[key] = self._stuck_counts.get(key, 0) + 1
+        self._stuck_counts = keys
+        if self._stuck_nudged is not None:
+            if self._stuck_nudged in keys:
+                return True
+            self._stuck_nudged = None  # moved on — re-arm the nudge
+        for key, count in keys.items():
+            threshold = _STUCK_ERROR_STREAK if key[3] else _STUCK_RESULT_STREAK
+            if count >= threshold:
+                self._stuck_nudged = key
+                messages.append(Message(
+                    role=Role.USER,
+                    content=_STUCK_NUDGE.format(
+                        name=key[0],
+                        count=count,
+                        outcome="error" if key[3] else "result",
+                    ),
+                ))
+                break
+        return False
 
     def _check_usage_limits(
         self, rounds: list[RoundUsage],
@@ -1797,6 +2071,22 @@ class Agent:
             self._active_pool = None
         return False
 
+    def _reset_turn_state(self) -> None:
+        """Reset per-turn state at the top of ``stream``/``astream``.
+
+        This state living on the instance is why one Agent runs one
+        turn at a time — interleaving two turns on the same instance
+        corrupts it (the pre-existing contract for ``last_turn``,
+        output tracking, and the shared pool alike).
+        """
+        self._last_turn = None
+        self._last_output = None
+        self._output_failures = 0
+        self._child_turns = []
+        self._stuck_counts = {}
+        self._stuck_nudged = None
+        self._result_digests = {}
+
     def _finish_turn(
         self,
         rounds: list[RoundUsage],
@@ -1831,14 +2121,14 @@ class Agent:
         *messages*; exhausted retries end the turn with
         ``stopped_by="output_missing"`` — the verdict is returned, never
         raised, so the stream always reaches ``TurnFinished``. Output
-        captured during a usage-limit wrap-up keeps
-        ``stopped_by="usage_limit"`` — the budget cut stays visible.
+        captured during a usage-limit or stuck wrap-up keeps that
+        ``stopped_by`` — the cut stays visible.
         """
-        if stopped_by == "usage_limit":
-            # Arriving here with the breach already recorded means the
+        if stopped_by in ("usage_limit", "stuck"):
+            # Arriving here with the cut already recorded means the
             # wrap-up round has run. The grant is exactly one round and
             # it never raises, output captured or not.
-            return True, "usage_limit"
+            return True, stopped_by
         if self._last_output is not None:
             return True, "stop"
         output_pending = (
@@ -1885,10 +2175,7 @@ class Agent:
         if self._memory is not None:
             self._memory.add_user_message(message)
 
-        self._last_turn = None
-        self._last_output = None
-        self._output_failures = 0
-        self._child_turns = []
+        self._reset_turn_state()
         messages, full_system = self._prepare_turn(
             self._pipeline.build(message), message,
         )
@@ -1905,7 +2192,7 @@ class Agent:
                 round_open = round_index
                 yield RoundStarted(round=round_index, max_rounds=self._max_rounds)
                 yield from self._stream_compact(messages)
-                self._maybe_final_round_notice(final_round, messages)
+                self._maybe_final_round_notice(final_round, messages, stopped_by)
                 llm_messages, schemas, schema_tokens, call_extra = (
                     self._round_request(
                         full_system, messages, final_round=final_round,
@@ -1938,13 +2225,11 @@ class Agent:
                 )
                 if stop_loop:
                     break
-                breach = self._check_usage_limits(rounds)
+                wrap_up, stopped_by, breach = self._post_round_cuts(
+                    state, tool_results, messages, rounds,
+                    run_tools=run_tools, stopped_by=stopped_by,
+                )
                 if breach is not None:
-                    # Set eagerly so an abandoned wrap-up still persists
-                    # the true cause; the wrap-up's _close_round
-                    # re-derives the same value on the happy path.
-                    wrap_up = True
-                    stopped_by = "usage_limit"
                     yield breach
         finally:
             # Runs exactly once on every path. On abandonment or a
@@ -1962,19 +2247,17 @@ class Agent:
         """Send a message and stream typed agent events asynchronously.
 
         Async mirror of :meth:`stream`. Uses ``pipeline.abuild()``,
-        async iteration over the streaming API, and executes
-        independent tool calls concurrently — ``ToolFinished`` events
-        are emitted live as each call completes. :meth:`achat` is the
-        text-only projection of this stream.
+        async iteration over the streaming API, and read/write tool
+        scheduling: consecutive ``read_only`` calls run concurrently,
+        writes run alone — ``ToolFinished`` events are emitted live as
+        each call completes. :meth:`achat` is the text-only projection
+        of this stream.
         """
         if self._memory is not None:
             self._memory.add_user_message(message)
         await self._ensure_mcp()
 
-        self._last_turn = None
-        self._last_output = None
-        self._output_failures = 0
-        self._child_turns = []
+        self._reset_turn_state()
         messages, full_system = self._prepare_turn(
             await self._pipeline.abuild(message), message,
         )
@@ -1992,7 +2275,7 @@ class Agent:
                 yield RoundStarted(round=round_index, max_rounds=self._max_rounds)
                 async for event in self._astream_compact(messages):
                     yield event
-                self._maybe_final_round_notice(final_round, messages)
+                self._maybe_final_round_notice(final_round, messages, stopped_by)
                 llm_messages, schemas, schema_tokens, call_extra = (
                     self._round_request(
                         full_system, messages, final_round=final_round,
@@ -2026,13 +2309,11 @@ class Agent:
                 )
                 if stop_loop:
                     break
-                breach = self._check_usage_limits(rounds)
+                wrap_up, stopped_by, breach = self._post_round_cuts(
+                    state, tool_results, messages, rounds,
+                    run_tools=run_tools, stopped_by=stopped_by,
+                )
                 if breach is not None:
-                    # Set eagerly so an abandoned wrap-up still persists
-                    # the true cause; the wrap-up's _close_round
-                    # re-derives the same value on the happy path.
-                    wrap_up = True
-                    stopped_by = "usage_limit"
                     yield breach
         finally:
             # Runs exactly once on every path. On abandonment or a

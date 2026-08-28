@@ -183,9 +183,10 @@ async for event in agent.astream("Find and summarize the report"):
 ```
 
 The event vocabulary: `TurnStarted`, `RoundStarted`, `TextDelta`,
-`ToolStarted`/`ToolFinished` (correlated by `tool_call_id` — tool calls
-run concurrently in the async path and finish events arrive live, in
-completion order), `CompactionStarted`/`CompactionFinished`,
+`ToolStarted`/`ToolFinished` (correlated by `tool_call_id` — in the
+async path, consecutive `read_only` tool calls run concurrently and
+writes run alone, with finish events arriving live in completion
+order), `CompactionStarted`/`CompactionFinished`,
 `RoundFinished` (with per-round `RoundUsage`), `UsageLimitReached`
 (a usage limit was crossed; see below), and a terminal `TurnFinished`
 carrying the final text and `TurnDiagnostics`.
@@ -277,11 +278,12 @@ carrying the reason, so the model adjusts instead of retrying blindly;
 approve may rewrite the input via `updated_input`. A gated call with no
 callback configured fails closed. Async callbacks require
 `astream()`/`achat()` and may stay pending indefinitely — approval
-timeouts are the application's decision. Parallel tool calls run their
-callbacks concurrently; serialize inside the callback if your UI needs
-one prompt at a time. Durable pause (ending the turn
-with pending approvals and resuming later) is planned on top of the
-conversation store.
+timeouts are the application's decision. Approval resolves before a
+call takes an execution slot, and calls batched together (consecutive
+`read_only` tools) run their callbacks concurrently — serialize inside
+the callback if your UI needs one prompt at a time. Durable pause
+(ending the turn with pending approvals and resuming later) is planned
+on top of the conversation store.
 
 ### Structured Output
 

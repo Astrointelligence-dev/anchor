@@ -20,6 +20,12 @@ class AgentTool(BaseModel):
     1. ``@tool`` decorator (auto-generates schema from type hints)
     2. ``@tool(input_model=MyModel)`` (explicit Pydantic model)
     3. Direct construction with a raw ``input_schema`` dict
+
+    ``read_only`` declares the tool has no side effects: the async
+    loop runs consecutive read-only calls concurrently and every
+    undeclared (write) call alone, in call order — the safe default,
+    matching MCP's ``readOnlyHint`` (absent = writes). ``max_result_tokens``
+    overrides the agent-wide result cap for this tool; ``None`` inherits it.
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -33,6 +39,8 @@ class AgentTool(BaseModel):
     defer_loading: bool = False
     input_examples: tuple[dict[str, Any], ...] = ()
     requires_approval: bool = False
+    read_only: bool = False
+    max_result_tokens: int | None = Field(default=None, gt=0)
 
     def to_tool_schema(self) -> ToolSchema:
         """Convert to provider-agnostic ToolSchema."""
@@ -184,6 +192,7 @@ class TurnDiagnostics(BaseModel, frozen=True):
     rounds: tuple[RoundUsage, ...] = ()
     stopped_by: Literal[
         "stop", "max_rounds", "max_tokens", "usage_limit", "output_missing",
+        "stuck",
     ] = "stop"
     children: tuple[ChildTurn, ...] = ()
 

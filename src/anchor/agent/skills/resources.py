@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from anchor.agent.skills.registry import SkillRegistry
 
 _MAX_FILE_CHARS = 50_000
-_MAX_OUTPUT_CHARS = 10_000
 _SCRIPT_TIMEOUT_SECONDS = 60.0
 
 
@@ -62,6 +61,7 @@ def _make_read_skill_file_tool(registry: SkillRegistry) -> AgentTool:
             "references/guide.md). Use this to load skill reference "
             "material on demand instead of guessing."
         ),
+        read_only=True,
     )
     def read_skill_file(skill_name: str, file_path: str) -> str:
         """Read a file bundled with a skill.
@@ -102,6 +102,9 @@ def _make_run_skill_script_tool(registry: SkillRegistry) -> AgentTool:
             "return its output. Python scripts run with the current "
             "interpreter; other files must be executable."
         ),
+        # The loop's head+tail cap replaces the old local head-only cut
+        # — script failures live at the tail (stderr, stack traces).
+        max_result_tokens=2_500,
     )
     def run_skill_script(skill_name: str, script_path: str, args: str = "") -> str:
         """Run a skill's bundled script and return stdout/stderr.
@@ -143,9 +146,8 @@ def _make_run_skill_script_tool(registry: SkillRegistry) -> AgentTool:
             parts.append(f"stdout:\n{proc.stdout}")
         if proc.stderr:
             parts.append(f"stderr:\n{proc.stderr}")
-        output = "\n".join(parts)
-        if len(output) > _MAX_OUTPUT_CHARS:
-            output = output[:_MAX_OUTPUT_CHARS] + "\n[Output truncated]"
-        return output
+        # No local cut: the loop's head+tail result cap (the tool's
+        # max_result_tokens) bounds the output, keeping the tail.
+        return "\n".join(parts)
 
     return run_skill_script

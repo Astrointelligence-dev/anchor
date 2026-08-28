@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking
+- **Tool results are capped by default**: results (and error texts) longer than ~10k tokens are truncated head+tail with a marker before entering the messages — the loop finally calls the truncation the token-budget story always implied. Configure agent-wide with `Agent(tool_result_max_tokens=...)` (`None` disables), per tool with `AgentTool(max_result_tokens=...)`; subagent results are exempt (bounded by the child's own loop; validated JSON arrives whole)
+- **Async tool execution schedules by side effect**: consecutive `AgentTool(read_only=True)` calls run concurrently (cap 10); every undeclared tool is treated as a write and runs alone — two writes can never overlap. This serializes tools that ran in parallel before, **including all MCP tools** (`readOnlyHint` mapping is a tracked follow-up) — declare your side-effect-free tools `read_only=True` to regain fan-out. Subagent dispatch (`task`/`as_tool`) stays parallel, now capped at 10 concurrent
+- **New `stopped_by="stuck"`**: repeating an identical (tool, args, result) call across consecutive rounds first gets the model a corrective nudge (3 identical errors / 4 identical results); repeating again ends the turn with a graceful wrap-up round, same contract as `usage_limit` — no exception. A stuck child returns a marked partial result to its parent
 - **`UsageLimits` is now run-wide, not per-turn**: the agent that starts a turn with limits creates a shared pool and every subagent spawned during it (`task`/`as_tool`) debits the same budget — an orchestrator's `total_tokens_limit` now sees its children's spend. A child cut mid-run wraps up gracefully and returns a marked partial result; a child may carry its own narrower per-turn limits (`SubagentDefinition(usage_limits=...)`). `UsageLimitReached.used`/`limit` widen to `int | float` and the event gains `kind="cost"` and `scope` (`"run"` pool vs `"turn"` own-limit)
 
 ### Added
@@ -24,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP stdio connections with arguments actually work: the bridge passed a concatenated `"command arg arg"` string that fastmcp's transport inference rejects — found by the first live smoke test (the mocked suite patched `Client` and never saw it); the bridge now builds an explicit `StdioTransport`
 
 ### Changed
+- Sync tools deliberately run without a timeout — a worker-thread "timeout" cannot cancel the call, only abandon a thread whose side effects keep running; the async path (`tool.timeout` / `Agent(tool_timeout=...)`) is where timeouts are enforceable. `run_skill_script` drops its local head-only 10k-char cut in favor of the loop's head+tail cap (per-tool `max_result_tokens=2500`)
 - fastmcp pinned to `>=3.4,<4` (locked 3.4.7); the 4.x stateless-protocol (MCP 2026-07-28) migration is tracked for when it leaves beta
 
 ### Removed

@@ -33,6 +33,8 @@ class Agent:
         max_tokens: int = 16384,
         max_response_tokens: int = 1024,
         max_rounds: int = 10,
+        tool_timeout: float | None = None,
+        tool_result_max_tokens: int | None = 10_000,
     ) -> None
 ```
 
@@ -47,6 +49,8 @@ class Agent:
 | `max_tokens` | `int` | `16384` | Token budget for the context pipeline |
 | `max_response_tokens` | `int` | `1024` | Max tokens in each API response |
 | `max_rounds` | `int` | `10` | Max tool-use rounds per `chat()` call |
+| `tool_timeout` | `float \| None` | `None` | Default timeout for async tool calls (per-tool `AgentTool.timeout` overrides); sync tools run without one by design |
+| `tool_result_max_tokens` | `int \| None` | `10_000` | Head+tail cap applied to every tool result entering the messages (`None` disables; per-tool `AgentTool.max_result_tokens` overrides) |
 
 !!! tip
     See the [LLM Providers Guide](../guides/llm-providers.md) for supported
@@ -172,6 +176,8 @@ class AgentTool(BaseModel):
 | `input_schema` | `dict[str, Any]` | required | JSON Schema for inputs |
 | `fn` | `Callable[..., str]` | required | Callable that executes the tool |
 | `input_model` | `type[BaseModel] \| None` | `None` | Optional Pydantic model for validation |
+| `read_only` | `bool` | `False` | Declares the tool side-effect free: the async loop runs consecutive read-only calls concurrently; undeclared (write) tools run alone |
+| `max_result_tokens` | `int \| None` | `None` | Per-tool override of the agent's tool-result cap (`None` inherits `tool_result_max_tokens`) |
 
 ### Methods
 

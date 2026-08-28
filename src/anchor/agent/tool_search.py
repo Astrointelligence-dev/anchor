@@ -34,6 +34,7 @@ def _make_search_tools_tool(agent: Agent) -> AgentTool:
             "Search deferred tools by keyword or regex. Matching tools "
             "become available for use on your next response."
         ),
+        read_only=True,
     )
     def search_tools(query: str) -> str:
         """Search deferred tools and load the matches.

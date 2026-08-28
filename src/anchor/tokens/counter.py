@@ -56,6 +56,24 @@ class TiktokenCounter:
             return text
         return self._encoding.decode(tokens[:max_tokens])
 
+    def split_head_tail(
+        self, text: str, head_tokens: int, tail_tokens: int,
+    ) -> tuple[str, str, int]:
+        """Split *text* into head and tail slices in one encode pass.
+
+        Returns ``(head, tail, total_tokens)``. When the text already
+        fits within ``head_tokens + tail_tokens`` the head is the full
+        text and the tail is empty. Decoding a token slice may replace
+        a broken multi-byte character at the boundary.
+        """
+        tokens = self._encoding.encode(text)
+        total = len(tokens)
+        if total <= head_tokens + tail_tokens:
+            return text, "", total
+        head = self._encoding.decode(tokens[:head_tokens])
+        tail = self._encoding.decode(tokens[-tail_tokens:]) if tail_tokens else ""
+        return head, tail, total
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}(encoding={self._encoding.name!r})"
 
