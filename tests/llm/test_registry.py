@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import AsyncIterator, Iterator
 
 import pytest
@@ -11,6 +12,7 @@ from anchor.llm.errors import ProviderNotInstalledError
 from anchor.llm.models import LLMResponse, Message, StreamChunk, StopReason, ToolSchema, Usage
 from anchor.llm.registry import (
     _parse_model_string,
+    _PROVIDER_MODULES,
     _PROVIDERS,
     create_provider,
     register_provider,
@@ -97,3 +99,34 @@ class TestCreateProviderWithFallbacks:
             assert result.content == "ok"
         finally:
             _PROVIDERS.pop("fake", None)
+
+
+class TestLazyImportDoesNotDeadlock:
+    """create_provider() holds the registry lock across the lazy import, and
+    every provider module self-registers on import. With a plain Lock that
+    deadlocked the first create_provider() call of *any* provider in a fresh
+    process, which is how `Agent(model=...)` starts.
+    """
+
+    def test_self_registering_import_under_the_lock(self, monkeypatch):
+        import anchor.llm.registry as registry
+
+        def fake_import(module_path):
+            assert module_path == "anchor.llm.providers._probe"
+            register_provider("_probe", FakeProvider)
+
+        monkeypatch.setitem(_PROVIDER_MODULES, "_probe", "anchor.llm.providers._probe")
+        monkeypatch.setattr(registry.importlib, "import_module", fake_import)
+        monkeypatch.delitem(_PROVIDERS, "_probe", raising=False)
+
+        done: list[str] = []
+
+        def go():
+            done.append(create_provider("_probe/m").model_id)  # FakeProvider
+
+        thread = threading.Thread(target=go, daemon=True)
+        thread.start()
+        thread.join(timeout=5)
+
+        assert not thread.is_alive(), "create_provider deadlocked on the registry lock"
+        assert done == ["fake/m"]

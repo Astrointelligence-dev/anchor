@@ -13,7 +13,10 @@ from typing import Any
 from anchor.llm.base import BaseLLMProvider, LLMProvider
 from anchor.llm.errors import ProviderNotInstalledError
 
-_LOCK = threading.Lock()
+# RLock, not Lock: create_provider holds this across _try_import_provider(),
+# and the imported module registers itself via register_provider() — which
+# re-acquires it on the same thread.
+_LOCK = threading.RLock()
 _PROVIDERS: dict[str, type[BaseLLMProvider]] = {}
 
 # Maps provider name -> module path for lazy loading
