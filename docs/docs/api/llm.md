@@ -306,6 +306,7 @@ class FallbackProvider:
 | Provider | Model Prefix | SDK Package | Install Extra |
 |---|---|---|---|
 | Anthropic | `anthropic/` | `anthropic` | `pip install astro-anchor[anthropic]` |
+| Claude Code CLI | `claude_cli/` | `claude-agent-sdk` | `pip install astro-anchor[claude-cli]` |
 | OpenAI | `openai/` | `openai` | `pip install astro-anchor[openai]` |
 | Google Gemini | `gemini/` | `google-genai` | `pip install astro-anchor[gemini]` |
 | Grok (xAI) | `grok/` | `openai` | `pip install astro-anchor[openai]` |

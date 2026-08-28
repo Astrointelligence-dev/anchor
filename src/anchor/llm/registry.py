@@ -22,6 +22,7 @@ _PROVIDERS: dict[str, type[BaseLLMProvider]] = {}
 # Maps provider name -> module path for lazy loading
 _PROVIDER_MODULES: dict[str, str] = {
     "anthropic": "anchor.llm.providers.anthropic",
+    "claude_cli": "anchor.llm.providers.claude_cli",
     "openai": "anchor.llm.providers.openai",
     "gemini": "anchor.llm.providers.gemini",
     "grok": "anchor.llm.providers.grok",
@@ -33,6 +34,7 @@ _PROVIDER_MODULES: dict[str, str] = {
 # Maps provider name -> pip package name (for error messages)
 _PROVIDER_PACKAGES: dict[str, str] = {
     "anthropic": "anthropic",
+    "claude_cli": "claude-agent-sdk",
     "openai": "openai",
     "gemini": "google-genai",
     "grok": "openai",
@@ -44,6 +46,7 @@ _PROVIDER_PACKAGES: dict[str, str] = {
 # Maps provider name -> pip extras name
 _PROVIDER_EXTRAS: dict[str, str] = {
     "anthropic": "anthropic",
+    "claude_cli": "claude-cli",
     "openai": "openai",
     "gemini": "gemini",
     "grok": "openai",

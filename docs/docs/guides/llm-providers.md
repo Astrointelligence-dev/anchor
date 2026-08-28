@@ -41,6 +41,9 @@ agent = Agent(model="gemini/gemini-2.0-flash")
 
 # Local Ollama
 agent = Agent(model="ollama/llama3")
+
+# Claude Code CLI — your subscription, no API key
+agent = Agent(model="claude_cli/sonnet")
 ```
 
 !!! note
@@ -53,6 +56,7 @@ Each provider is packaged as an optional extra:
 
 ```bash
 pip install astro-anchor[anthropic]   # Anthropic
+pip install astro-anchor[claude-cli]   # Claude Code CLI (no API key)
 pip install astro-anchor[openai]      # OpenAI, Grok, OpenRouter
 pip install astro-anchor[gemini]      # Google Gemini
 pip install astro-anchor[ollama]      # Ollama (local models)
@@ -70,6 +74,7 @@ pip install astro-anchor[anthropic,openai,gemini]
 | Provider | Prefix | SDK | Install Extra | Env Variable |
 |---|---|---|---|---|
 | Anthropic | `anthropic/` | `anthropic` | `[anthropic]` | `ANTHROPIC_API_KEY` |
+| Claude Code CLI | `claude_cli/` | `claude-agent-sdk` | `[claude-cli]` | (none — uses the CLI's own auth) |
 | OpenAI | `openai/` | `openai` | `[openai]` | `OPENAI_API_KEY` |
 | Google Gemini | `gemini/` | `google-genai` | `[gemini]` | `GOOGLE_API_KEY` |
 | Grok (xAI) | `grok/` | `openai` | `[openai]` | `XAI_API_KEY` |
@@ -80,6 +85,71 @@ pip install astro-anchor[anthropic,openai,gemini]
 !!! tip
     Grok, OpenRouter, and standard OpenAI all share the `openai` SDK. Installing
     `astro-anchor[openai]` covers all three.
+
+## Claude Code CLI (no API key)
+
+`claude_cli/` runs Anchor on the `claude` CLI's own credentials — a Pro/Max
+subscription (OAuth) or a token from `claude setup-token`. No
+`ANTHROPIC_API_KEY` anywhere.
+
+```bash
+pip install astro-anchor[claude-cli]
+claude auth login      # or: claude setup-token
+```
+
+```python
+agent = Agent(model="claude_cli/sonnet")   # aliases or full model ids
+```
+
+### Tool calls still come back to you
+
+The CLI is an agent: it runs its own loop and executes its own tools. Anchor
+keeps the loop anyway. Your tools are registered as an in-process MCP server
+and a `PreToolUse` hook answers `defer`, which stops the run **without
+executing** and reports the call back. `Agent.with_tools(...)` works exactly as
+it does on any other provider — your Python function runs in your process.
+
+Closing the loop needs no CLI session: once the history carries a result for a
+call, the hook lets a replayed call through and the MCP handler returns that
+stored result.
+
+### Agentic mode
+
+Set `builtin_tools` to also let the CLI's *own* tools run inside the run:
+
+```python
+from anchor.llm.providers.claude_cli import ClaudeCLIProvider
+
+provider = ClaudeCLIProvider(
+    model="sonnet",
+    builtin_tools=["Read", "Grep"],   # or "claude_code" for the full preset
+    cwd="/path/to/project",
+)
+agent = Agent(llm=provider)
+```
+
+!!! warning "Agentic mode runs code as you"
+    Those tools execute as your OS user. A prompt injection in retrieved
+    context, a fetched page, or a file the model reads becomes code execution.
+    Keep it off (the default) for untrusted input, and prefer the narrowest
+    tool list that works over the `claude_code` preset.
+
+### What differs from an API-key provider
+
+| | |
+|---|---|
+| `max_tokens`, `temperature`, `stop` | accepted and **ignored** — the CLI exposes no equivalent |
+| `tool_choice="none"` | exact: tools are not registered |
+| `tool_choice="any"` / a named tool | degrades to a system-prompt instruction |
+| Conversation history | flattened into one role-labelled prompt (the CLI cannot replay assistant turns), so there are no prompt-cache hits across turns |
+| Images | rejected with a `ProviderError` — text only |
+| Cost | reported by the CLI itself, not from `MODEL_PRICING` |
+| Terms | consumer subscriptions are for individual use; check your plan before putting this behind a product |
+
+Anchor loads none of your CLI configuration: `setting_sources=[]` and
+`strict_mcp_config=True` are set for you. Without them the CLI's default system
+prompt, your `CLAUDE.md` and your MCP servers ride along — measured at ~178k
+tokens of overhead per call instead of a few hundred.
 
 ## Model String Format
 

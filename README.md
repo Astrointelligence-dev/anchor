@@ -54,6 +54,7 @@ pip install astro-anchor
 ```bash
 pip install astro-anchor[bm25]        # BM25 sparse retrieval
 pip install astro-anchor[anthropic]   # Anthropic Claude support
+pip install astro-anchor[claude-cli]  # Claude Code CLI — your subscription, no API key
 pip install astro-anchor[cli]         # CLI tools (typer + rich)
 pip install astro-anchor[flashrank]   # FlashRank reranking
 pip install astro-anchor[otlp]        # OpenTelemetry tracing

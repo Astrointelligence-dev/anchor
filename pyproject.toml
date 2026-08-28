@@ -31,8 +31,9 @@ bm25 = ["bm25s>=0.2,<1", "PyStemmer>=2.2,<4", "rank-bm25>=0.2.2,<1"]
 flashrank = ["flashrank>=0.2,<1"]
 cli = ["typer>=0.12,<1", "rich>=13,<14"]
 anthropic = ["anthropic>=0.40,<1"]
+claude-cli = ["claude-agent-sdk>=0.2,<1"]
 agents = ["anthropic>=0.40,<1"]
-all-providers = ["astro-anchor[anthropic,openai,gemini,grok,ollama,litellm]"]
+all-providers = ["astro-anchor[anthropic,claude-cli,openai,gemini,grok,ollama,litellm]"]
 gemini = ["google-genai>=1.0.0"]
 grok = ["openai>=1.50.0"]
 litellm = ["litellm>=1.50.0"]
@@ -57,7 +58,7 @@ docs = [
     "mkdocs-minify-plugin>=0.8,<1",
     "mkdocstrings[python]>=0.25,<1",
 ]
-all = ["astro-anchor[bm25,cli,anthropic,gemini,grok,litellm,ollama,openai,tiktoken,agents,pdf,flashrank,otlp,sqlite,postgres,redis]"]
+all = ["astro-anchor[bm25,cli,anthropic,claude-cli,gemini,grok,litellm,ollama,openai,tiktoken,agents,pdf,flashrank,otlp,sqlite,postgres,redis]"]
 
 [project.scripts]
 anchor = "anchor.cli:app"

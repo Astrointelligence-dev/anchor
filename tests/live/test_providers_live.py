@@ -15,7 +15,9 @@ haiku-class models, short prompts, low max_response_tokens.
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import shutil
 
 import pytest
 from pydantic import BaseModel
@@ -27,6 +29,11 @@ _OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 _GEMINI_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 _ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+
+# claude_cli needs no key: it borrows the CLI's own credentials.
+_CLAUDE_CLI = bool(shutil.which("claude")) and bool(
+    importlib.util.find_spec("claude_agent_sdk")
+)
 
 
 @tool
@@ -134,3 +141,48 @@ def test_gemini_streaming_tool_turn() -> None:
     # executed tools (no TOOL_USE stop reason, no ids, str(dict) args).
     finished = [e for e in events if e.type == "tool_finished"]
     assert any(e.result == "42" for e in finished)
+
+
+# ---------------------------------------------------------------------------
+# Claude Code CLI (no API key — uses the CLI's own auth)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _CLAUDE_CLI, reason="claude CLI or claude-agent-sdk missing")
+def test_claude_cli_tool_turn_without_an_api_key() -> None:
+    """The CLI defers the tool back to us; Anchor stays the loop."""
+    agent = Agent(
+        model="claude_cli/sonnet", max_rounds=4, max_response_tokens=300,
+    )
+    agent.with_system_prompt("Use the add tool for any arithmetic. Answer tersely.")
+    agent.with_tools([add])
+
+    events = _events_of(agent, "What is 17 + 25? Use the tool.")
+
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert any(e.result == "42" for e in finished)
+    final = events[-1]
+    assert isinstance(final, TurnFinished)
+    assert "42" in final.text
+    # The CLI reports real usage and cost, so no estimation kicks in.
+    assert final.diagnostics.rounds[0].prompt_tokens > 0
+
+
+@pytest.mark.skipif(not _CLAUDE_CLI, reason="claude CLI or claude-agent-sdk missing")
+def test_claude_cli_builtin_tools_run_inside_the_cli(tmp_path) -> None:
+    """Agentic mode: the CLI's own Read runs in-run, not through Anchor."""
+    from anchor.llm.models import Message, Role
+    from anchor.llm.providers.claude_cli import ClaudeCLIProvider
+
+    (tmp_path / "secret.txt").write_text("The magic number is 4271.\n")
+    provider = ClaudeCLIProvider(
+        model="sonnet", builtin_tools=["Read", "Glob"], cwd=str(tmp_path),
+        max_retries=0, timeout=180,
+    )
+    response = provider.invoke([
+        Message(
+            role=Role.USER,
+            content="Read secret.txt in the current directory and give the magic number.",
+        )
+    ])
+    assert "4271" in (response.content or "")
