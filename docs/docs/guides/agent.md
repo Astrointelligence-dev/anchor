@@ -198,7 +198,8 @@ is also how the text projections filter subagent text out.
 
 ### Usage Limits
 
-`with_usage_limits` caps what a whole turn may spend — the loop-level
+`with_usage_limits` caps what the whole run may spend — the turn
+**and every subagent it spawns** debit one shared pool. The loop-level
 complement to the pipeline's `TokenBudget`:
 
 ```python
@@ -207,25 +208,46 @@ from anchor import UsageLimits
 agent.with_usage_limits(UsageLimits(
     total_tokens_limit=50_000,   # prompt+completion+cache, all rounds
     tool_calls_limit=20,
+    cost_limit=2.50,             # USD (optional)
 ))
 ```
 
-Crossing a limit never raises. The loop emits a `UsageLimitReached`
-event, gives the model one wrap-up round (the final-round notice plus
-`tool_choice="none"`), and ends the turn with
-`stopped_by="usage_limit"` in `TurnFinished.diagnostics` /
-`agent.last_turn`. Checks are post-hoc, so a turn can overshoot by the
-round in flight plus one bounded wrap-up call. Rounds themselves are
-capped by `max_rounds`.
+Crossing a limit never raises, at any level. The loop emits a
+`UsageLimitReached` event (`scope="run"` for the shared pool,
+`scope="turn"` for an agent's own per-turn limit), gives the model one
+wrap-up round (the final-round notice plus `tool_choice="none"`), and
+ends the turn with `stopped_by="usage_limit"` in
+`TurnFinished.diagnostics` / `agent.last_turn`. A subagent cut
+mid-run wraps up the same way and returns its partial result, marked
+`[partial result]` on the plain-text path; a structured-output child's
+partiality is visible in `ChildTurn.diagnostics.stopped_by` (a marker
+would corrupt the JSON). A child that starts on an already exhausted
+pool gets exactly one wrap-up round. Checks are post-hoc, so a run can
+overshoot by the rounds in flight (one per concurrently running agent)
+plus the bounded wrap-up calls. Rounds themselves are capped by
+`max_rounds`.
+
+A subagent may carry its own narrower limits
+(`SubagentDefinition(usage_limits=...)`, or `with_usage_limits` on an
+agent wrapped with `as_tool`); both its per-turn limits and the run
+pool are enforced, so the effective budget only narrows. Aggregated
+accounting lands in `TurnDiagnostics.children` and the
+`run_total_tokens` / `run_total_tool_calls` / `run_total_cost_usd`
+properties.
+
+`cost_limit` is priced per round from, in order: the provider-reported
+billed cost (`claude_cli` sends it), the runtime-overridable
+`anchor.llm.pricing.MODEL_PRICING` table, and genai-prices when the
+`[pricing]` extra is installed. A model no source knows logs one
+warning and debits $0 — its tokens still count. In prompted output
+mode, `run()`/`arun()` hold one pool across the retry turns, so
+retries cannot re-arm the budget.
 
 On providers that do not report usage on the stream (all but Anthropic
 today), per-round `prompt_tokens`/`completion_tokens` are estimated
 with the agent's tokenizer, so the limit is enforced consistently on
-every provider.
-
-The limit covers the turn's own rounds; LLM calls made outside them —
-compaction summarization and a subagent's internal rounds — are not
-counted (a subagent enforces its own limits, if configured).
+every provider. Compaction summarization calls are not counted (the
+summary is counted in the next round's prompt).
 
 ### Approval (Human-in-the-Loop)
 

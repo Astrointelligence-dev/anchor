@@ -238,9 +238,12 @@ class ChildTurn(BaseModel, frozen=True):
 
     ``diagnostics.stopped_by`` makes a child cut by the shared pool
     machine-visible (``"usage_limit"``), so an orchestrating app can
-    tell partial child results from complete ones. Output-model
+    tell partial child results from complete ones — including a
+    structured-output child whose wrap-up happened to produce valid
+    JSON, which the tool result alone cannot reveal. Output-model
     retries produce one entry per child turn, sharing the
-    ``tool_call_id``.
+    ``tool_call_id``; a child that died mid-turn (provider error,
+    timeout) appears with the accounting it had accrued.
     """
 
     tool_call_id: str
@@ -266,10 +269,11 @@ class _UsagePool:
     # ponytail: lock-free — correct while all agents share one event
     # loop; add a threading.Lock when sync tools move to a thread pool.
 
-    __slots__ = ("cost_spent", "limits", "tokens_spent", "tool_calls_spent")
+    __slots__ = ("cost_spent", "limits", "owner", "tokens_spent", "tool_calls_spent")
 
-    def __init__(self, limits: UsageLimits) -> None:
+    def __init__(self, limits: UsageLimits, *, owner: object | None = None) -> None:
         self.limits = limits
+        self.owner = owner  # the Agent whose limits seeded the pool
         self.tokens_spent = 0
         self.tool_calls_spent = 0
         self.cost_spent = 0.0
@@ -301,9 +305,11 @@ class _UsagePool:
         return None
 
 
-# The active run's shared pool. The agent that starts a turn with
-# limits sets it; tool tasks copy the context, so subagents executing
-# inside a tool call see the same pool object and debit it directly.
+# Hand-off point for the run's shared pool. Set only inside frames that
+# reset in the same frame (around each tool call, and around a prompted
+# run()'s retry loop) — never across a generator yield, so it cannot
+# leak into the consumer's context. Subagents executing inside a tool
+# call read it at turn start and debit the same pool object directly.
 _USAGE_POOL: ContextVar[_UsagePool | None] = ContextVar(
     "anchor_usage_pool", default=None,
 )

@@ -9,7 +9,10 @@ Prices in USD per 1M tokens.
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 MODEL_PRICING: dict[str, dict[str, float]] = {
     # Anthropic
@@ -60,3 +63,66 @@ def _normalize_model_name(model: str) -> str:
     'model-20240806' -> 'model'
     """
     return re.sub(r"-\d{4}-?\d{2}-?\d{2}$", "", model)
+
+
+def estimate_round_cost(
+    model_id: str,
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> float | None:
+    """USD price of one model round, or None when no source knows the model.
+
+    The single price entrypoint for the agent loop's ``cost_limit``.
+    ``model_id`` is the provider convention ``"provider/model"`` (a bare
+    model name works too). Resolution order:
+
+    1. :data:`MODEL_PRICING` (runtime-overridable) — cache tokens are
+       priced at the full input rate, a conservative approximation.
+    2. genai-prices, when installed (``astro-anchor[pricing]``) — full
+       cache-aware rates, tried with the provider id first and bare
+       second.
+
+    Never raises: any lookup failure means None. Note genai-prices
+    counts cache tokens as a subset of ``input_tokens``, while anchor's
+    counts (Anthropic convention) exclude them — the mapping here adds
+    them back so cached rounds price correctly instead of erroring.
+    """
+    provider, sep, model = model_id.partition("/")
+    if not sep:
+        provider, model = "", model_id
+    priced = calculate_cost(
+        model,
+        prompt_tokens + cache_creation_tokens + cache_read_tokens,
+        completion_tokens,
+    )
+    if priced is not None:
+        return priced
+    try:
+        from genai_prices import Usage as PriceUsage
+        from genai_prices import calc_price
+    except ImportError:
+        return None
+    usage = PriceUsage(
+        input_tokens=prompt_tokens + cache_creation_tokens + cache_read_tokens,
+        output_tokens=completion_tokens,
+        cache_write_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+    )
+
+    def attempt(provider_id: str | None) -> float | None:
+        try:
+            return float(
+                calc_price(usage, model_ref=model, provider_id=provider_id)
+                .total_price,
+            )
+        except Exception as exc:  # a price lookup must never kill a turn
+            logger.debug("genai-prices lookup failed for %r: %s", model_id, exc)
+            return None
+
+    cost = attempt(provider) if provider else None
+    if cost is None:
+        cost = attempt(None)
+    return cost

@@ -18,7 +18,7 @@ import pytest
 
 import anchor.agent.agent as agent_mod
 from anchor.agent import Agent, AgentTool, UsageLimits
-from anchor.agent.events import TurnFinished, UsageLimitReached
+from anchor.agent.events import RoundFinished, TurnFinished, UsageLimitReached
 from anchor.agent.subagent import SubagentDefinition
 from tests.test_agent.test_agent import (
     FakeLLMProvider,
@@ -215,7 +215,7 @@ def test_output_model_retry_suppressed_on_exhausted_pool():
     assert len(provider.seen_messages) == 1
     (result,) = _tool_results_of(orch_provider, 1)
     assert result.is_error is True
-    assert "hit the usage limit" in result.content
+    assert "usage limit reached" in result.content
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +321,7 @@ async def test_children_diagnostics_async_task_tool_resolves_agent_name():
 
 
 def test_cost_limit_trips_the_pool(monkeypatch):
-    monkeypatch.setattr(agent_mod, "_round_cost_usd", lambda model_id, usage: 1.0)
+    monkeypatch.setattr(agent_mod, "_estimate_cost", lambda *a: 1.0)
     responses: list[list[Any]] = [
         _tool_use_response(f"tu_{i}", "echo", {"x": "call"}) for i in range(5)
     ]
@@ -345,12 +345,18 @@ def test_cost_limit_trips_the_pool(monkeypatch):
     assert final.diagnostics.run_total_cost_usd == 4.0
 
 
-def test_cost_limit_without_genai_prices_fails_at_configuration(monkeypatch):
+def test_cost_limit_without_genai_prices_warns_at_configuration(
+    monkeypatch, caplog,
+):
     monkeypatch.setitem(sys.modules, "genai_prices", None)
     agent, _ = _agent([_text_response("hi")])
 
-    with pytest.raises(ImportError, match="pricing extra"):
+    with caplog.at_level(logging.WARNING, logger="anchor.agent.agent"):
         agent.with_usage_limits(UsageLimits(cost_limit=1.0))
+
+    # Soft gate: MODEL_PRICING and provider-reported costs still price
+    # rounds, so configuration warns instead of raising.
+    assert any("genai-prices" in r.getMessage() for r in caplog.records)
 
 
 def test_unknown_model_warns_once_and_debits_zero_cost(
@@ -375,6 +381,248 @@ def test_unknown_model_warns_once_and_debits_zero_cost(
     assert agent.last_turn is not None
     assert agent.last_turn.stopped_by == "stop"
     assert agent.last_turn.total_cost_usd == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Pool lifecycle: no ambient leakage (review round, judge finding 1)
+# ---------------------------------------------------------------------------
+
+
+def test_abandoned_stream_does_not_poison_later_agents():
+    # Abandon a breached stream with the reference held: the pool must
+    # not leak into the consumer's context and cut unrelated agents.
+    burner, _ = _agent(
+        [
+            _tool_use_response("tu_0", "echo", {"x": "word " * 60}),
+            _tool_use_response("tu_1", "echo", {"x": "word " * 60}),
+            _text_response("never reached"),
+        ],
+        tools=[_echo_tool()],
+    )
+    burner.with_usage_limits(UsageLimits(total_tokens_limit=50))
+    it = burner.stream("Go")
+    for event in it:
+        if isinstance(event, UsageLimitReached):
+            break  # abandon mid-turn, generator alive, finally not run
+
+    other, _ = _agent(
+        [
+            _tool_use_response("o_0", "echo", {"x": "hi"}),
+            _text_response("done"),
+        ],
+        tools=[_echo_tool()],
+    )
+    events = list(other.stream("Go"))
+
+    final = events[-1]
+    assert isinstance(final, TurnFinished)
+    assert final.diagnostics.stopped_by == "stop"
+    assert len(final.diagnostics.rounds) == 2
+    it.close()
+
+
+def test_interleaved_streams_do_not_share_pools():
+    # A second agent driven while the first's stream is mid-flight must
+    # not debit the first agent's pool.
+    limited, _ = _agent(
+        [
+            _tool_use_response("tu_0", "echo", {"x": "small"}),
+            _text_response("done a"),
+        ],
+        tools=[_echo_tool()],
+    )
+    limited.with_usage_limits(UsageLimits(total_tokens_limit=150))
+    it = limited.stream("Go")
+    next(e for e in it if isinstance(e, RoundFinished))  # past round 0
+
+    fat, _ = _agent([_text_response("word " * 200)])
+    list(fat.stream("Say a lot"))
+
+    rest = list(it)
+    final = rest[-1]
+    assert isinstance(final, TurnFinished)
+    assert final.diagnostics.stopped_by == "stop"
+    assert not any(isinstance(e, UsageLimitReached) for e in rest)
+
+
+def test_close_from_foreign_context_still_persists_diagnostics():
+    # An abandoned generator may be finalized under a different context
+    # (asyncio's asyncgen finalizer does this). The finally must still
+    # persist diagnostics — nothing in it may raise cross-context.
+    import contextvars
+
+    agent, _ = _agent(
+        [
+            _tool_use_response("tu_0", "echo", {"x": "hi"}),
+            _text_response("done"),
+        ],
+        tools=[_echo_tool()],
+    )
+    agent.with_usage_limits(UsageLimits(total_tokens_limit=1_000_000))
+    it = agent.stream("Go")
+    next(e for e in it if isinstance(e, RoundFinished))
+
+    contextvars.copy_context().run(it.close)
+
+    assert agent.last_turn is not None
+    assert agent.last_turn.rounds
+
+
+async def test_aclose_from_fresh_task_still_persists_diagnostics():
+    import asyncio
+
+    agent, _ = _agent(
+        [
+            _tool_use_response("tu_0", "echo", {"x": "hi"}),
+            _text_response("done"),
+        ],
+        tools=[_echo_tool()],
+    )
+    agent.with_usage_limits(UsageLimits(total_tokens_limit=1_000_000))
+    stream = agent.astream("Go")
+    async for event in stream:
+        if isinstance(event, RoundFinished):
+            break
+
+    # A task gets its own context copy — the asyncgen-finalizer shape.
+    await asyncio.create_task(stream.aclose())
+
+    assert agent.last_turn is not None
+    assert agent.last_turn.rounds
+
+
+def test_prompted_run_budget_spans_retries():
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        answer: str
+
+    provider = FakeLLMProvider([_text_response("junk " * 200)])
+    agent = Agent(llm=provider, tokenizer=_Tok())
+    agent.with_output_model(Out, mode="prompted", max_output_retries=2)
+    agent.with_usage_limits(UsageLimits(total_tokens_limit=100))
+
+    with pytest.raises(ValueError, match="usage limit reached"):
+        agent.run("Go")
+
+    # The first turn drained the budget: no retry turns were spawned.
+    assert len(provider.seen_messages) == 1
+
+
+def test_nesting_added_after_as_tool_is_caught_at_call_time():
+    worker, worker_provider = _burning_child(2)
+    wrapped = worker.as_tool("worker", "Does work")
+    # Late registration: this bypasses the registration-time guards.
+    worker.with_subagents([
+        SubagentDefinition(name="grandchild", description="Nested"),
+    ])
+    orch, orch_provider = _agent([
+        _tool_use_response("tu_1", "worker", {"task": "Dig."}),
+        _text_response("ok"),
+    ])
+    orch.with_tools([wrapped])
+
+    list(orch.stream("Go"))
+
+    (result,) = _tool_results_of(orch_provider, 1)
+    assert result.is_error is True
+    assert "nesting" in result.content
+    # The 3-level tree never executed a single model round.
+    assert len(worker_provider.seen_messages) == 0
+
+
+def test_failed_child_still_appears_in_children():
+    from anchor.llm.models import StopReason, StreamChunk
+
+    class _DiesOnSecondCall(FakeLLMProvider):
+        def stream(self, messages, **kwargs):
+            if self._call_index >= 1:
+                self.seen_messages.append(list(messages))
+                msg = "provider blew up"
+                raise RuntimeError(msg)
+            return super().stream(messages, **kwargs)
+
+    sub_provider = _DiesOnSecondCall([
+        _tool_use_response("s_0", "echo", {"x": "hi"}),
+        [StreamChunk(stop_reason=StopReason.STOP)],
+    ])
+    sub = Agent(llm=sub_provider, tokenizer=_Tok())
+    sub.with_tools([_echo_tool()])
+    orch, orch_provider = _agent([
+        _tool_use_response("tu_1", "researcher", {"task": "Dig."}),
+        _text_response("recovered"),
+    ])
+    orch.with_tools([sub.as_tool("researcher", "Researches")])
+
+    list(orch.stream("Go"))
+
+    (result,) = _tool_results_of(orch_provider, 1)
+    assert result.is_error is True
+    # The child's debited round is visible in the parent's aggregation
+    # even though its turn died mid-flight.
+    assert orch.last_turn is not None
+    (child,) = orch.last_turn.children
+    assert child.tool_call_id == "tu_1"
+    assert child.diagnostics.rounds
+
+
+def test_provider_reported_cost_wins_over_the_table():
+    from anchor.llm.models import StopReason, StreamChunk, Usage
+
+    agent, _ = _agent([[
+        StreamChunk(content="hi"),
+        StreamChunk(
+            usage=Usage(
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+                total_cost=0.5,
+            ),
+            stop_reason=StopReason.STOP,
+        ),
+    ]])
+
+    list(agent.stream("Go"))
+
+    assert agent.last_turn is not None
+    assert agent.last_turn.rounds[0].cost_usd == 0.5
+    assert agent.last_turn.total_cost_usd == 0.5
+
+
+def test_child_own_limits_under_limitless_parent_report_turn_scope():
+    # A subagent never roots a run pool: its own limits are per-turn
+    # and must say so, regardless of the parent's configuration.
+    child_provider = FakeLLMProvider(
+        [
+            _tool_use_response(f"s_{i}", "echo", {"x": "hi"})
+            for i in range(3)
+        ]
+        + [_text_response("done")],
+    )
+    orch, _ = _agent([
+        _tool_use_response("tu_1", "task", {
+            "agent_name": "researcher", "task": "Dig.",
+        }),
+        _text_response("all good"),
+    ])
+    orch.with_subagents([
+        SubagentDefinition(
+            name="researcher",
+            description="Researches",
+            tools=(_echo_tool(),),
+            usage_limits=UsageLimits(tool_calls_limit=1),
+        ),
+    ])
+    _, sub = orch._subagents["researcher"]
+    sub._llm = child_provider
+
+    events = list(orch.stream("Go"))
+
+    breach = next(e for e in events if isinstance(e, UsageLimitReached))
+    assert breach.scope == "turn"
+    final = events[-1]
+    assert isinstance(final, TurnFinished)
+    assert final.diagnostics.stopped_by == "stop"
 
 
 # ---------------------------------------------------------------------------

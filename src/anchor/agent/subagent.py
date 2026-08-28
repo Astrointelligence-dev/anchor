@@ -122,15 +122,23 @@ def _one_turn_sync(sub: Agent, prompt: str) -> tuple[str, str]:
     """One child turn: forward events to the parent's sink.
 
     Returns ``(text, stopped_by)`` — the verdict makes a usage-limit
-    cut machine-visible to the runner.
+    cut machine-visible to the runner. A turn that dies mid-flight
+    (provider error, cancellation) still forwards its accounting: the
+    child's rounds were debited to the pool, so the parent's
+    ``children`` aggregation must see them too.
     """
     text = ""
     stopped_by = "stop"
-    for event in sub.stream(prompt):
-        _forward(event)
-        if isinstance(event, TurnFinished):
-            text = event.text
-            stopped_by = event.diagnostics.stopped_by
+    try:
+        for event in sub.stream(prompt):
+            _forward(event)
+            if isinstance(event, TurnFinished):
+                text = event.text
+                stopped_by = event.diagnostics.stopped_by
+    except BaseException:
+        if sub.last_turn is not None:
+            _forward(TurnFinished(text="", diagnostics=sub.last_turn))
+        raise
     return text, stopped_by
 
 
@@ -138,25 +146,45 @@ async def _one_turn_async(sub: Agent, prompt: str) -> tuple[str, str]:
     """Async mirror of :func:`_one_turn_sync`."""
     text = ""
     stopped_by = "stop"
-    async for event in sub.astream(prompt):
-        _forward(event)
-        if isinstance(event, TurnFinished):
-            text = event.text
-            stopped_by = event.diagnostics.stopped_by
+    try:
+        async for event in sub.astream(prompt):
+            _forward(event)
+            if isinstance(event, TurnFinished):
+                text = event.text
+                stopped_by = event.diagnostics.stopped_by
+    except BaseException:
+        if sub.last_turn is not None:
+            _forward(TurnFinished(text="", diagnostics=sub.last_turn))
+        raise
     return text, stopped_by
 
 
-# Appended to a plain-text child result cut by a usage limit, so the
-# orchestrating model knows the answer is partial and the budget is
-# gone — respawning the child would land on an exhausted pool.
+# Appended to a plain-text child result cut by a usage limit — the
+# child's own per-turn limit or the run's shared pool — so the
+# orchestrating model knows the answer is partial.
 _PARTIAL_RESULT_NOTE = (
     "\n\n[subagent stopped early: usage limit reached — partial result]"
 )
 
 
-def _pool_exhausted() -> bool:
+def _partial(text: str, stopped_by: str) -> str:
+    return text + _PARTIAL_RESULT_NOTE if stopped_by == "usage_limit" else text
+
+
+def _guard_retry_budget(err: str) -> None:
+    """Refuse a retry turn when the run's shared pool is exhausted.
+
+    A retry against an empty pool would only burn another wrap-up
+    round. A child's own per-turn limit does not suppress the retry —
+    a new turn gets a fresh per-turn allowance by contract.
+    """
     pool = _USAGE_POOL.get()
-    return pool is not None and pool.breach() is not None
+    if pool is not None and pool.breach() is not None:
+        msg = (
+            "usage limit reached before schema-valid output was "
+            f"produced: {err}"
+        )
+        raise ValueError(msg)
 
 
 def _run_sync(
@@ -167,20 +195,12 @@ def _run_sync(
 ) -> str:
     text, stopped_by = _one_turn_sync(sub, _task_prompt(task, output_model))
     if output_model is None:
-        if stopped_by == "usage_limit":
-            return text + _PARTIAL_RESULT_NOTE
-        return text
+        return _partial(text, stopped_by)
     normalized, err = _validate_output(text, output_model)
     for _ in range(max_output_retries):
         if err is None:
             break
-        if _pool_exhausted():
-            # A retry turn would only burn another wrap-up round.
-            msg = (
-                "subagent hit the usage limit before producing "
-                f"schema-valid output: {err}"
-            )
-            raise ValueError(msg)
+        _guard_retry_budget(err)
         text, _ = _one_turn_sync(sub, _retry_prompt(text, err, output_model))
         normalized, err = _validate_output(text, output_model)
     if err is not None or normalized is None:
@@ -199,20 +219,12 @@ async def _run_async(
         sub, _task_prompt(task, output_model),
     )
     if output_model is None:
-        if stopped_by == "usage_limit":
-            return text + _PARTIAL_RESULT_NOTE
-        return text
+        return _partial(text, stopped_by)
     normalized, err = _validate_output(text, output_model)
     for _ in range(max_output_retries):
         if err is None:
             break
-        if _pool_exhausted():
-            # A retry turn would only burn another wrap-up round.
-            msg = (
-                "subagent hit the usage limit before producing "
-                f"schema-valid output: {err}"
-            )
-            raise ValueError(msg)
+        _guard_retry_budget(err)
         retry = _retry_prompt(text, err, output_model)
         text, _ = await _one_turn_async(sub, retry)
         normalized, err = _validate_output(text, output_model)
@@ -242,6 +254,9 @@ def _make_subagent_tool(
     _guard_clean_context(sub)
 
     def run(task: str) -> str:
+        # Re-check at call time: the registration-time guard misses
+        # subagents added to *sub* after as_tool() wrapped it.
+        _guard_no_nesting(sub)
         return _run_sync(sub, task, output_model, max_output_retries)
 
     # Docstring is dynamic (per-subagent param description), so the
@@ -251,6 +266,7 @@ def _make_subagent_tool(
     subagent_tool = tool(name=name, description=description)(run)
 
     async def acall(_original_name: str, tool_input: dict[str, Any]) -> str:
+        _guard_no_nesting(sub)
         return await _run_async(
             sub, tool_input["task"], output_model, max_output_retries,
         )
@@ -291,6 +307,9 @@ def _make_task_tool(
         if isinstance(resolved, str):
             return resolved
         definition, sub = resolved
+        # Re-check at call time: subagents may have been added to the
+        # registered child after with_subagents() built it.
+        _guard_no_nesting(sub)
         return _run_sync(sub, task, definition.output_model, 1)
 
     async def acall(_original_name: str, tool_input: dict[str, Any]) -> str:
@@ -298,6 +317,7 @@ def _make_task_tool(
         if isinstance(resolved, str):
             return resolved
         definition, sub = resolved
+        _guard_no_nesting(sub)
         return await _run_async(
             sub, tool_input.get("task", ""), definition.output_model, 1,
         )

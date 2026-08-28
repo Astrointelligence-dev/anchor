@@ -141,4 +141,88 @@ Fechadas com o Arthur em 2026-08-28, após a pesquisa:
 
 ## Review
 
-_(preencher ao final)_
+**Sessão 6 (2026-08-28), 2 commits: `cd8d4b7` (feature) + fix round do ritual.**
+
+### Ritual (10 ângulos /code-review xhigh + juiz adversarial com 9 probes)
+
+Veredito do juiz: **APPROVE WITH CONDITIONS**. 15 findings confirmados
+reportados; os que mudaram código:
+
+1. **Pool ambiente vazava (HIGH, 4 sintomas provados por execução)** — o
+   contextvar era setado dentro do generator body, mutando o contexto do
+   *consumer* pelo turno inteiro. Stream abandonado → agente sem limites
+   virava "1 round + usage_limit" para sempre; streams intercalados
+   cross-debitavam; o finalizer async levantava `ValueError` no reset
+   cross-context **pulando o `_finish_turn`**. Fix (shape do juiz, menor
+   que o meu): pool em slot (`_active_pool`) + contextvar publicado só na
+   janela de cada tool call, colado no `_EVENT_SINK` — deleta Token,
+   `_pool_exit` e a linha frágil do finally.
+2. **`run()` prompted re-armava o budget por retry** (2 pools, 328+379
+   contra limite 100 no probe) — `_prompted_run_pool()` segura um pool
+   pelo loop de retries (frame normal, sem generator).
+3. **`calc_price` com cache tokens levantava `ValueError`** (genai-prices
+   trata cache como subconjunto do input; Anthropic exclui) e subprecificava
+   ~54% — mapeamento cache-inclusivo + `except Exception`.
+4. **Reuse perdido (ponytail rung 2)**: o repo já tinha
+   `llm/pricing.py` (`MODEL_PRICING` + `calculate_cost`, API pública com
+   override) — o genai-prices virou *fallback* atrás dela num entrypoint
+   único (`estimate_round_cost`), com `provider_id` (ids multi-segmento
+   litellm/openrouter precificam) e normalização de sufixo de data.
+5. **Custo reportado pelo provider era jogado fora** — `Usage.total_cost`
+   (claude_cli manda o billed real) agora vence a tabela.
+6. **Nesting guard tinha bypass por ordem de registro** — re-check no
+   call time dos 4 dispatchers; árvore de 3 níveis morre com tool error.
+7. **`scope` fluía da config do pai** — filho nunca cria pool (papel via
+   `_EVENT_SINK`); limites próprios de filho são sempre `scope="turn"`;
+   `pool.owner is self` substitui a identidade frágil de limits.
+8. **Filho que morre mid-turn sumia do `children`** (pool debitado,
+   diagnóstico não) — forward sintético do `TurnFinished` a partir de
+   `sub.last_turn`; cobre provider error e timeout.
+9. Gate de `ImportError` do cost_limit virou warning (MODEL_PRICING é
+   baseline); mensagem de retry-suppression neutra (vale pro `run()` do
+   usuário); ordem own-limits→pool no check (o corte mais estreito é o
+   reportado); docs reescritos (guides/agent.md afirmava o inverso do
+   contrato novo), CHANGELOG com entrada breaking; ~30 linhas de
+   duplicação sync/async removidas (helpers `_partial`/
+   `_guard_retry_budget`/`_child_sink`).
+
+**Refutados pelo juiz (probes)**: mesmo objeto `UsageLimits` em pai+filho
+é inofensivo; contabilidade exata no happy path (303==303); smart union
+int|float preserva tipos; `model_copy` em frozen ok; pool não vaza entre
+turnos completos.
+
+**Aceito sem fix (documentado em docstring)**: filho que *começa* em pool
+exausto não emite evento próprio (o breach já foi emitido por quem
+exauriu); filho estruturado cortado que emite JSON válido volta limpo —
+o veredito vive em `ChildTurn.diagnostics.stopped_by` (marcador
+corromperia o contrato JSON); wrap-up sem notice para filho sem tools.
+
+### Lições
+
+- **Ponytail rung 2 falhou uma vez**: implementei pricing novo sem
+  grepar por tabela existente (`llm/pricing.py` era pública e
+  documentada). O reuse-angle pegou; custo: retrabalho da frente de custo
+  inteira no fix round.
+- **Contextvar + generator é armadilha conhecida agora**: setar var em
+  generator body muta o contexto do caller. O padrão seguro do repo é o
+  do `_EVENT_SINK` — set/reset no mesmo frame, sem yield entre eles.
+  Estado de turno vive em slot, não em var ambiente.
+- O fix do juiz era menor que o meu plano (role-based): slot + janela de
+  tool call. O seam certo deletou código.
+
+### Follow-ups registrados
+
+- `ToolResult.metadata` como canal estruturado para veredito de filho
+  (mataria o marcador textual e o gap do JSON) — decisão do Arthur.
+- `FallbackProvider.model_id` reporta o primário — rounds servidos pelo
+  fallback precificam errado na tabela (mitigado quando o provider
+  reporta custo).
+- Reentrância de subagente compartilhado (2 `task` concorrentes no mesmo
+  filho compartilham `_last_turn`/`_child_turns`) — pré-existente,
+  agora user-visible via `children`.
+- Custo do agent loop não alimenta o `CostTracker` (duas superfícies de
+  custo desconectadas).
+- Compactação não debita o pool (a chamada de summarize é invisível;
+  o resumo conta no prompt seguinte) — herdado do per-turn.
+- `uv.lock` deste commit varreu entradas atrasadas do claude-cli
+  (re-lock mecânico; anotado pelo conventions-angle).

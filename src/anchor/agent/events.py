@@ -96,7 +96,10 @@ class UsageLimitReached(_BaseEvent):
     a child's spend counts; ``scope="turn"`` is one agent's own
     per-turn limit. For ``kind="cost"``, ``used``/``limit`` are USD.
     The turn ends gracefully with ``stopped_by="usage_limit"`` — no
-    exception is raised.
+    exception is raised. A subagent that *starts* on an already
+    exhausted pool emits no additional event (the breach was already
+    emitted by whoever exhausted it); its cut is visible in
+    ``diagnostics.stopped_by``.
     """
 
     type: Literal["usage_limit_reached"] = "usage_limit_reached"
