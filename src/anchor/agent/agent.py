@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 from collections.abc import AsyncGenerator, Callable, Iterator
+from contextvars import Token
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +56,15 @@ from .hooks import (
     PreToolHook,
 )
 from .memory_tool import MEMORY_INSTRUCTIONS, FileMemoryBackend, memory_tool
-from .models import AgentTool, RoundUsage, TurnDiagnostics, UsageLimits
+from .models import (
+    _USAGE_POOL,
+    AgentTool,
+    ChildTurn,
+    RoundUsage,
+    TurnDiagnostics,
+    UsageLimits,
+    _UsagePool,
+)
 from .skills.activate import _make_activate_skill_tool
 from .skills.models import Skill
 from .skills.registry import SkillRegistry
@@ -85,6 +94,42 @@ _FINAL_ROUND_NOTICE_OUTPUT = (
     "[system] Final round: the budget for this turn is exhausted. "
     "Record your final answer by calling the final_result tool now."
 )
+
+# Models genai-prices has no price for — warned once each, then their
+# rounds debit zero cost (tokens still count against the pool).
+_PRICE_WARNED: set[str] = set()
+
+
+def _round_cost_usd(model_id: str, usage: RoundUsage) -> float:
+    """USD price of one round via genai-prices.
+
+    An unknown model logs one warning and prices at 0.0 — never raises
+    mid-turn (the usage-limit contract), never silently either.
+    """
+    from genai_prices import Usage as PriceUsage
+    from genai_prices import calc_price
+
+    model_ref = model_id.split("/", 1)[-1]
+    try:
+        price = calc_price(
+            PriceUsage(
+                input_tokens=usage.prompt_tokens,
+                output_tokens=usage.completion_tokens,
+                cache_write_tokens=usage.cache_creation_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+            ),
+            model_ref=model_ref,
+        )
+    except LookupError:
+        if model_ref not in _PRICE_WARNED:
+            _PRICE_WARNED.add(model_ref)
+            logger.warning(
+                "cost_limit: no price data for model '%s' — its rounds "
+                "debit $0 (tokens still count)",
+                model_ref,
+            )
+        return 0.0
+    return float(price.total_price)
 
 
 class _WhitespaceTokenizer:
@@ -163,6 +208,7 @@ class Agent:
         "_agent_callbacks",
         "_allow_skill_scripts",
         "_approval_callback",
+        "_child_turns",
         "_compact_fn",
         "_compaction_keep",
         "_compaction_trigger",
@@ -247,6 +293,7 @@ class Agent:
         self._compaction_keep = 4
         self._compact_fn: Callable[[str], str] | None = None
         self._usage_limits: UsageLimits | None = None
+        self._child_turns: list[ChildTurn] = []
         self._approval_callback: ApprovalCallback | None = None
         self._output_model: type[BaseModel] | None = None
         self._output_mode = "tool"
@@ -300,15 +347,28 @@ class Agent:
         return self
 
     def with_usage_limits(self, limits: UsageLimits) -> Agent:
-        """Enforce per-turn usage limits in the tool loop. Returns self.
+        """Enforce usage limits across the turn and its subagents. Returns self.
 
-        Crossing a limit grants the model one wrap-up round (final-round
-        notice; ``tool_choice="none"``, or the ``final_result`` tool when
-        structured output is still pending) and ends the turn with
-        ``stopped_by="usage_limit"`` — no exception. Complements the
-        pipeline's :class:`TokenBudget`, which governs what enters the
-        context window; this caps what the whole turn may spend.
+        The turn runs against a shared pool: subagents spawned during
+        it (``task``/``as_tool``) debit the same budget, so a child's
+        spend counts here. Crossing a limit grants the model one
+        wrap-up round (final-round notice; ``tool_choice="none"``, or
+        the ``final_result`` tool when structured output is still
+        pending) and ends the turn with ``stopped_by="usage_limit"`` —
+        no exception; a child cut mid-run wraps up the same way and
+        returns its partial result. Complements the pipeline's
+        :class:`TokenBudget`, which governs what enters the context
+        window; this caps what the whole run may spend.
         """
+        if limits.cost_limit is not None:
+            try:
+                import genai_prices  # noqa: F401
+            except ImportError as exc:
+                msg = (
+                    "cost_limit requires the pricing extra: "
+                    "pip install astro-anchor[pricing]"
+                )
+                raise ImportError(msg) from exc
         self._usage_limits = limits
         return self
 
@@ -550,6 +610,10 @@ class Agent:
                 sub.with_system_prompt(definition.system_prompt)
             if definition.tools:
                 sub.with_tools(list(definition.tools))
+            if definition.usage_limits is not None:
+                # Narrower per-turn limits for this child; the shared
+                # pool still applies on top — the budget only narrows.
+                sub.with_usage_limits(definition.usage_limits)
             self._subagents[definition.name] = (definition, sub)
 
         if self._subagents and self._task_tool is None:
@@ -1064,7 +1128,7 @@ class Agent:
         wrap_up: bool,
         stopped_by: str,
     ) -> tuple[RoundUsage, str]:
-        """Account the round and fire ``on_round_end``.
+        """Account the round, debit the shared pool, fire ``on_round_end``.
 
         Returns ``(usage, stopped_by)``; ``stopped_by`` changes only
         when the round ends the turn: ``usage_limit`` after a wrap-up
@@ -1078,6 +1142,23 @@ class Agent:
         usage = self._round_usage(
             round_index, state, schema_tokens, tool_results, llm_messages,
         )
+        pool = _USAGE_POOL.get()
+        wants_cost = (
+            pool is not None and pool.limits.cost_limit is not None
+        ) or (
+            self._usage_limits is not None
+            and self._usage_limits.cost_limit is not None
+        )
+        if wants_cost:
+            cost = _round_cost_usd(
+                getattr(self._llm, "model_id", "unknown"), usage,
+            )
+            if cost:
+                usage = usage.model_copy(update={"cost_usd": cost})
+        if pool is not None:
+            # Synchronous debit, no await since the check — atomic on
+            # the single event loop even with concurrent subagents.
+            pool.debit(usage)
         self._fire("on_round_end", round_index)
         return usage, stopped_by
 
@@ -1131,6 +1212,26 @@ class Agent:
             is_error=result.is_error,
         )
 
+    @staticmethod
+    def _subagent_name(tc: ToolCall) -> str:
+        """Display name for a subagent call: the agent, not the dispatcher."""
+        if tc.name == "task":
+            name = tc.arguments.get("agent_name")
+            if isinstance(name, str) and name:
+                return name
+        return tc.name
+
+    def _note_child_event(self, tc: ToolCall, event: AgentEvent) -> None:
+        """Harvest a forwarded subagent ``TurnFinished`` into ``children``."""
+        if isinstance(event, TurnFinished):
+            self._child_turns.append(
+                ChildTurn(
+                    tool_call_id=tc.id,
+                    name=self._subagent_name(tc),
+                    diagnostics=event.diagnostics,
+                ),
+            )
+
     def _stream_tools(
         self, tool_calls: list[ToolCall], results: list[ToolResult],
     ) -> Iterator[AgentEvent]:
@@ -1146,7 +1247,16 @@ class Agent:
                 tool_call_id=tc.id, name=tc.name, tool_input=tc.arguments,
             )
             forwarded: list[AgentEvent] = []
-            token = _EVENT_SINK.set((forwarded.append, tc.id))
+
+            def _sink(
+                event: AgentEvent,
+                tc: ToolCall = tc,
+                forwarded: list[AgentEvent] = forwarded,
+            ) -> None:
+                self._note_child_event(tc, event)
+                forwarded.append(event)
+
+            token = _EVENT_SINK.set((_sink, tc.id))
             try:
                 result = self._execute_call(tc)
             finally:
@@ -1171,8 +1281,12 @@ class Agent:
         queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
 
         async def _one(index: int, tc: ToolCall) -> tuple[int, ToolResult]:
+            def _sink(event: AgentEvent, tc: ToolCall = tc) -> None:
+                self._note_child_event(tc, event)
+                queue.put_nowait(event)
+
             # Each task owns a context copy, so the sink is per-call.
-            _EVENT_SINK.set((queue.put_nowait, tc.id))
+            _EVENT_SINK.set((_sink, tc.id))
             try:
                 return index, await self._aexecute_call(tc)
             except Exception as exc:
@@ -1513,9 +1627,18 @@ class Agent:
     def _check_usage_limits(
         self, rounds: list[RoundUsage],
     ) -> UsageLimitReached | None:
-        """Return a breach event when a per-turn limit is crossed."""
+        """Return a breach event when the run pool or a per-turn limit is crossed."""
+        pool = _USAGE_POOL.get()
+        if pool is not None:
+            crossed = pool.breach()
+            if crossed is not None:
+                kind, used, limit = crossed
+                return UsageLimitReached(
+                    kind=kind, used=used, limit=limit, scope="run",
+                )
         limits = self._usage_limits
-        if limits is None:
+        if limits is None or (pool is not None and pool.limits is limits):
+            # This agent's own limits ARE the pool's — already checked.
             return None
         if limits.total_tokens_limit is not None:
             used = sum(r.total_tokens for r in rounds)
@@ -1530,6 +1653,12 @@ class Agent:
             if calls > limits.tool_calls_limit:
                 return UsageLimitReached(
                     kind="tool_calls", used=calls, limit=limits.tool_calls_limit,
+                )
+        if limits.cost_limit is not None:
+            spent = sum(r.cost_usd for r in rounds)
+            if spent > limits.cost_limit:
+                return UsageLimitReached(
+                    kind="cost", used=spent, limit=limits.cost_limit,
                 )
         return None
 
@@ -1634,6 +1763,29 @@ class Agent:
             tokens_after=self._messages_tokens(messages),
         )
 
+    def _pool_entry(self) -> tuple[Token[_UsagePool | None] | None, bool, str]:
+        """Enter the run's shared pool for this turn.
+
+        Inherits the active pool (this agent is a subagent) or creates
+        one (this agent is the root and has limits). Returns
+        ``(reset_token, wrap_up, stopped_by)`` — ``wrap_up`` is True
+        when the inherited pool is already exhausted, which sends the
+        turn straight to its wrap-up round.
+        """
+        pool = _USAGE_POOL.get()
+        if pool is None:
+            token = None
+            if self._usage_limits is not None:
+                token = _USAGE_POOL.set(_UsagePool(self._usage_limits))
+            return token, False, "max_rounds"
+        exhausted = pool.breach() is not None
+        return None, exhausted, "usage_limit" if exhausted else "max_rounds"
+
+    @staticmethod
+    def _pool_exit(token: Token[_UsagePool | None] | None) -> None:
+        if token is not None:
+            _USAGE_POOL.reset(token)
+
     def _finish_turn(
         self,
         rounds: list[RoundUsage],
@@ -1643,6 +1795,7 @@ class Agent:
         self._last_turn = TurnDiagnostics(
             rounds=tuple(rounds),
             stopped_by=stopped_by,  # type: ignore[arg-type]
+            children=tuple(self._child_turns),
         )
         if self._memory is not None and final_text:
             self._memory.add_assistant_message(final_text)
@@ -1724,14 +1877,14 @@ class Agent:
         self._last_turn = None
         self._last_output = None
         self._output_failures = 0
+        self._child_turns = []
         messages, full_system = self._prepare_turn(
             self._pipeline.build(message), message,
         )
         final_text = ""
         rounds: list[RoundUsage] = []
-        stopped_by = "max_rounds"
         round_open: int | None = None
-        wrap_up = False
+        pool_token, wrap_up, stopped_by = self._pool_entry()
         try:
             yield TurnStarted()
             for round_index in range(self._max_rounds):
@@ -1785,6 +1938,7 @@ class Agent:
             # Runs exactly once on every path. On abandonment or a
             # mid-turn exception this closes the open round and persists
             # diagnostics plus the partial text the consumer already saw.
+            self._pool_exit(pool_token)
             if round_open is not None:
                 self._fire("on_round_end", round_open)
             diagnostics = self._finish_turn(rounds, stopped_by, final_text)
@@ -1808,14 +1962,14 @@ class Agent:
         self._last_turn = None
         self._last_output = None
         self._output_failures = 0
+        self._child_turns = []
         messages, full_system = self._prepare_turn(
             await self._pipeline.abuild(message), message,
         )
         final_text = ""
         rounds: list[RoundUsage] = []
-        stopped_by = "max_rounds"
         round_open: int | None = None
-        wrap_up = False
+        pool_token, wrap_up, stopped_by = self._pool_entry()
         try:
             yield TurnStarted()
             for round_index in range(self._max_rounds):
@@ -1871,6 +2025,7 @@ class Agent:
             # Runs exactly once on every path. On abandonment or a
             # mid-turn exception this closes the open round and persists
             # diagnostics plus the partial text the consumer already saw.
+            self._pool_exit(pool_token)
             if round_open is not None:
                 self._fire("on_round_end", round_open)
             diagnostics = self._finish_turn(rounds, stopped_by, final_text)

@@ -24,7 +24,13 @@ from anchor.agent.hooks import (
     PreToolHook,
 )
 from anchor.agent.memory_tool import FileMemoryBackend, memory_tool
-from anchor.agent.models import AgentTool, RoundUsage, TurnDiagnostics, UsageLimits
+from anchor.agent.models import (
+    AgentTool,
+    ChildTurn,
+    RoundUsage,
+    TurnDiagnostics,
+    UsageLimits,
+)
 from anchor.agent.skills import (
     Skill,
     SkillRegistry,
@@ -46,6 +52,7 @@ __all__ = [
     "ApprovalCallback",
     "ApprovalDecision",
     "ApprovalRequest",
+    "ChildTurn",
     "CompactionFinished",
     "CompactionStarted",
     "FileMemoryBackend",

@@ -3,6 +3,7 @@
 Agent:
     Agent, AgentTool, tool, Skill, SkillRegistry,
     SubagentDefinition, HookResult, AgentCallback, RoundUsage, TurnDiagnostics,
+    ChildTurn,
     ApprovalRequest, ApprovalDecision, ApprovalCallback,
     AgentEvent, TurnStarted, RoundStarted, TextDelta, ToolStarted, ToolFinished,
     CompactionStarted, CompactionFinished, RoundFinished, TurnFinished,
@@ -128,6 +129,7 @@ from anchor.agent import (
     ApprovalCallback,
     ApprovalDecision,
     ApprovalRequest,
+    ChildTurn,
     FileMemoryBackend,
     CompactionFinished,
     CompactionStarted,
@@ -434,6 +436,7 @@ __all__ = [
     "HookResult",
     "AggregatedMetrics",
     "AnthropicFormatter",
+    "ChildTurn",
     "CompactionFinished",
     "CompactionStarted",
     "FileMemoryBackend",

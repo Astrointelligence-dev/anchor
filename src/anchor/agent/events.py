@@ -92,14 +92,18 @@ class RoundFinished(_BaseEvent):
 class UsageLimitReached(_BaseEvent):
     """A usage limit was crossed; the next round is the wrap-up round.
 
+    ``scope="run"`` means the shared pool spanning subagents tripped —
+    a child's spend counts; ``scope="turn"`` is one agent's own
+    per-turn limit. For ``kind="cost"``, ``used``/``limit`` are USD.
     The turn ends gracefully with ``stopped_by="usage_limit"`` — no
     exception is raised.
     """
 
     type: Literal["usage_limit_reached"] = "usage_limit_reached"
-    kind: Literal["total_tokens", "tool_calls"]
-    used: int
-    limit: int
+    kind: Literal["total_tokens", "tool_calls", "cost"]
+    used: int | float
+    limit: int | float
+    scope: Literal["turn", "run"] = "turn"
 
 
 class TurnFinished(_BaseEvent):

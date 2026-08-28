@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from anchor._text import strip_markdown_fences
 from anchor.agent.events import TurnFinished, _forward
-from anchor.agent.models import AgentTool
+from anchor.agent.models import _USAGE_POOL, AgentTool, UsageLimits
 from anchor.agent.tool_decorator import tool
 
 if TYPE_CHECKING:
@@ -46,6 +46,9 @@ class SubagentDefinition(BaseModel):
     tools: tuple[AgentTool, ...] = ()
     output_model: type[BaseModel] | None = None
     max_rounds: int = 6
+    # Narrower per-turn limits for this child; the run's shared pool
+    # still applies on top — the effective budget only ever narrows.
+    usage_limits: UsageLimits | None = None
 
 
 def _is_subagent_tool(t: AgentTool) -> bool:
@@ -115,24 +118,45 @@ def _task_prompt(task: str, output_model: type[BaseModel] | None) -> str:
     return f"{task}{_schema_instruction(output_model)}"
 
 
-def _one_turn_sync(sub: Agent, prompt: str) -> str:
-    """One child turn: forward its events to the parent's sink, return text."""
+def _one_turn_sync(sub: Agent, prompt: str) -> tuple[str, str]:
+    """One child turn: forward events to the parent's sink.
+
+    Returns ``(text, stopped_by)`` — the verdict makes a usage-limit
+    cut machine-visible to the runner.
+    """
     text = ""
+    stopped_by = "stop"
     for event in sub.stream(prompt):
         _forward(event)
         if isinstance(event, TurnFinished):
             text = event.text
-    return text
+            stopped_by = event.diagnostics.stopped_by
+    return text, stopped_by
 
 
-async def _one_turn_async(sub: Agent, prompt: str) -> str:
+async def _one_turn_async(sub: Agent, prompt: str) -> tuple[str, str]:
     """Async mirror of :func:`_one_turn_sync`."""
     text = ""
+    stopped_by = "stop"
     async for event in sub.astream(prompt):
         _forward(event)
         if isinstance(event, TurnFinished):
             text = event.text
-    return text
+            stopped_by = event.diagnostics.stopped_by
+    return text, stopped_by
+
+
+# Appended to a plain-text child result cut by a usage limit, so the
+# orchestrating model knows the answer is partial and the budget is
+# gone — respawning the child would land on an exhausted pool.
+_PARTIAL_RESULT_NOTE = (
+    "\n\n[subagent stopped early: usage limit reached — partial result]"
+)
+
+
+def _pool_exhausted() -> bool:
+    pool = _USAGE_POOL.get()
+    return pool is not None and pool.breach() is not None
 
 
 def _run_sync(
@@ -141,14 +165,23 @@ def _run_sync(
     output_model: type[BaseModel] | None,
     max_output_retries: int,
 ) -> str:
-    text = _one_turn_sync(sub, _task_prompt(task, output_model))
+    text, stopped_by = _one_turn_sync(sub, _task_prompt(task, output_model))
     if output_model is None:
+        if stopped_by == "usage_limit":
+            return text + _PARTIAL_RESULT_NOTE
         return text
     normalized, err = _validate_output(text, output_model)
     for _ in range(max_output_retries):
         if err is None:
             break
-        text = _one_turn_sync(sub, _retry_prompt(text, err, output_model))
+        if _pool_exhausted():
+            # A retry turn would only burn another wrap-up round.
+            msg = (
+                "subagent hit the usage limit before producing "
+                f"schema-valid output: {err}"
+            )
+            raise ValueError(msg)
+        text, _ = _one_turn_sync(sub, _retry_prompt(text, err, output_model))
         normalized, err = _validate_output(text, output_model)
     if err is not None or normalized is None:
         msg = f"subagent output failed schema validation: {err}"
@@ -162,15 +195,26 @@ async def _run_async(
     output_model: type[BaseModel] | None,
     max_output_retries: int,
 ) -> str:
-    text = await _one_turn_async(sub, _task_prompt(task, output_model))
+    text, stopped_by = await _one_turn_async(
+        sub, _task_prompt(task, output_model),
+    )
     if output_model is None:
+        if stopped_by == "usage_limit":
+            return text + _PARTIAL_RESULT_NOTE
         return text
     normalized, err = _validate_output(text, output_model)
     for _ in range(max_output_retries):
         if err is None:
             break
+        if _pool_exhausted():
+            # A retry turn would only burn another wrap-up round.
+            msg = (
+                "subagent hit the usage limit before producing "
+                f"schema-valid output: {err}"
+            )
+            raise ValueError(msg)
         retry = _retry_prompt(text, err, output_model)
-        text = await _one_turn_async(sub, retry)
+        text, _ = await _one_turn_async(sub, retry)
         normalized, err = _validate_output(text, output_model)
     if err is not None or normalized is None:
         msg = f"subagent output failed schema validation: {err}"

@@ -41,6 +41,7 @@ mcp = ["fastmcp>=3.4,<4"]
 ollama = ["openai>=1.50.0"]
 openai = ["openai>=1.50.0"]
 pdf = ["pypdf>=4,<5"]
+pricing = ["genai-prices>=0.1,<1"]
 sqlite = ["aiosqlite>=0.20,<1"]
 sqlite-vec = ["sqlite-vec>=0.1.6,<1"]
 postgres = ["asyncpg>=0.29,<1"]
@@ -58,7 +59,7 @@ docs = [
     "mkdocs-minify-plugin>=0.8,<1",
     "mkdocstrings[python]>=0.25,<1",
 ]
-all = ["astro-anchor[bm25,cli,anthropic,claude-cli,gemini,grok,litellm,ollama,openai,tiktoken,agents,pdf,flashrank,otlp,sqlite,postgres,redis]"]
+all = ["astro-anchor[bm25,cli,anthropic,claude-cli,gemini,grok,litellm,ollama,openai,tiktoken,agents,pdf,pricing,flashrank,otlp,sqlite,postgres,redis]"]
 
 [project.scripts]
 anchor = "anchor.cli:app"
@@ -80,6 +81,7 @@ dev = [
     "typer>=0.12,<1",
     "rich>=13,<14",
     "tiktoken>=0.7,<1",
+    "genai-prices>=0.1,<1",
     "mkdocs-material>=9.7.2",
 ]
 docs = [

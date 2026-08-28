@@ -1,8 +1,9 @@
-"""Base model for agent tools."""
+"""Agent data models: tools, usage accounting, and the shared budget pool."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -115,7 +116,9 @@ class RoundUsage(BaseModel, frozen=True):
     for the prompt, streamed text + tool-call arguments for the
     completion). ``tool_schema_tokens`` and ``tool_result_tokens`` are
     tokenizer-counted visibility fields — subsets of the prompt, never
-    added on top of it.
+    added on top of it. ``cost_usd`` is the round's USD price
+    (genai-prices); it stays 0.0 unless a ``cost_limit`` is active, or
+    when the model has no price data.
     """
 
     round: int
@@ -126,6 +129,7 @@ class RoundUsage(BaseModel, frozen=True):
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
     tool_calls: int = 0
+    cost_usd: float = 0.0
 
     @property
     def total_tokens(self) -> int:
@@ -139,28 +143,49 @@ class RoundUsage(BaseModel, frozen=True):
 
 
 class UsageLimits(BaseModel, frozen=True):
-    """Per-turn usage limits enforced by the agent loop.
+    """Usage limits enforced by the agent loop, shared across subagents.
+
+    The agent that starts a turn with limits creates a run-wide pool;
+    every subagent spawned during that turn (``task``/``as_tool``)
+    debits the same pool, so a child's spend counts against the
+    orchestrator's budget. A child may carry its own narrower limits —
+    both are enforced, so the effective budget only ever narrows.
 
     When a limit is crossed mid-turn the loop grants the model one
     wrap-up round (final-round notice; ``tool_choice="none"``, or the
     ``final_result`` tool when structured output is still pending) and
     stops with ``stopped_by="usage_limit"`` — no exception is raised.
-    Checks are post-hoc, so a turn may overshoot by the round in
-    flight plus the bounded wrap-up call. Rounds are capped separately
-    by the agent's ``max_rounds``.
+    A subagent that observes the breach wraps up the same way and
+    returns its partial result to the parent. Checks are post-hoc, so
+    a run may overshoot by the rounds in flight (one per concurrently
+    running agent) plus the bounded wrap-up calls. Rounds are capped
+    separately by each agent's ``max_rounds``.
+
+    ``cost_limit`` is USD, priced per round via ``genai-prices``
+    (``pip install astro-anchor[pricing]``). A model the price table
+    does not know logs one warning and debits zero cost — its tokens
+    still count.
     """
 
     total_tokens_limit: int | None = Field(default=None, gt=0)
     tool_calls_limit: int | None = Field(default=None, ge=0)
+    cost_limit: float | None = Field(default=None, gt=0)
 
 
 class TurnDiagnostics(BaseModel, frozen=True):
-    """Accounting and outcome for one full ``chat()``/``achat()`` turn."""
+    """Accounting and outcome for one full ``chat()``/``achat()`` turn.
+
+    ``rounds`` covers only this agent's own model rounds; subagent
+    turns observed while this turn ran arrive in ``children``, each
+    with its own diagnostics — the ``run_total_*`` properties aggregate
+    both.
+    """
 
     rounds: tuple[RoundUsage, ...] = ()
     stopped_by: Literal[
         "stop", "max_rounds", "max_tokens", "usage_limit", "output_missing",
     ] = "stop"
+    children: tuple[ChildTurn, ...] = ()
 
     @property
     def total_prompt_tokens(self) -> int:
@@ -181,3 +206,104 @@ class TurnDiagnostics(BaseModel, frozen=True):
     @property
     def total_tool_calls(self) -> int:
         return sum(r.tool_calls for r in self.rounds)
+
+    @property
+    def total_cost_usd(self) -> float:
+        return sum(r.cost_usd for r in self.rounds)
+
+    @property
+    def run_total_tokens(self) -> int:
+        """Tokens spent by this turn plus every subagent turn under it."""
+        return self.total_tokens + sum(
+            c.diagnostics.run_total_tokens for c in self.children
+        )
+
+    @property
+    def run_total_tool_calls(self) -> int:
+        """Tool calls made by this turn plus every subagent turn under it."""
+        return self.total_tool_calls + sum(
+            c.diagnostics.run_total_tool_calls for c in self.children
+        )
+
+    @property
+    def run_total_cost_usd(self) -> float:
+        """USD spent by this turn plus every subagent turn under it."""
+        return self.total_cost_usd + sum(
+            c.diagnostics.run_total_cost_usd for c in self.children
+        )
+
+
+class ChildTurn(BaseModel, frozen=True):
+    """One subagent turn observed while the parent's turn ran.
+
+    ``diagnostics.stopped_by`` makes a child cut by the shared pool
+    machine-visible (``"usage_limit"``), so an orchestrating app can
+    tell partial child results from complete ones. Output-model
+    retries produce one entry per child turn, sharing the
+    ``tool_call_id``.
+    """
+
+    tool_call_id: str
+    name: str
+    diagnostics: TurnDiagnostics
+
+
+TurnDiagnostics.model_rebuild()
+
+
+class _UsagePool:
+    """Mutable shared budget for one run: a root turn plus its subagents.
+
+    Created by the agent that starts a turn with :class:`UsageLimits`
+    and handed down through ``_USAGE_POOL`` (per-task context copies,
+    like the event sink); every agent in the run debits it as rounds
+    close. Debits are synchronous with no await between check and
+    debit, so the single event loop makes them atomic — the same
+    lock-free shape as Pydantic AI's ``RunUsage`` and OpenAI Agents'
+    ``Usage``.
+    """
+
+    # ponytail: lock-free — correct while all agents share one event
+    # loop; add a threading.Lock when sync tools move to a thread pool.
+
+    __slots__ = ("cost_spent", "limits", "tokens_spent", "tool_calls_spent")
+
+    def __init__(self, limits: UsageLimits) -> None:
+        self.limits = limits
+        self.tokens_spent = 0
+        self.tool_calls_spent = 0
+        self.cost_spent = 0.0
+
+    def debit(self, usage: RoundUsage) -> None:
+        self.tokens_spent += usage.total_tokens
+        self.tool_calls_spent += usage.tool_calls
+        self.cost_spent += usage.cost_usd
+
+    def breach(
+        self,
+    ) -> tuple[
+        Literal["total_tokens", "tool_calls", "cost"], int | float, int | float,
+    ] | None:
+        """First crossed limit as ``(kind, used, limit)``, or None."""
+        limits = self.limits
+        if (
+            limits.total_tokens_limit is not None
+            and self.tokens_spent > limits.total_tokens_limit
+        ):
+            return ("total_tokens", self.tokens_spent, limits.total_tokens_limit)
+        if (
+            limits.tool_calls_limit is not None
+            and self.tool_calls_spent > limits.tool_calls_limit
+        ):
+            return ("tool_calls", self.tool_calls_spent, limits.tool_calls_limit)
+        if limits.cost_limit is not None and self.cost_spent > limits.cost_limit:
+            return ("cost", self.cost_spent, limits.cost_limit)
+        return None
+
+
+# The active run's shared pool. The agent that starts a turn with
+# limits sets it; tool tasks copy the context, so subagents executing
+# inside a tool call see the same pool object and debit it directly.
+_USAGE_POOL: ContextVar[_UsagePool | None] = ContextVar(
+    "anchor_usage_pool", default=None,
+)
