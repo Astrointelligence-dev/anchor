@@ -12,8 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Async tool execution schedules by side effect**: consecutive `AgentTool(read_only=True)` calls run concurrently (cap 10); every undeclared tool is treated as a write and runs alone — two writes can never overlap. This serializes tools that ran in parallel before, **including all MCP tools** (`readOnlyHint` mapping is a tracked follow-up) — declare your side-effect-free tools `read_only=True` to regain fan-out. Subagent dispatch (`task`/`as_tool`) stays parallel, now capped at 10 concurrent
 - **New `stopped_by="stuck"`**: repeating an identical (tool, args, result) call across consecutive rounds first gets the model a corrective nudge (3 identical errors / 4 identical results); repeating again ends the turn with a graceful wrap-up round, same contract as `usage_limit` — no exception. A stuck child returns a marked partial result to its parent
 - **`UsageLimits` is now run-wide, not per-turn**: the agent that starts a turn with limits creates a shared pool and every subagent spawned during it (`task`/`as_tool`) debits the same budget — an orchestrator's `total_tokens_limit` now sees its children's spend. A child cut mid-run wraps up gracefully and returns a marked partial result; a child may carry its own narrower per-turn limits (`SubagentDefinition(usage_limits=...)`). `UsageLimitReached.used`/`limit` widen to `int | float` and the event gains `kind="cost"` and `scope` (`"run"` pool vs `"turn"` own-limit)
+- **New `stopped_by="output_missing"`**: a structured-output turn whose final round still produced no valid `final_result` ends gracefully with this verdict instead of raising from inside the loop — the loop always yields a terminal `TurnFinished`, and `run()`/`arun()` are the single place that raises (`chat`/`stream` consumers see the verdict, not an exception)
 
 ### Added
+- **`claude_cli` LLM provider (`[claude-cli]` extra)**: runs any anchor `Agent` on a Claude Code subscription (Pro/Max OAuth or `claude setup-token`) via `claude-agent-sdk` — no API key. Tool calling round-trips through an in-process MCP server plus a `PreToolUse` hook returning `permissionDecision: "defer"`, which stops the CLI turn *without executing* and surfaces a normal `ToolCall`/`StopReason.TOOL_USE` to the loop; mandatory overhead guards (`setting_sources=[]`, `strict_mcp_config=True`) cut per-call prompt cost from ~178k to ~280 tokens; the CLI's own agentic tools (`builtin_tools`) are opt-in with a prompt-injection warning; billed cost is reported into usage accounting
 - **`UsageLimits.cost_limit` (USD)**: hard cost cap on the shared pool. Rounds are priced from, in order: provider-reported billed cost (`claude_cli` sends it), the runtime-overridable `anchor.llm.pricing.MODEL_PRICING` table, and genai-prices (`pip install astro-anchor[pricing]`); an unpriced model warns once and debits $0 (tokens still count). `RoundUsage.cost_usd` records the per-round price
 - **Aggregated multi-agent diagnostics**: `TurnDiagnostics.children` (`ChildTurn`: tool call id, subagent name, the child's own diagnostics — including a machine-visible `stopped_by` for partial results) plus `run_total_tokens`/`run_total_tool_calls`/`run_total_cost_usd`. Children that die mid-turn (provider error, timeout) still appear with the accounting they accrued
 - **Call-time nesting guard**: subagent runners re-check the no-nesting rule on every dispatch, closing the registration-order bypass (`as_tool()` first, `with_subagents` on the wrapped agent later) that could silently build a 3-level tree
@@ -22,30 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Memory tool (`memory_20250818`-compatible, any provider)**: `Agent.with_memory_tool(path)` registers a `memory` tool (view/create/str_replace/insert/delete/rename) over `FileMemoryBackend` — reference-compatible result strings, strict `/memories` containment (URL-encoded traversal rejected), protected root, and the memory protocol appended to the system prompt
 - **MCP bridge gaps**: `MCPServerConfig.defer_tools=True` keeps a server's tools out of the prompt until `search_tools` loads them; MCP tool names that shadow existing tools now fail loudly at connect; prompts/resources are finally reachable — `MCPClientPool.all_prompts/get_prompt/all_resources/read_resource` and `Agent.mcp_prompts/mcp_get_prompt/mcp_resources/mcp_read_resource` (app-facing; never injected automatically)
 - **Live smoke tests** (`tests/live/`): a real fastmcp server over stdio (credential-free, runs in CI) plus env-gated Anthropic/OpenAI/Gemini turns — the first tests to touch real APIs
-
-### Fixed
-- MCP stdio connections with arguments actually work: the bridge passed a concatenated `"command arg arg"` string that fastmcp's transport inference rejects — found by the first live smoke test (the mocked suite patched `Client` and never saw it); the bridge now builds an explicit `StdioTransport`
-
-### Changed
-- Sync tools deliberately run without a timeout — a worker-thread "timeout" cannot cancel the call, only abandon a thread whose side effects keep running; the async path (`tool.timeout` / `Agent(tool_timeout=...)`) is where timeouts are enforceable. `run_skill_script` drops its local head-only 10k-char cut in favor of the loop's head+tail cap (per-tool `max_result_tokens=2500`)
-- fastmcp pinned to `>=3.4,<4` (locked 3.4.7); the 4.x stateless-protocol (MCP 2026-07-28) migration is tracked for when it leaves beta
-
-### Removed
-- Late-interaction retriever (`LateInteractionRetriever`/`LateInteractionScorer`/`MaxSimScorer`, `TokenLevelEncoder` protocol): required per-token document embeddings recomputed per query — never viable as shipped, no known users; a ColBERT-style retriever can return behind an extra when demanded
 - **Agent event stream**: `Agent.stream()`/`Agent.astream()` expose the full tool-use loop as one ordered stream of typed events (`AgentEvent`: `TurnStarted`, `RoundStarted`, `TextDelta`, `ToolStarted`/`ToolFinished` correlated by `tool_call_id`, `CompactionStarted`/`CompactionFinished`, `RoundFinished` with per-round `RoundUsage`, terminal `TurnFinished` with `TurnDiagnostics`); `chat`/`achat` are now text-only projections of the same loop. Async tool calls emit `ToolFinished` live in completion order (results return to the model in call order); subagent events are forwarded flat into the parent stream with `parent_tool_call_id` set; diagnostics persist even when the consumer abandons the generator
 - **Usage limits in the agent loop**: `Agent.with_usage_limits(UsageLimits(total_tokens_limit=..., tool_calls_limit=...))` — crossing a limit emits `UsageLimitReached`, grants the model one wrap-up round (final-round notice + `tool_choice="none"`) and ends the turn with `stopped_by="usage_limit"`; no exception, state survives. Complements the pipeline `TokenBudget` (which governs what enters the context window)
 - Cross-provider usage estimation: when a provider reports no usage on the stream (all but Anthropic today), `RoundUsage.prompt_tokens`/`completion_tokens` are estimated with the agent's tokenizer, so limits and accounting hold on every provider; provider-reported usage is never overridden. `RoundUsage` gains `tool_calls` and `total_tokens`; `TurnDiagnostics` gains `total_tokens`/`total_tool_calls`
-
-### Fixed
-- Gemini streaming tool calls now work: the stream parser emits generated call ids, sequential indices for parallel calls, JSON argument fragments (was `str(dict)`), and a `TOOL_USE` stop reason override mirroring the non-stream path — previously tools requested via Gemini streaming silently never executed
-
-### Removed
-- `TokenBudgetExceededError` (never raised anywhere; usage limits stop gracefully instead of raising) and the orphan `anchor.models.streaming` module (`StreamDelta`/`StreamUsage`/`StreamResult` — superseded by `AgentEvent`)
 - **Generic `tool_choice` on every provider**: pass `tool_choice="auto"|"any"|"none"` or `{"type": "tool", "name": ...}` (Anthropic shape) to `stream`/`invoke` — mapped natively per provider (Anthropic passthrough, OpenAI/Grok/OpenRouter/Ollama/LiteLLM `required`/function form, Gemini `function_calling_config`); the agent loop forces `tool_choice="none"` on the final round so the model must answer
 - **Prompt caching (Anthropic, opt-in)**: `AnthropicProvider(prompt_caching=True)` sends GA top-level `cache_control={"type": "ephemeral"}` (server picks the breakpoint); cache hits are visible via new `Usage.cache_read_tokens`/`cache_creation_tokens`, threaded into `RoundUsage`/`Agent.last_turn`
 - **Server-side context management (Anthropic, beta)**: `Agent.with_context_management({"edits": [...]})` passes `context_management` through each round; the provider auto-routes to `client.beta.messages.*` with the right flags (`context-management-2025-06-27` for `clear_*` edits, `compact-2026-01-12` for `compact_20260112`); `compaction` blocks are parsed (invoke and streaming) and round-trip verbatim via `Message.raw_content`/`StreamChunk.raw_block`/`LLMResponse.raw_content`
 - **Emulated compaction (any provider)**: `Agent.with_compaction(trigger_tokens, keep_last=4, compact_fn=None)` summarizes older loop messages into one `[Conversation summary]` message when the turn exceeds the trigger — default summarizer reuses `TierCompactor` with the agent's own LLM; never severs a tool_use/tool_result pair and skips when the head wouldn't shrink
-- `anchor._text.strip_markdown_fences`: single shared fence stripper (replaces three inline copies; fixes the compactor variant that dropped the last line even without a closing fence)
 - **Subagents (MULTI_AGENT.md implemented)**: `Agent.as_tool(name, description, output_model=..., max_output_retries=...)` wraps any agent as an orchestrator tool with a clean context (the `task` string is the only channel in), condensed structured returns (schema instruction + Pydantic validation + one self-contained retry on invalid JSON), and a registration-time no-nesting guard; declarative layer via `Agent.with_subagents([SubagentDefinition(...)])` + a single `task(agent_name, task)` meta-tool with a cache-stable discovery listing in the system prompt; parallel subagent spawns compose with concurrent tool execution in `achat`
 - Pre/post tool hooks: `Agent.with_hooks(pre_tool_use=[...], post_tool_use=[...])` — pre-hooks can deny (reason is fed back to the model as an `is_error` tool result) or rewrite input, post-hooks can replace output; a raising pre-hook fails closed (call denied)
 - Observer callbacks: `Agent.with_callbacks([...])` with `AgentCallback` protocol (`on_round_start/end`, `on_tool_start/end/error`), fire-and-forget via the shared `fire_callbacks`; `TracingAgentCallback` + `SpanKind.TOOL` wire tool execution into observability
@@ -53,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deferred tool loading: `AgentTool(defer_loading=True)` keeps a tool's schema out of the prompt until the auto-registered `search_tools` meta-tool (keyword/regex over names+descriptions) loads it — loaded tools stay loaded for the session
 - `input_examples` on `AgentTool`/`ToolSchema`, forwarded by the Anthropic provider (GA field)
 - Per-tool timeouts: `AgentTool(timeout=...)` / `Agent(tool_timeout=...)`, enforced with `asyncio.wait_for` on async tool callers (MCP, subagents); a timeout becomes an `is_error` tool result the model sees
+- **MCP bridge (`[mcp]` extra, fastmcp)**: consume external MCP servers as agent tools — `MCPServerConfig` (with config-string parser), `FastMCPClientBridge`, and `MCPClientPool` for multi-server management with lazy connection from `Agent(mcp_servers=[...])`; expose an anchor agent as an MCP server via `FastMCPServerBridge`; PEP 544 `MCPClient`/`MCPServer` protocols, tool adapters, and an error hierarchy under `AstroContextError`
+- **Progressive summarization memory**: `ProgressiveSummarizationMemory` cascades older turns through summary tiers instead of evicting them, with `TierCompactor` doing LLM summarization plus durable fact extraction; includes the data models, a `ProgressiveSummarizationCallback` lifecycle protocol, and `MemoryManager` integration
+- **Persistent storage backends**: SQLite, PostgreSQL, and Redis implementations of the storage protocols (`[sqlite]`/`[postgres]`/`[redis]` extras) for conversation and memory persistence beyond the in-memory and JSON-file references
 - Golden-set eval harness (`anchor.evaluation.golden`): `GoldenCase` JSONL loading, `evaluate_retriever`, `assert_metric_floor` — the CI-gate primitive for retrieval changes; `RetrievalMetricsCalculator` now supports graded NDCG via `{id: grade}` relevance maps
 - `SqliteVecVectorStore` (`[sqlite-vec]` extra): real KNN inside SQLite via the vec0 virtual table (C cosine distance, declared dimensions, `where` pre-filtering through rowid IN) — replaces the full-scan Python cosine path for local persistence
 - `MarkdownHeaderChunker`: structure-aware chunking — splits at headings, stamps each chunk with its `H1 > H2` path in metadata and (by default) in content
@@ -62,9 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Real CLI: `anchor index` (ingest → chunks + optional dense vectors in one SQLite file) and `anchor query` (BM25 + optional dense, RRF-fused) — works fully offline; previously both were placeholders
 - Embeddings layer: `EmbeddingProvider` protocol (query/document asymmetry, native batching, async, `dimensions` for Matryoshka truncation) + providers behind extras — `OpenAIEmbeddingProvider` (`[openai]`), `VoyageEmbeddingProvider` (`[voyage]`), `SentenceTransformerEmbeddingProvider` (`[local-embeddings]`, BGE-M3 default for multilingual/PT) — and `CallableEmbeddingProvider` unifying the legacy `embed_fn` shapes
 - Metadata filtering: `where: dict` parameter on `VectorStore.search` / `AsyncVectorStore.search`, pushed down in every backend (InMemory dict match, SQLite `json_extract` in SQL, Postgres JSONB containment `@>` with a GIN index) and exposed on `DenseRetriever.retrieve` / `AsyncDenseRetriever.aretrieve` — unblocks user/tenant/type scoping
-- `DenseRetriever.index` embeds documents in one batch call (was one embedding call per item)
 - `AsyncDenseRetriever` store-backed mode (`vector_store=` + `context_store=`) over the `AsyncVectorStore` protocol — pgvector (`PostgresVectorStore`) and `AsyncSqliteVectorStore` are now reachable from a built-in retriever
-- Postgres: `ensure_tables` now creates the pgvector **HNSW** index (works on empty tables, unlike the previously suggested IVFFlat) and a JSONB GIN index; `embedding_dim` is a required parameter
 - pgvector integration test suite gated by `ANCHOR_TEST_POSTGRES_DSN` (previously zero Postgres tests)
 - Skills: agentskills.io spec compliance — real YAML frontmatter (multi-line descriptions, quoting), spec fields `license`, `compatibility`, `metadata`, `allowed-tools`, and name==directory validation; `pyyaml` added as a core dependency
 - Skills: level-3 progressive disclosure — `read_skill_file` meta-tool loads `references/` lazily (path-traversal guarded, 50KB cap); `run_skill_script` executes `scripts/` on demand (opt-in via `Agent(allow_skill_scripts=True)`, 60s timeout); activation responses list bundled files
@@ -74,25 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `metadata["raw_score"]` on all retriever and reranker results, preserving the unclamped/unnormalized score (raw cosine, raw BM25, raw reranker logits) so quality thresholds are possible
 - `min_score` parameter on `DenseRetriever` and `SparseRetriever` to filter results below a raw-score threshold
 - SOTA 2026 research docs (`docs/research/2026-08-25-*`) and phased upgrade plan (`docs/plans/2026-08-25-sota-upgrade-plan.md`)
-- Multi-provider LLM interface (`anchor.llm`) with support for Anthropic, OpenAI, Gemini, Grok, Ollama, OpenRouter, and LiteLLM
-- `LLMProvider` protocol and `BaseLLMProvider` ABC with built-in retry and timeout logic
-- `create_provider()` factory with `"provider/model"` string format and automatic lazy loading
-- `FallbackProvider` for automatic provider failover (fallback only before first stream chunk)
-- Provider error hierarchy: `ProviderError`, `RateLimitError`, `ServerError`, `TimeoutError`, `AuthenticationError`, `ModelNotFoundError`, `ContentFilterError`
-- Thread-safe provider registry with `threading.Lock`
-- Shared `_openai_compat` module for OpenAI/LiteLLM code deduplication
-- Anthropic streaming usage tracking (`input_tokens` + `output_tokens`)
-- LLM Providers API reference and guide documentation
-- Unit tests for `_math.py` (cosine_similarity and clamp functions)
-- `MemoryRetrieverAdapter` tests verifying Retriever protocol compliance
-- `PipelineExecutionError` wrapping test with diagnostics verification
-- Golden path integration test mirroring README usage pattern
-- Example: `examples/hybrid_rag.py` -- hybrid RAG pipeline with dense retrieval
-- Example: `examples/custom_retriever.py` -- custom Retriever protocol implementation
-- Example: `examples/budget_management.py` -- token budget management and overflow handling
-- README sections for Priority System (1--10 scale) and Token Budgets
 
 ### Changed
+- Sync tools deliberately run without a timeout — a worker-thread "timeout" cannot cancel the call, only abandon a thread whose side effects keep running; the async path (`tool.timeout` / `Agent(tool_timeout=...)`) is where timeouts are enforceable. `run_skill_script` drops its local head-only 10k-char cut in favor of the loop's head+tail cap (per-tool `max_result_tokens=2500`)
+- fastmcp pinned to `>=3.4,<4` (locked 3.4.7); the 4.x stateless-protocol (MCP 2026-07-28) migration is tracked for when it leaves beta
+- `anchor._text.strip_markdown_fences`: single shared fence stripper (replaces three inline copies; fixes the compactor variant that dropped the last line even without a closing fence)
 - Provider `call_kwargs` construction deduplicated (was copy-pasted 12×): one `_build_call_kwargs` in the Anthropic provider, one shared `build_call_kwargs` for the OpenAI-compatible family (covers Grok/OpenRouter/Ollama/LiteLLM)
 - `AnthropicFormatter` caching now emits valid wire format: `cache_control` sits on a content block of the context message (applied after role merging), not as a top-level message key
 - `_make_subagent_tool` uses the `@tool` decorator (full Pydantic input validation) instead of a hand-built schema; meta-tool names `task`/`search_tools` are collision-checked at registration/creation time
@@ -114,19 +86,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `HybridRetriever` and `AsyncHybridRetriever` now delegate fusion to the canonical `rrf_fuse` (single RRF implementation); `rrf_fuse` gained a `retrieval_method` label parameter
 - `AsyncHybridRetriever` raises `RetrieverError` when all sub-retrievers fail, matching the sync behavior (previously returned `[]`)
 - All cosine-similarity call sites (`SemanticChunker`, late interaction, cross-modal, `EmbeddingClassifier`) now use the strict `anchor._math.cosine_similarity` — dimension mismatches raise instead of silently truncating
+- `DenseRetriever.index` embeds documents in one batch call (was one embedding call per item)
+- Postgres: `ensure_tables` now creates the pgvector **HNSW** index (works on empty tables, unlike the previously suggested IVFFlat) and a JSONB GIN index; `embedding_dim` is a required parameter
 - Repo workflow: `docs/superpowers/` retired; specs/plans live in `docs/plans/`, research in `docs/research/`
-- `Agent` constructor: `client` parameter replaced with `llm: LLMProvider` and `fallbacks: list[str]`
-- `Role` and `StopReason` enums changed from `(str, Enum)` to `StrEnum` for correct string formatting
-- `AgentTool`: removed `to_anthropic_schema()`, `to_openai_schema()`, `to_generic_schema()`; replaced with unified `to_tool_schema() -> ToolSchema`
-
-### Removed
-- `ScoreReranker` (dead duplicate of `CrossEncoderReranker` implementing the wrong protocol)
 
 ### Fixed
+- **`create_provider()` deadlocked on first use of any provider**: the registry `_LOCK` was a non-reentrant `threading.Lock` held during the lazy provider import, and every provider module self-registers on import by re-acquiring the same lock on the same thread — in a fresh process, `Agent(model="anthropic/claude-...")` (or any `create_provider()` call) hung forever. Shipped in 0.1.1; the mocked suite never saw it because provider tests import the classes directly first. Fixed with `RLock` plus a regression test exercising the real lazy-import path under a joined-with-timeout thread
+- MCP stdio connections with arguments actually work: the bridge passed a concatenated `"command arg arg"` string that fastmcp's transport inference rejects — found by the first live smoke test (the mocked suite patched `Client` and never saw it); the bridge now builds an explicit `StdioTransport`
+- Gemini streaming tool calls now work: the stream parser emits generated call ids, sequential indices for parallel calls, JSON argument fragments (was `str(dict)`), and a `TOOL_USE` stop reason override mirroring the non-stream path — previously tools requested via Gemini streaming silently never executed
 - **Agent without memory never sent the user's message**: the formatter emits no conversation when no memory is attached, so `chat("...")` produced a system-only request (a real API call would 400); the turn now guarantees the user message is present
 - **Reranker `top_k` sentinel bug**: passing `top_k=10` explicitly was indistinguishable from the default and silently discarded in all five rerankers; the pipeline `reranker_step` default hit this on every run
 - `RecursiveCharacterChunker` applied overlap at every recursion level, duplicating overlap text in nested sub-chunks; overlap is now applied exactly once over the final chunk list
 - `SqliteVectorStore` unpacked stored embeddings using the *query* vector's dimension — a query/stored dimension mismatch silently mis-unpacked or crashed with `struct.error`; the dimension now derives from the stored blob and mismatches raise a clear `ValueError`
+
+### Removed
+- Late-interaction retriever (`LateInteractionRetriever`/`LateInteractionScorer`/`MaxSimScorer`, `TokenLevelEncoder` protocol): required per-token document embeddings recomputed per query — never viable as shipped, no known users; a ColBERT-style retriever can return behind an extra when demanded
+- `TokenBudgetExceededError` (never raised anywhere; usage limits stop gracefully instead of raising) and the orphan `anchor.models.streaming` module (`StreamDelta`/`StreamUsage`/`StreamResult` — superseded by `AgentEvent`)
+- `ScoreReranker` (dead duplicate of `CrossEncoderReranker` implementing the wrong protocol)
+
+## [0.1.1] - 2026-03-13
+
+### Added
+- Multi-provider LLM interface (`anchor.llm`) with support for Anthropic, OpenAI, Gemini, Grok, Ollama, OpenRouter, and LiteLLM
+- `LLMProvider` protocol and `BaseLLMProvider` ABC with built-in retry and timeout logic
+- `create_provider()` factory with `"provider/model"` string format and automatic lazy loading
+- `FallbackProvider` for automatic provider failover (fallback only before first stream chunk)
+- Provider error hierarchy: `ProviderError`, `RateLimitError`, `ServerError`, `TimeoutError`, `AuthenticationError`, `ModelNotFoundError`, `ContentFilterError`
+- Thread-safe provider registry with `threading.Lock`
+- Shared `_openai_compat` module for OpenAI/LiteLLM code deduplication
+- Anthropic streaming usage tracking (`input_tokens` + `output_tokens`)
+- LLM Providers API reference and guide documentation
+- Unit tests for `_math.py` (cosine_similarity and clamp functions)
+- `MemoryRetrieverAdapter` tests verifying Retriever protocol compliance
+- `PipelineExecutionError` wrapping test with diagnostics verification
+- Golden path integration test mirroring README usage pattern
+- Example: `examples/hybrid_rag.py` -- hybrid RAG pipeline with dense retrieval
+- Example: `examples/custom_retriever.py` -- custom Retriever protocol implementation
+- Example: `examples/budget_management.py` -- token budget management and overflow handling
+- README sections for Priority System (1--10 scale) and Token Budgets
+
+### Changed
+- `Agent` constructor: `client` parameter replaced with `llm: LLMProvider` and `fallbacks: list[str]`
+- `Role` and `StopReason` enums changed from `(str, Enum)` to `StrEnum` for correct string formatting
+- `AgentTool`: removed `to_anthropic_schema()`, `to_openai_schema()`, `to_generic_schema()`; replaced with unified `to_tool_schema() -> ToolSchema`
+
+### Fixed
 - 34 pre-existing test failures caused by missing optional dependencies (tiktoken, rank-bm25)
 - `FallbackProvider.astream` mid-stream fallback semantics (yields now outside try/except)
 - `test_consolidator.py`: eliminated shared mutable state (`_orthogonal_index` dict) by converting to factory function pattern (`make_orthogonal_embed()`)
