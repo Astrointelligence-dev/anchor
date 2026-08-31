@@ -39,7 +39,16 @@ class RedisEntryStore:
     def add(self, entry: MemoryEntry) -> None:
         client = self._conn_manager.get_client()
         data = entry.model_dump_json()
+        # Upsert: drop index memberships of a previous version whose
+        # user/session changed — a stale set would keep claiming the id
+        # and delete_by_user would destroy the re-owned entry.
+        old = self._get_entry(entry.id)
         pipe = client.pipeline()
+        if old is not None:
+            if old.user_id and old.user_id != entry.user_id:
+                pipe.srem(self._user_key(old.user_id), entry.id)
+            if old.session_id and old.session_id != entry.session_id:
+                pipe.srem(self._session_key(old.session_id), entry.id)
         pipe.set(self._key(entry.id), data)
         pipe.sadd(self._ids_key(), entry.id)
         if entry.user_id:
@@ -211,14 +220,20 @@ class RedisEntryStore:
 
         entries = self._load_entries(entry_ids)
         pipe = client.pipeline()
+        deleted = 0
         for entry in entries:
+            if entry.user_id != user_id:
+                # Stale index membership (entry re-owned since): the index
+                # set is wiped below, but the entry itself must survive.
+                continue
             pipe.delete(self._key(entry.id))
             pipe.srem(self._ids_key(), entry.id)
             if entry.session_id:
                 pipe.srem(self._session_key(entry.session_id), entry.id)
+            deleted += 1
         pipe.delete(self._user_key(user_id))
         pipe.execute()
-        return len(entries)
+        return deleted
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(prefix={self._conn_manager.prefix!r})"
@@ -247,7 +262,15 @@ class AsyncRedisEntryStore:
     async def add(self, entry: MemoryEntry) -> None:
         client = self._conn_manager.get_async_client()
         data = entry.model_dump_json()
+        # Upsert: same stale-index cleanup as the sync store.
+        raw = await client.get(self._key(entry.id))
+        old = MemoryEntry.model_validate_json(raw) if raw is not None else None
         pipe = client.pipeline()
+        if old is not None:
+            if old.user_id and old.user_id != entry.user_id:
+                pipe.srem(self._user_key(old.user_id), entry.id)
+            if old.session_id and old.session_id != entry.session_id:
+                pipe.srem(self._session_key(old.session_id), entry.id)
         pipe.set(self._key(entry.id), data)
         pipe.sadd(self._ids_key(), entry.id)
         if entry.user_id:

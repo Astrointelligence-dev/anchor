@@ -93,6 +93,12 @@ class SqliteConnectionManager:
         if self._wal_mode:
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA synchronous=NORMAL")
+        if self._async_conn is not None:
+            # Lost a concurrent first-call race: keep the winner and close
+            # this connection, or its non-daemon worker thread leaks and
+            # blocks interpreter shutdown.
+            await conn.close()
+            return self._async_conn
         self._async_conn = conn
         return conn
 

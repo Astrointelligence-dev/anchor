@@ -139,15 +139,21 @@ class SqliteEntryStore:
 
         where = " AND ".join(clauses)
         conn = self._conn_manager.get_connection()
+        # Tags are filtered in Python (they live in a JSON array column),
+        # so the SQL LIMIT may only apply when there is no tags filter —
+        # otherwise tagged matches ranked below the first top_k rows are
+        # silently dropped (can return [] while matches exist).
+        limit_sql = "" if tags else " LIMIT ?"
+        if not tags:
+            params.append(top_k)
         rows = conn.execute(
             f"SELECT * FROM memory_entries WHERE {where} "  # noqa: S608
-            "ORDER BY relevance_score DESC LIMIT ?",
-            (*params, top_k),
+            f"ORDER BY relevance_score DESC{limit_sql}",
+            tuple(params),
         ).fetchall()
 
         entries = [row_to_memory_entry(r) for r in rows]
 
-        # Tags filtering: done in Python since tags are JSON arrays
         if tags:
             entries = [
                 e for e in entries if all(t in e.tags for t in tags)
