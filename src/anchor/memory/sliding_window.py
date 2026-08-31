@@ -131,16 +131,20 @@ class SlidingWindowMemory:
                     self._total_tokens -= evicted.token_count
                     evicted_turns.append(evicted)
 
-            if evicted_turns and self._on_evict is not None:
-                try:
-                    self._on_evict(evicted_turns)
-                except Exception:
-                    logger.exception(
-                        "on_evict callback failed — ignoring to protect pipeline"
-                    )
-
             self._turns.append(turn)
             self._total_tokens += turn.token_count
+
+        # Invoked OUTSIDE the lock: the callback may do slow work (LLM
+        # summarization) or read this memory back — under the non-reentrant
+        # lock that read self-deadlocked and the slow work serialized every
+        # other thread on the window.
+        if evicted_turns and self._on_evict is not None:
+            try:
+                self._on_evict(evicted_turns)
+            except Exception:
+                logger.exception(
+                    "on_evict callback failed — ignoring to protect pipeline"
+                )
         return turn
 
     def to_context_items(self, priority: int = 7) -> list[ContextItem]:

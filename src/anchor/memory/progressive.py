@@ -15,6 +15,7 @@ Key facts are extracted at each tier transition and stored in a sidecar.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from datetime import UTC, datetime
@@ -70,6 +71,7 @@ class ProgressiveSummarizationMemory:
     """
 
     __slots__ = (
+        "_aevict_lock",
         "_callbacks",
         "_compactor",
         "_fact_token_budget",
@@ -102,6 +104,10 @@ class ProgressiveSummarizationMemory:
         self._facts: list[KeyFact] = []
         self._callbacks: list[ProgressiveSummarizationCallback] = callbacks or []
         self._lock = threading.RLock()
+        # Serializes the async eviction cascade: its read-summarize-write
+        # spans awaits, so without this two concurrent evictions read the
+        # same tier state and the second write erases the first's turns.
+        self._aevict_lock = asyncio.Lock()
 
         # Resolve LLM provider
         if isinstance(llm, str):
@@ -217,36 +223,27 @@ class ProgressiveSummarizationMemory:
     ) -> ConversationTurn:
         """Async add: collects evicted turns, then runs async LLM compaction."""
         evicted: list[ConversationTurn] = []
-        # Temporarily swap callback to capture evicted turns instead of sync compaction.
-        # Safety: the RLock protects the swap-add-restore sequence, so concurrent
-        # callers cannot interleave. This couples to SlidingWindowMemory._on_evict
-        # (a private attribute) — if that class changes internals, this must be updated.
-        original_cb = self._window._on_evict
-        self._window._on_evict = lambda turns: evicted.extend(turns)
-        try:
-            with self._lock:
+        # Temporarily swap callback to capture evicted turns instead of sync
+        # compaction. The WHOLE swap-add-restore sequence holds the RLock —
+        # with the swap outside it, a concurrent caller could read the
+        # temporary lambda as its "original" and restore it permanently,
+        # silently killing all future evictions. Still couples to
+        # SlidingWindowMemory._on_evict (a private attribute).
+        with self._lock:
+            original_cb = self._window._on_evict
+            self._window._on_evict = lambda turns: evicted.extend(turns)
+            try:
                 turn = self._window.add_turn(role, content, **metadata)
-        finally:
-            self._window._on_evict = original_cb
+            finally:
+                self._window._on_evict = original_cb
         # Perform async cascade outside the lock
         if evicted:
             await self._handle_eviction_async(evicted)
         return turn
 
     async def aadd_turn(self, turn: ConversationTurn) -> None:
-        """Async add_turn: collects evicted turns, then runs async LLM compaction."""
-        evicted: list[ConversationTurn] = []
-        original_cb = self._window._on_evict
-        self._window._on_evict = lambda turns: evicted.extend(turns)
-        try:
-            with self._lock:
-                self._window.add_turn(
-                    role=turn.role, content=turn.content, **turn.metadata
-                )
-        finally:
-            self._window._on_evict = original_cb
-        if evicted:
-            await self._handle_eviction_async(evicted)
+        """Async add_turn: delegates to :meth:`aadd_message`."""
+        await self.aadd_message(turn.role, turn.content, **turn.metadata)
 
     # -- Introspection --
 
@@ -295,10 +292,10 @@ class ProgressiveSummarizationMemory:
                 target_tokens=t1_config.target_tokens,
                 existing_summary=existing_summary,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Tier 1 compaction failed; using raw content")
             new_summary = serialized
-            self._fire_callback("on_compaction_error", 1, Exception("compaction failed"))
+            self._fire_callback("on_compaction_error", 1, exc)
 
         summary_tokens = self._tokenizer.count_tokens(new_summary)
         now = datetime.now(UTC)
@@ -349,10 +346,10 @@ class ProgressiveSummarizationMemory:
                 target_tokens=to_config.target_tokens,
                 existing_summary=existing_summary,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Tier %d→%d compaction failed", from_level, to_level)
             new_summary = source_tier.content
-            self._fire_callback("on_compaction_error", to_level, Exception("cascade failed"))
+            self._fire_callback("on_compaction_error", to_level, exc)
 
         summary_tokens = self._tokenizer.count_tokens(new_summary)
         now = datetime.now(UTC)
@@ -410,7 +407,22 @@ class ProgressiveSummarizationMemory:
     # -- Async eviction handling (used by aadd_message / aadd_turn) --
 
     async def _handle_eviction_async(self, evicted_turns: list[ConversationTurn]) -> None:
-        """Async variant of _handle_eviction using async LLM calls."""
+        """Async variant of _handle_eviction using async LLM calls.
+
+        The whole cascade is serialized by ``_aevict_lock``: the
+        read-summarize-write sequence spans awaits, and unserialized
+        concurrent evictions lose turns (both read the same tier state,
+        second write wins). ``_cascade_tier_async`` recursion runs inside
+        the held lock — it must never re-acquire it.
+        """
+        # ponytail: sync evictions (RLock only) can still interleave with an
+        # async cascade mid-await; single-mode usage is the supported shape.
+        async with self._aevict_lock:
+            await self._handle_eviction_async_locked(evicted_turns)
+
+    async def _handle_eviction_async_locked(
+        self, evicted_turns: list[ConversationTurn],
+    ) -> None:
         serialized = _serialize_turns(evicted_turns)
         turn_count = len(evicted_turns)
 
@@ -425,10 +437,10 @@ class ProgressiveSummarizationMemory:
                 serialized, target_tier=1, target_tokens=t1_config.target_tokens,
                 existing_summary=existing_summary,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Async tier 1 compaction failed; using raw content")
             new_summary = serialized
-            self._fire_callback("on_compaction_error", 1, Exception("compaction failed"))
+            self._fire_callback("on_compaction_error", 1, exc)
 
         summary_tokens = self._tokenizer.count_tokens(new_summary)
         now = datetime.now(UTC)
@@ -470,10 +482,10 @@ class ProgressiveSummarizationMemory:
                 source_tier.content, target_tier=to_level, target_tokens=to_config.target_tokens,
                 existing_summary=existing_summary,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Async tier %d→%d compaction failed", from_level, to_level)
             new_summary = source_tier.content
-            self._fire_callback("on_compaction_error", to_level, Exception("cascade failed"))
+            self._fire_callback("on_compaction_error", to_level, exc)
 
         summary_tokens = self._tokenizer.count_tokens(new_summary)
         now = datetime.now(UTC)
