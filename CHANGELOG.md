@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New `stopped_by="stuck"`**: repeating an identical (tool, args, result) call across consecutive rounds first gets the model a corrective nudge (3 identical errors / 4 identical results); repeating again ends the turn with a graceful wrap-up round, same contract as `usage_limit` — no exception. A stuck child returns a marked partial result to its parent
 - **`UsageLimits` is now run-wide, not per-turn**: the agent that starts a turn with limits creates a shared pool and every subagent spawned during it (`task`/`as_tool`) debits the same budget — an orchestrator's `total_tokens_limit` now sees its children's spend. A child cut mid-run wraps up gracefully and returns a marked partial result; a child may carry its own narrower per-turn limits (`SubagentDefinition(usage_limits=...)`). `UsageLimitReached.used`/`limit` widen to `int | float` and the event gains `kind="cost"` and `scope` (`"run"` pool vs `"turn"` own-limit)
 - **New `stopped_by="output_missing"`**: a structured-output turn whose final round still produced no valid `final_result` ends gracefully with this verdict instead of raising from inside the loop — the loop always yields a terminal `TurnFinished`, and `run()`/`arun()` are the single place that raises (`chat`/`stream` consumers see the verdict, not an exception)
+- `Agent` constructor: `client` parameter replaced with `llm: LLMProvider` and `fallbacks: list[str]`
+- `AgentTool`: removed `to_anthropic_schema()`, `to_openai_schema()`, `to_generic_schema()`; replaced with unified `to_tool_schema() -> ToolSchema`
 
 ### Added
 - **`claude_cli` LLM provider (`[claude-cli]` extra)**: runs any anchor `Agent` on a Claude Code subscription (Pro/Max OAuth or `claude setup-token`) via `claude-agent-sdk` — no API key. Tool calling round-trips through an in-process MCP server plus a `PreToolUse` hook returning `permissionDecision: "defer"`, which stops the CLI turn *without executing* and surfaces a normal `ToolCall`/`StopReason.TOOL_USE` to the loop; mandatory overhead guards (`setting_sources=[]`, `strict_mcp_config=True`) cut per-call prompt cost from ~178k to ~280 tokens; the CLI's own agentic tools (`builtin_tools`) are opt-in with a prompt-injection warning; billed cost is reported into usage accounting
@@ -60,6 +62,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `metadata["raw_score"]` on all retriever and reranker results, preserving the unclamped/unnormalized score (raw cosine, raw BM25, raw reranker logits) so quality thresholds are possible
 - `min_score` parameter on `DenseRetriever` and `SparseRetriever` to filter results below a raw-score threshold
 - SOTA 2026 research docs (`docs/research/2026-08-25-*`) and phased upgrade plan (`docs/plans/2026-08-25-sota-upgrade-plan.md`)
+- Multi-provider LLM interface (`anchor.llm`) with support for Anthropic, OpenAI, Gemini, Grok, Ollama, OpenRouter, and LiteLLM
+- `LLMProvider` protocol and `BaseLLMProvider` ABC with built-in retry and timeout logic
+- `create_provider()` factory with `"provider/model"` string format and automatic lazy loading
+- `FallbackProvider` for automatic provider failover (fallback only before first stream chunk)
+- Provider error hierarchy: `ProviderError`, `RateLimitError`, `ServerError`, `TimeoutError`, `AuthenticationError`, `ModelNotFoundError`, `ContentFilterError`
+- Thread-safe provider registry with `threading.Lock`
+- Shared `_openai_compat` module for OpenAI/LiteLLM code deduplication
+- Anthropic streaming usage tracking (`input_tokens` + `output_tokens`)
+- LLM Providers API reference and guide documentation
+- Unit tests for `_math.py` (cosine_similarity and clamp functions)
+- `MemoryRetrieverAdapter` tests verifying Retriever protocol compliance
+- `PipelineExecutionError` wrapping test with diagnostics verification
+- Golden path integration test mirroring README usage pattern
+- Example: `examples/hybrid_rag.py` -- hybrid RAG pipeline with dense retrieval
+- Example: `examples/custom_retriever.py` -- custom Retriever protocol implementation
+- Example: `examples/budget_management.py` -- token budget management and overflow handling
+- README sections for Priority System (1--10 scale) and Token Budgets
 
 ### Changed
 - Sync tools deliberately run without a timeout — a worker-thread "timeout" cannot cancel the call, only abandon a thread whose side effects keep running; the async path (`tool.timeout` / `Agent(tool_timeout=...)`) is where timeouts are enforceable. `run_skill_script` drops its local head-only 10k-char cut in favor of the loop's head+tail cap (per-tool `max_result_tokens=2500`)
@@ -88,6 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All cosine-similarity call sites (`SemanticChunker`, late interaction, cross-modal, `EmbeddingClassifier`) now use the strict `anchor._math.cosine_similarity` — dimension mismatches raise instead of silently truncating
 - `DenseRetriever.index` embeds documents in one batch call (was one embedding call per item)
 - Postgres: `ensure_tables` now creates the pgvector **HNSW** index (works on empty tables, unlike the previously suggested IVFFlat) and a JSONB GIN index; `embedding_dim` is a required parameter
+- `Role` and `StopReason` enums changed from `(str, Enum)` to `StrEnum` for correct string formatting
 - Repo workflow: `docs/superpowers/` retired; specs/plans live in `docs/plans/`, research in `docs/research/`
 
 ### Fixed
@@ -98,6 +118,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reranker `top_k` sentinel bug**: passing `top_k=10` explicitly was indistinguishable from the default and silently discarded in all five rerankers; the pipeline `reranker_step` default hit this on every run
 - `RecursiveCharacterChunker` applied overlap at every recursion level, duplicating overlap text in nested sub-chunks; overlap is now applied exactly once over the final chunk list
 - `SqliteVectorStore` unpacked stored embeddings using the *query* vector's dimension — a query/stored dimension mismatch silently mis-unpacked or crashed with `struct.error`; the dimension now derives from the stored blob and mismatches raise a clear `ValueError`
+- 34 pre-existing test failures caused by missing optional dependencies (tiktoken, rank-bm25)
+- `FallbackProvider.astream` mid-stream fallback semantics (yields now outside try/except)
+- `test_consolidator.py`: eliminated shared mutable state (`_orthogonal_index` dict) by converting to factory function pattern (`make_orthogonal_embed()`)
+- `test_graph_memory.py`: updated `link_memory` unknown entity test to expect `KeyError` instead of `ValueError`
+- README: fixed retrieval example with runnable `embed_fn` and `ContextItem` creation
+- README: updated test count from 961 to 1088
 
 ### Removed
 - Late-interaction retriever (`LateInteractionRetriever`/`LateInteractionScorer`/`MaxSimScorer`, `TokenLevelEncoder` protocol): required per-token document embeddings recomputed per query — never viable as shipped, no known users; a ColBERT-style retriever can return behind an extra when demanded
@@ -106,37 +132,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.1] - 2026-03-13
 
-### Added
-- Multi-provider LLM interface (`anchor.llm`) with support for Anthropic, OpenAI, Gemini, Grok, Ollama, OpenRouter, and LiteLLM
-- `LLMProvider` protocol and `BaseLLMProvider` ABC with built-in retry and timeout logic
-- `create_provider()` factory with `"provider/model"` string format and automatic lazy loading
-- `FallbackProvider` for automatic provider failover (fallback only before first stream chunk)
-- Provider error hierarchy: `ProviderError`, `RateLimitError`, `ServerError`, `TimeoutError`, `AuthenticationError`, `ModelNotFoundError`, `ContentFilterError`
-- Thread-safe provider registry with `threading.Lock`
-- Shared `_openai_compat` module for OpenAI/LiteLLM code deduplication
-- Anthropic streaming usage tracking (`input_tokens` + `output_tokens`)
-- LLM Providers API reference and guide documentation
-- Unit tests for `_math.py` (cosine_similarity and clamp functions)
-- `MemoryRetrieverAdapter` tests verifying Retriever protocol compliance
-- `PipelineExecutionError` wrapping test with diagnostics verification
-- Golden path integration test mirroring README usage pattern
-- Example: `examples/hybrid_rag.py` -- hybrid RAG pipeline with dense retrieval
-- Example: `examples/custom_retriever.py` -- custom Retriever protocol implementation
-- Example: `examples/budget_management.py` -- token budget management and overflow handling
-- README sections for Priority System (1--10 scale) and Token Budgets
+First PyPI release. Same feature set as 0.1.0 — the delta is packaging,
+branding, and documentation (verified against the published sdist).
 
 ### Changed
-- `Agent` constructor: `client` parameter replaced with `llm: LLMProvider` and `fallbacks: list[str]`
-- `Role` and `StopReason` enums changed from `(str, Enum)` to `StrEnum` for correct string formatting
-- `AgentTool`: removed `to_anthropic_schema()`, `to_openai_schema()`, `to_generic_schema()`; replaced with unified `to_tool_schema() -> ToolSchema`
+- Project renamed from `astro-context` to **anchor**; the import is now `anchor` and the PyPI package name is `astro-anchor`
+- Comprehensive documentation overhaul (MkDocs Material, GitHub Pages deploy workflow), modernized README, Astro brand identity and logos
 
 ### Fixed
-- 34 pre-existing test failures caused by missing optional dependencies (tiktoken, rank-bm25)
-- `FallbackProvider.astream` mid-stream fallback semantics (yields now outside try/except)
-- `test_consolidator.py`: eliminated shared mutable state (`_orthogonal_index` dict) by converting to factory function pattern (`make_orthogonal_embed()`)
-- `test_graph_memory.py`: updated `link_memory` unknown entity test to expect `KeyError` instead of `ValueError`
-- README: fixed retrieval example with runnable `embed_fn` and `ContextItem` creation
-- README: updated test count from 961 to 1088
+- mypy arg-type error for the `Skill` activation literal; deterministic `_fake_embed` and otel import-blocking in tests
 
 ## [0.1.0] - 2026-02-20
 
