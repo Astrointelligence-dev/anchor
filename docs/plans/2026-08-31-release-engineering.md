@@ -59,8 +59,9 @@ Consequências aplicadas:
 ## Pendências que o Arthur precisa fazer (1 min cada)
 
 - **PyPI trusted publisher** (antes da primeira tag): projeto
-  `astro-anchor` → Publishing → owner `artcgranja`, repo `anchor`,
-  workflow `release.yml`, environment `pypi`.
+  `astro-anchor` → Publishing → owner `Astrointelligence-dev` (o repo
+  foi transferido; artcgranja/anchor é redirect e o OIDC declara o nome
+  canônico), repo `anchor`, workflow `release.yml`, environment `pypi`.
 
 ## O que resta para o deploy da 0.2.0 (depois desta sessão)
 
