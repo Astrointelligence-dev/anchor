@@ -239,34 +239,48 @@ def parse_response(response: Any, provider_name: str) -> LLMResponse:
 # ---------------------------------------------------------------------------
 
 
-def parse_stream_chunk(chunk: Any) -> StreamChunk | None:
-    """Parse a single OpenAI-compatible stream chunk into a StreamChunk, or None."""
+def parse_stream_chunks(chunk: Any) -> list[StreamChunk]:
+    """Parse one OpenAI-compatible stream chunk into StreamChunks.
+
+    One SDK chunk can carry several tool-call deltas (parallel calls),
+    so every delta is emitted — dropping all but ``tool_calls[0]`` used
+    to lose the sibling calls entirely. Deltas are emitted before any
+    ``finish_reason`` so fragments arriving on the final chunk still
+    reach the accumulator.
+    """
     if not chunk.choices:
-        return None
+        return []
 
     choice = chunk.choices[0]
     delta = choice.delta
     finish_reason = choice.finish_reason
+    chunks: list[StreamChunk] = []
 
-    # Handle finish reason first (can combine with usage)
-    if finish_reason is not None:
-        return StreamChunk(stop_reason=map_stop_reason(finish_reason))
-
-    # Handle tool call deltas
-    if delta.tool_calls:
-        tc_delta = delta.tool_calls[0]
-        func_delta = tc_delta.function
-        return StreamChunk(
-            tool_call_delta=ToolCallDelta(
-                index=tc_delta.index,
-                id=tc_delta.id if tc_delta.id else None,
-                name=func_delta.name if func_delta.name else None,
-                arguments_fragment=func_delta.arguments if func_delta.arguments else None,
+    # Tool call deltas — all of them, not just the first
+    if getattr(delta, "tool_calls", None):
+        for tc_delta in delta.tool_calls:
+            func_delta = tc_delta.function
+            chunks.append(
+                StreamChunk(
+                    tool_call_delta=ToolCallDelta(
+                        index=tc_delta.index,
+                        id=tc_delta.id if tc_delta.id else None,
+                        name=func_delta.name if func_delta.name else None,
+                        arguments_fragment=(
+                            func_delta.arguments if func_delta.arguments else None
+                        ),
+                    )
+                )
             )
-        )
 
-    # Handle text content
-    if delta.content is not None:
-        return StreamChunk(content=delta.content)
+    # Text content
+    if getattr(delta, "content", None) is not None:
+        chunks.append(StreamChunk(content=delta.content))
+
+    # Finish reason last, so same-chunk deltas are not lost
+    if finish_reason is not None:
+        chunks.append(StreamChunk(stop_reason=map_stop_reason(finish_reason)))
+
+    return chunks
 
     return None

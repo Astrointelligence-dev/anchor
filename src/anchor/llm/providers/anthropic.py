@@ -157,14 +157,22 @@ class AnthropicProvider(BaseLLMProvider):
         """Return a cached sync Anthropic client, creating it on first use."""
         if self._client is None:
             sdk = _ensure_sdk()
-            self._client = sdk.Anthropic(api_key=self._api_key, base_url=self._base_url)
+            self._client = sdk.Anthropic(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=self._timeout,
+            )
         return self._client
 
     def _get_async_client(self) -> Any:
         """Return a cached async Anthropic client, creating it on first use."""
         if self._async_client is None:
             sdk = _ensure_sdk()
-            self._async_client = sdk.AsyncAnthropic(api_key=self._api_key, base_url=self._base_url)
+            self._async_client = sdk.AsyncAnthropic(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=self._timeout,
+            )
         return self._async_client
 
     # ------------------------------------------------------------------

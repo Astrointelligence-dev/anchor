@@ -126,7 +126,15 @@ class GeminiProvider(BaseLLMProvider):
         """
         if self._client is None:
             sdk = _ensure_sdk()
-            self._client = sdk.Client(api_key=self._api_key)
+            http_options = None
+            if self._timeout is not None:
+                # google-genai takes the timeout in milliseconds
+                http_options = sdk.types.HttpOptions(
+                    timeout=int(self._timeout * 1000),
+                )
+            self._client = sdk.Client(
+                api_key=self._api_key, http_options=http_options,
+            )
         return self._client
 
     # ------------------------------------------------------------------

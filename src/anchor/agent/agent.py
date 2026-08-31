@@ -1558,8 +1558,23 @@ class Agent:
         calls: list[ToolCall] = []
         for _idx in sorted(accumulators):
             acc = accumulators[_idx]
-            args = json.loads(acc["args_json"]) if acc["args_json"] else {}
-            calls.append(ToolCall(id=acc["id"], name=acc["name"], arguments=args))
+            try:
+                args = json.loads(acc["args_json"]) if acc["args_json"] else {}
+            except json.JSONDecodeError:
+                # Model-written JSON can arrive malformed or truncated;
+                # degrade like the non-streaming parse does ({} fails
+                # input validation and returns an error result the model
+                # can react to) instead of killing the turn mid-stream.
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+            calls.append(
+                ToolCall(
+                    id=acc["id"] or f"call_{_idx}",
+                    name=acc["name"] or "",
+                    arguments=args,
+                )
+            )
         return calls
 
     def _formatted_to_messages(

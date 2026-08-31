@@ -137,7 +137,7 @@ class TestBaseUrl:
         provider._do_invoke(messages, tools=None)
 
         mock_openai.OpenAI.assert_called_once_with(
-            api_key="sk-test", base_url="https://custom.api/v1"
+            api_key="sk-test", base_url="https://custom.api/v1", timeout=60.0
         )
 
     @patch("anchor.llm.providers.openai.openai")
@@ -165,7 +165,9 @@ class TestBaseUrl:
         messages = [Message(role=Role.USER, content="Hi")]
         provider._do_invoke(messages, tools=None)
 
-        mock_openai.OpenAI.assert_called_once_with(api_key="sk-test", base_url=None)
+        mock_openai.OpenAI.assert_called_once_with(
+            api_key="sk-test", base_url=None, timeout=60.0
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -444,32 +446,27 @@ class TestStreamChunkParsing:
 
     def test_text_content_chunk(self):
         chunk = self._make_chunk(content="Hello")
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.content == "Hello"
         assert result.tool_call_delta is None
 
     def test_empty_content_returns_none(self):
         chunk = self._make_chunk(content=None)
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is None
+        assert self.provider._parse_stream_chunks(chunk) == []
 
     def test_finish_reason_stop(self):
         chunk = self._make_chunk(content=None, finish_reason="stop")
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.stop_reason == StopReason.STOP
 
     def test_finish_reason_length(self):
         chunk = self._make_chunk(content=None, finish_reason="length")
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.stop_reason == StopReason.MAX_TOKENS
 
     def test_finish_reason_tool_calls(self):
         chunk = self._make_chunk(content=None, finish_reason="tool_calls")
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.stop_reason == StopReason.TOOL_USE
 
     def test_tool_call_delta_with_id_and_name(self):
@@ -483,8 +480,7 @@ class TestStreamChunkParsing:
         tc_delta.function = func_delta
 
         chunk = self._make_chunk(tool_calls=[tc_delta])
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.tool_call_delta is not None
         assert result.tool_call_delta.index == 0
         assert result.tool_call_delta.id == "call_abc"
@@ -501,8 +497,7 @@ class TestStreamChunkParsing:
         tc_delta.function = func_delta
 
         chunk = self._make_chunk(tool_calls=[tc_delta])
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.tool_call_delta is not None
         assert result.tool_call_delta.arguments_fragment == '{"loc'
 
@@ -512,9 +507,8 @@ class TestStreamChunkParsing:
         usage.completion_tokens = 5
         usage.total_tokens = 15
         chunk = self._make_chunk(content=None, finish_reason="stop", usage=usage)
-        result = self.provider._parse_stream_chunk(chunk)
+        [result] = self.provider._parse_stream_chunks(chunk)
         # Should parse something (finish_reason driven)
-        assert result is not None
         assert result.stop_reason == StopReason.STOP
 
 

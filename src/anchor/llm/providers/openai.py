@@ -39,7 +39,7 @@ from anchor.llm.providers._openai_compat import (
     convert_tool,
     map_stop_reason,
     parse_response,
-    parse_stream_chunk,
+    parse_stream_chunks,
 )
 from anchor.llm.registry import register_provider
 
@@ -87,14 +87,22 @@ class OpenAIProvider(BaseLLMProvider):
         """Return a cached sync OpenAI client, creating it on first use."""
         if self._client is None:
             sdk = _ensure_sdk()
-            self._client = sdk.OpenAI(api_key=self._api_key, base_url=self._base_url)
+            self._client = sdk.OpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=self._timeout,
+            )
         return self._client
 
     def _get_async_client(self) -> Any:
         """Return a cached async OpenAI client, creating it on first use."""
         if self._async_client is None:
             sdk = _ensure_sdk()
-            self._async_client = sdk.AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
+            self._async_client = sdk.AsyncOpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=self._timeout,
+            )
         return self._async_client
 
     # ------------------------------------------------------------------
@@ -136,8 +144,7 @@ class OpenAIProvider(BaseLLMProvider):
         try:
             stream = client.chat.completions.create(**call_kwargs)
             for raw_chunk in stream:
-                chunk = parse_stream_chunk(raw_chunk)
-                if chunk is not None:
+                for chunk in parse_stream_chunks(raw_chunk):
                     yield chunk
         except Exception as exc:
             raise self._map_error(exc) from exc
@@ -174,8 +181,7 @@ class OpenAIProvider(BaseLLMProvider):
         try:
             stream = await client.chat.completions.create(**call_kwargs)
             async for raw_chunk in stream:
-                chunk = parse_stream_chunk(raw_chunk)
-                if chunk is not None:
+                for chunk in parse_stream_chunks(raw_chunk):
                     yield chunk
         except Exception as exc:
             raise self._map_error(exc) from exc
@@ -197,9 +203,9 @@ class OpenAIProvider(BaseLLMProvider):
         """Parse an OpenAI SDK response into an LLMResponse."""
         return parse_response(response, self.provider_name)
 
-    def _parse_stream_chunk(self, chunk: Any) -> StreamChunk | None:
-        """Parse a single OpenAI stream chunk into a StreamChunk, or None."""
-        return parse_stream_chunk(chunk)
+    def _parse_stream_chunks(self, chunk: Any) -> list[StreamChunk]:
+        """Parse a single OpenAI stream chunk into StreamChunks."""
+        return parse_stream_chunks(chunk)
 
     # ------------------------------------------------------------------
     # Error mapping

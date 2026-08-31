@@ -35,7 +35,7 @@ from anchor.llm.providers._openai_compat import (
     convert_messages,
     convert_tool,
     parse_response,
-    parse_stream_chunk,
+    parse_stream_chunks,
 )
 from anchor.llm.registry import register_provider
 
@@ -81,6 +81,8 @@ class LiteLLMProvider(BaseLLMProvider):
         call_kwargs = build_call_kwargs(
             self._model, convert_messages(messages), tools, **kwargs,
         )
+        if self._timeout is not None:
+            call_kwargs.setdefault("timeout", self._timeout)
 
         try:
             response = litellm.completion(**call_kwargs)
@@ -100,12 +102,13 @@ class LiteLLMProvider(BaseLLMProvider):
         call_kwargs = build_call_kwargs(
             self._model, convert_messages(messages), tools, stream=True, **kwargs,
         )
+        if self._timeout is not None:
+            call_kwargs.setdefault("timeout", self._timeout)
 
         try:
             stream = litellm.completion(**call_kwargs)
             for raw_chunk in stream:
-                chunk = parse_stream_chunk(raw_chunk)
-                if chunk is not None:
+                for chunk in parse_stream_chunks(raw_chunk):
                     yield chunk
         except Exception as exc:
             raise self._map_error(exc) from exc
@@ -121,6 +124,8 @@ class LiteLLMProvider(BaseLLMProvider):
         call_kwargs = build_call_kwargs(
             self._model, convert_messages(messages), tools, **kwargs,
         )
+        if self._timeout is not None:
+            call_kwargs.setdefault("timeout", self._timeout)
 
         try:
             response = await litellm.acompletion(**call_kwargs)
@@ -140,12 +145,13 @@ class LiteLLMProvider(BaseLLMProvider):
         call_kwargs = build_call_kwargs(
             self._model, convert_messages(messages), tools, stream=True, **kwargs,
         )
+        if self._timeout is not None:
+            call_kwargs.setdefault("timeout", self._timeout)
 
         try:
             stream = await litellm.acompletion(**call_kwargs)
             async for raw_chunk in stream:
-                chunk = parse_stream_chunk(raw_chunk)
-                if chunk is not None:
+                for chunk in parse_stream_chunks(raw_chunk):
                     yield chunk
         except Exception as exc:
             raise self._map_error(exc) from exc
@@ -167,9 +173,9 @@ class LiteLLMProvider(BaseLLMProvider):
         """Parse a LiteLLM response (OpenAI-compatible) into an LLMResponse."""
         return parse_response(response, self.provider_name)
 
-    def _parse_stream_chunk(self, chunk: Any) -> StreamChunk | None:
-        """Parse a single LiteLLM stream chunk into a StreamChunk, or None."""
-        return parse_stream_chunk(chunk)
+    def _parse_stream_chunks(self, chunk: Any) -> list[StreamChunk]:
+        """Parse a single LiteLLM stream chunk into StreamChunks."""
+        return parse_stream_chunks(chunk)
 
     # ------------------------------------------------------------------
     # Error mapping

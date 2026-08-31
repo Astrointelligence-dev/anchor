@@ -147,9 +147,6 @@ class BaseLLMProvider(ABC):
             try:
                 stream_iter = self._do_stream(messages, tools, **kwargs)
                 first_chunk = next(stream_iter)
-                yield first_chunk
-                yield from stream_iter
-                return
             except StopIteration:
                 return
             except ProviderError as e:
@@ -160,6 +157,12 @@ class BaseLLMProvider(ABC):
                 if isinstance(e, RateLimitError) and e.retry_after:
                     delay = e.retry_after
                 time.sleep(delay)
+                continue
+            # Committed: chunks reached the consumer, so a mid-stream error
+            # must propagate — a retry here would re-yield delivered text.
+            yield first_chunk
+            yield from stream_iter
+            return
         if last_error:
             raise last_error
 
@@ -186,10 +189,6 @@ class BaseLLMProvider(ABC):
             try:
                 stream_iter = self._do_astream(messages, tools, **kwargs)
                 first_chunk = await stream_iter.__anext__()
-                yield first_chunk
-                async for chunk in stream_iter:
-                    yield chunk
-                return
             except StopAsyncIteration:
                 return
             except ProviderError as e:
@@ -200,6 +199,13 @@ class BaseLLMProvider(ABC):
                 if isinstance(e, RateLimitError) and e.retry_after:
                     delay = e.retry_after
                 await asyncio.sleep(delay)
+                continue
+            # Committed: chunks reached the consumer, so a mid-stream error
+            # must propagate — a retry here would re-yield delivered text.
+            yield first_chunk
+            async for chunk in stream_iter:
+                yield chunk
+            return
         if last_error:
             raise last_error
 

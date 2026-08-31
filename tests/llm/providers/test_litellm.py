@@ -383,32 +383,27 @@ class TestStreamChunkParsing:
 
     def test_text_content_chunk(self):
         chunk = self._make_chunk(content="Hello")
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.content == "Hello"
         assert result.tool_call_delta is None
 
     def test_empty_content_returns_none(self):
         chunk = self._make_chunk(content=None)
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is None
+        assert self.provider._parse_stream_chunks(chunk) == []
 
     def test_finish_reason_stop(self):
         chunk = self._make_chunk(content=None, finish_reason="stop")
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.stop_reason == StopReason.STOP
 
     def test_finish_reason_length(self):
         chunk = self._make_chunk(content=None, finish_reason="length")
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.stop_reason == StopReason.MAX_TOKENS
 
     def test_finish_reason_tool_calls(self):
         chunk = self._make_chunk(content=None, finish_reason="tool_calls")
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.stop_reason == StopReason.TOOL_USE
 
     def test_tool_call_delta_with_id_and_name(self):
@@ -422,8 +417,7 @@ class TestStreamChunkParsing:
         tc_delta.function = func_delta
 
         chunk = self._make_chunk(tool_calls=[tc_delta])
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.tool_call_delta is not None
         assert result.tool_call_delta.index == 0
         assert result.tool_call_delta.id == "call_abc"
@@ -440,16 +434,14 @@ class TestStreamChunkParsing:
         tc_delta.function = func_delta
 
         chunk = self._make_chunk(tool_calls=[tc_delta])
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is not None
+        [result] = self.provider._parse_stream_chunks(chunk)
         assert result.tool_call_delta is not None
         assert result.tool_call_delta.arguments_fragment == '{"loc'
 
     def test_no_choices_returns_none(self):
         chunk = MagicMock()
         chunk.choices = []
-        result = self.provider._parse_stream_chunk(chunk)
-        assert result is None
+        assert self.provider._parse_stream_chunks(chunk) == []
 
 
 # ---------------------------------------------------------------------------
