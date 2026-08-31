@@ -267,7 +267,7 @@ class ClaudeCLIProvider(BaseLLMProvider):
         self,
         sdk: Any,
         schemas: list[ToolSchema],
-        by_key: dict[tuple[str, str], str],
+        by_key: dict[tuple[str, str], tuple[str, bool]],
     ) -> list[Any]:
         """Wrap caller schemas as SDK MCP tools that deliver stored results."""
 

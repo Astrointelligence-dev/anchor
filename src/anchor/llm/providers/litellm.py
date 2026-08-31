@@ -108,8 +108,7 @@ class LiteLLMProvider(BaseLLMProvider):
         try:
             stream = litellm.completion(**call_kwargs)
             for raw_chunk in stream:
-                for chunk in parse_stream_chunks(raw_chunk):
-                    yield chunk
+                yield from parse_stream_chunks(raw_chunk)
         except Exception as exc:
             raise self._map_error(exc) from exc
 

@@ -125,11 +125,12 @@ class TestSubagentLastRoundValidation:
     def test_narrating_tool_round_does_not_break_validation(self):
         import json as _json
 
-        from anchor.llm.models import StopReason, StreamChunk, ToolCallDelta
         from pydantic import BaseModel
+
+        from anchor.llm.models import StopReason, StreamChunk, ToolCallDelta
         from tests.test_agent.test_agent import (
-            _Tok,
             _text_response,
+            _Tok,
             _tool_use_response,
         )
 
@@ -177,8 +178,8 @@ class TestNoPhantomChildTurn:
 
     def test_pre_start_failure_does_not_replay_old_diagnostics(self):
         from tests.test_agent.test_agent import (
-            _Tok,
             _text_response,
+            _Tok,
             _tool_use_response,
         )
 
@@ -212,7 +213,7 @@ class TestSameChildSerialization:
 
     @pytest.mark.asyncio
     async def test_parallel_same_child_calls_serialize(self):
-        from tests.test_agent.test_agent import _Tok, _text_response
+        from tests.test_agent.test_agent import _text_response, _Tok
         from tests.test_agent.test_phase4_loop import (
             _multi_tool_use_response,
             _tool_results_of,
@@ -258,8 +259,8 @@ class TestRetrySeesOwnReply:
         from pydantic import BaseModel
 
         from tests.test_agent.test_agent import (
-            _Tok,
             _text_response,
+            _Tok,
             _tool_use_response,
         )
 

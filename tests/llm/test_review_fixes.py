@@ -58,9 +58,13 @@ class TestMidStreamRetryDoesNotDuplicate:
     def test_stream_mid_error_propagates_without_rerun(self, mock_sleep):
         p = _MidStreamFailProvider(model="m", max_retries=2)
         received: list[str] = []
-        with pytest.raises(ServerError):
+
+        def consume() -> None:
             for chunk in p.stream(_MSGS):
                 received.append(chunk.content)
+
+        with pytest.raises(ServerError):
+            consume()
         assert received == ["hello", " world"]  # no duplication
         assert p.calls == 1  # committed after first chunk: no re-run
         assert mock_sleep.call_count == 0
@@ -68,17 +72,21 @@ class TestMidStreamRetryDoesNotDuplicate:
     async def test_astream_mid_error_propagates_without_rerun(self):
         p = _MidStreamFailProvider(model="m", max_retries=2)
         received: list[str] = []
-        with pytest.raises(ServerError):
+
+        async def consume() -> None:
             async for chunk in p.astream(_MSGS):
                 received.append(chunk.content)
+
+        with pytest.raises(ServerError):
+            await consume()
         assert received == ["hello", " world"]
         assert p.calls == 1
 
 
-def _tc_delta(index, id=None, name=None, arguments=None):
+def _tc_delta(index, tc_id=None, name=None, arguments=None):
     tc = MagicMock()
     tc.index = index
-    tc.id = id
+    tc.id = tc_id
     func = MagicMock()
     func.name = name
     func.arguments = arguments
@@ -101,8 +109,8 @@ def _chunk(content=None, tool_calls=None, finish_reason=None):
 class TestParseStreamChunksParallelDeltas:
     def test_all_parallel_tool_call_deltas_emitted(self):
         chunk = _chunk(tool_calls=[
-            _tc_delta(0, id="c0", name="alpha", arguments=""),
-            _tc_delta(1, id="c1", name="beta", arguments=""),
+            _tc_delta(0, tc_id="c0", name="alpha", arguments=""),
+            _tc_delta(1, tc_id="c1", name="beta", arguments=""),
         ])
         chunks = parse_stream_chunks(chunk)
         indices = [c.tool_call_delta.index for c in chunks]
