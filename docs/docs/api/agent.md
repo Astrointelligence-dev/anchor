@@ -1,13 +1,23 @@
 # Agent API Reference
 
 The agent module provides the `Agent` class, `AgentTool` model, `@tool`
-decorator, and the skills system for progressive tool disclosure.
+decorator, the typed event stream, usage limits, subagents, hooks and
+approval, structured output, and the skills system for progressive tool
+disclosure.
 
 All classes are importable from `anchor`:
 
 ```python
 from anchor import Agent, AgentTool, tool, Skill, SkillRegistry
 from anchor import memory_skill, rag_skill, memory_tools, rag_tools
+from anchor import (
+    AgentEvent, TurnStarted, RoundStarted, TextDelta, ToolStarted,
+    ToolFinished, CompactionStarted, CompactionFinished, RoundFinished,
+    UsageLimitReached, TurnFinished,
+    UsageLimits, RoundUsage, TurnDiagnostics, ChildTurn,
+    SubagentDefinition, HookResult, ApprovalRequest, ApprovalDecision,
+    AgentCallback, FileMemoryBackend,
+)
 from anchor.llm import LLMProvider, create_provider
 ```
 
@@ -99,6 +109,223 @@ def with_skills(self, skills: list[Skill]) -> Agent
 
 Register multiple skills. Returns `self`.
 
+#### with_skills_directory / with_skill_from_path
+
+```python
+def with_skills_directory(self, path: str | Path) -> Agent
+def with_skill_from_path(self, path: str | Path) -> Agent
+```
+
+Load `SKILL.md` skills from a directory tree (or a single skill directory).
+Returns `self`.
+
+#### with_mcp_servers
+
+```python
+def with_mcp_servers(self, servers: list[str | MCPServerConfig]) -> Agent
+```
+
+Connect to external MCP servers. Accepts `MCPServerConfig` objects or
+convenience strings (URLs for HTTP, commands for STDIO). Connections are
+lazy and async-only — use `astream()`/`achat()` and `aclose()` (or
+`async with agent:`). See the [MCP guide](../guides/mcp.md). Returns `self`.
+
+#### with_budget
+
+```python
+def with_budget(self, budget: TokenBudget) -> Agent
+```
+
+Attach a `TokenBudget` to the context pipeline — governs what enters the
+context window. To cap what a run may *spend*, see
+[`with_usage_limits`](#with_usage_limits). Returns `self`.
+
+#### with_usage_limits
+
+```python
+def with_usage_limits(self, limits: UsageLimits) -> Agent
+```
+
+Enforce [`UsageLimits`](#usagelimits) across the turn **and its subagents**:
+the turn runs against a shared run-wide pool that every subagent spawned
+during it (`task`/`as_tool`) debits, so a child's spend counts against the
+orchestrator's budget. Crossing a limit emits
+[`UsageLimitReached`](#usagelimitreached), grants the model one wrap-up
+round (final-round notice; `tool_choice="none"`, or the `final_result` tool
+when structured output is still pending) and ends the turn with
+`stopped_by="usage_limit"` — no exception is raised. A child cut mid-run
+wraps up the same way and returns a marked partial result. Returns `self`.
+
+#### with_hooks
+
+```python
+def with_hooks(
+    self,
+    *,
+    pre_tool_use: list[PreToolHook] | None = None,
+    post_tool_use: list[PostToolHook] | None = None,
+) -> Agent
+```
+
+Add veto hooks around tool execution (additive). A pre-hook
+`(tool_name, tool_input) -> HookResult | None` may deny a call (the reason
+is fed back to the model as an `is_error` tool result), rewrite its input,
+or answer `"ask"` to route the call to the approval callback; a post-hook
+`(tool_name, tool_input, output) -> HookResult | None` may replace the
+output. A pre-hook that raises fails closed: the call is denied. Returns
+`self`.
+
+#### with_approval
+
+```python
+def with_approval(self, callback: ApprovalCallback) -> Agent
+```
+
+Set the inline human-in-the-loop approval callback:
+`(ApprovalRequest) -> ApprovalDecision`, sync or async. Called for tools
+marked `requires_approval=True` and for calls a pre-hook answered `"ask"` —
+the tool call pauses until the callback returns (an async callback may stay
+pending indefinitely; timeouts are the application's choice). Deny becomes
+an `is_error` tool result carrying the reason; an approval may rewrite the
+input. Without a callback, approval-gated calls fail closed. Parallel tool
+calls run their approval callbacks concurrently — serialize inside the
+callback if your UI needs one prompt at a time. Returns `self`.
+
+#### with_output_model
+
+```python
+def with_output_model(
+    self,
+    output_model: type[BaseModel],
+    *,
+    mode: str = "tool",          # "tool" | "prompted"
+    max_output_retries: int = 1,
+) -> Agent
+```
+
+Require schema-validated structured output; consume it via
+[`run()`/`arun()`](#run--arun), `TurnFinished.output`, or
+`agent.last_output`.
+
+- `mode="tool"` (default, portable): a synthetic `final_result` tool
+  carries the schema and `tool_choice="any"` keeps the model from stopping
+  in plain text; invalid arguments come back as an error tool result — the
+  loop's own retry mechanic — bounded by `max_output_retries`, after which
+  the turn ends with `stopped_by="output_missing"` and `run()` raises.
+- `mode="prompted"`: the schema is appended to the prompt and the reply is
+  validated, with self-contained retry turns (the subagent mechanic).
+  Requires an agent without `with_memory`.
+
+Returns `self`.
+
+#### with_callbacks
+
+```python
+def with_callbacks(self, callbacks: list[AgentCallback]) -> Agent
+```
+
+Add observer callbacks for loop events (additive). Fire-and-forget:
+exceptions are swallowed and logged. See [`AgentCallback`](#agentcallback).
+Returns `self`.
+
+#### with_context_management
+
+```python
+def with_context_management(self, config: dict[str, Any]) -> Agent
+```
+
+Attach an Anthropic `context_management` config, passed through with every
+request; the Anthropic provider routes to the beta API with the required
+flags, other providers ignore it. `compaction` blocks returned by the API
+round-trip verbatim within the turn. For a provider-agnostic alternative,
+see [`with_compaction`](#with_compaction). Returns `self`.
+
+#### with_compaction
+
+```python
+def with_compaction(
+    self,
+    trigger_tokens: int,
+    *,
+    keep_last: int = 4,
+    compact_fn: Callable[[str], str] | None = None,
+) -> Agent
+```
+
+Enable client-side compaction of the tool loop (works with every provider).
+When the turn's working messages exceed `trigger_tokens`, older messages
+are summarized into a single `[Conversation summary]` user message; the
+last `keep_last` messages are kept intact. `compact_fn` receives the
+flattened transcript and returns the summary; the default uses
+`TierCompactor` with this agent's own LLM. Progress is visible as
+`CompactionStarted`/`CompactionFinished` events. Returns `self`.
+
+#### with_memory_tool
+
+```python
+def with_memory_tool(self, backend: FileMemoryBackend | str | Path) -> Agent
+```
+
+Attach the client-side memory tool (`memory_20250818`-compatible, any
+provider). Accepts a `FileMemoryBackend` or a base path; registers the
+`memory` tool (view/create/str_replace/insert/delete/rename with strict
+`/memories` containment) and appends the memory protocol to the system
+prompt. Returns `self`.
+
+#### with_subagents
+
+```python
+def with_subagents(self, definitions: list[SubagentDefinition]) -> Agent
+```
+
+Register subagents and the `task(agent_name, task)` meta-tool. Each
+[`SubagentDefinition`](#subagentdefinition) becomes an isolated
+sub-`Agent` (own system prompt, restricted tools, no memory); a discovery
+listing is appended to the system prompt. Subagents cannot have subagent
+tools of their own (no nesting — enforced at registration and re-checked
+at call time). Returns `self`.
+
+#### as_tool
+
+```python
+def as_tool(
+    self,
+    name: str,
+    description: str,
+    *,
+    output_model: type[BaseModel] | None = None,
+    max_output_retries: int = 1,
+) -> AgentTool
+```
+
+Expose this agent as a subagent tool for an orchestrator. The tool takes a
+single `task` string — the subagent starts with a clean context. With
+`output_model`, the subagent must return schema-valid JSON; invalid output
+is retried `max_output_retries` times with the validation error. Agents
+that already have subagent tools cannot be wrapped (no nesting).
+
+#### stream / astream
+
+```python
+def stream(self, message: str) -> Iterator[AgentEvent]
+async def astream(self, message: str) -> AsyncGenerator[AgentEvent, None]
+```
+
+Send a message and stream the full tool-use loop as one ordered stream of
+typed [events](#events): `TurnStarted`, per-round
+`RoundStarted`/`RoundFinished` (with `RoundUsage`), `TextDelta`,
+`ToolStarted`/`ToolFinished` (correlated by `tool_call_id`), compaction and
+usage-limit events, and a terminal `TurnFinished` with the final text and
+`TurnDiagnostics`. `chat`/`achat` are the text-only projections of the same
+loop.
+
+`astream` additionally schedules tools by side effect: consecutive
+`read_only` calls run concurrently (cap 10), writes run alone;
+`ToolFinished` events are emitted live in completion order. Subagent events
+are forwarded flat into the parent stream with `parent_tool_call_id` set.
+Diagnostics persist (`agent.last_turn`) even when the consumer abandons the
+generator. MCP servers require the async variant.
+
 #### chat
 
 ```python
@@ -121,6 +348,27 @@ Async variant of `chat()`. Uses `pipeline.abuild()` and async streaming.
 
 **Yields:** Text chunks as they arrive from the API.
 
+#### run / arun
+
+```python
+def run(self, message: str) -> BaseModel
+async def arun(self, message: str) -> BaseModel
+```
+
+Run a turn and return the validated structured-output instance. Requires
+[`with_output_model`](#with_output_model). Raises when the turn ends
+without valid output (`stopped_by="output_missing"`); `chat`/`stream`
+consumers see the verdict instead of an exception.
+
+#### aclose
+
+```python
+async def aclose(self) -> None
+```
+
+Clean up MCP connections and other async resources. The agent is also an
+async context manager: `async with Agent(...).with_mcp_servers([...]) as agent:`.
+
 ### Properties
 
 | Property | Type | Description |
@@ -128,6 +376,8 @@ Async variant of `chat()`. Uses `pipeline.abuild()` and async streaming.
 | `memory` | `MemoryManager \| None` | The attached memory manager |
 | `pipeline` | `ContextPipeline` | The underlying context pipeline |
 | `last_result` | `ContextResult \| None` | Result from the most recent `chat()` call |
+| `last_turn` | `TurnDiagnostics \| None` | Per-round accounting and outcome of the most recent turn (reset at turn start) |
+| `last_output` | `str \| None` | Normalized structured-output JSON from the most recent turn |
 
 ### Example
 
@@ -165,6 +415,12 @@ class AgentTool(BaseModel):
     input_schema: dict[str, Any]
     fn: Callable[..., str]
     input_model: type[BaseModel] | None = None
+    timeout: float | None = None
+    defer_loading: bool = False
+    input_examples: tuple[dict[str, Any], ...] = ()
+    requires_approval: bool = False
+    read_only: bool = False
+    max_result_tokens: int | None = None
 ```
 
 **Fields**
@@ -176,6 +432,10 @@ class AgentTool(BaseModel):
 | `input_schema` | `dict[str, Any]` | required | JSON Schema for inputs |
 | `fn` | `Callable[..., str]` | required | Callable that executes the tool |
 | `input_model` | `type[BaseModel] \| None` | `None` | Optional Pydantic model for validation |
+| `timeout` | `float \| None` | `None` | Per-call timeout on async tool callers (overrides `Agent(tool_timeout=...)`); sync tools run without one by design |
+| `defer_loading` | `bool` | `False` | Keep the schema out of the prompt until the auto-registered `search_tools` meta-tool loads it |
+| `input_examples` | `tuple[dict, ...]` | `()` | Example inputs forwarded to providers that support them (Anthropic) |
+| `requires_approval` | `bool` | `False` | Route every call through the [approval callback](#with_approval); fails closed without one |
 | `read_only` | `bool` | `False` | Declares the tool side-effect free: the async loop runs consecutive read-only calls concurrently; undeclared (write) tools run alone |
 | `max_result_tokens` | `int \| None` | `None` | Per-tool override of the agent's tool-result cap (`None` inherits `tool_result_max_tokens`) |
 
@@ -250,6 +510,179 @@ def add(a: int, b: int) -> str:
 def add_numbers(a: int, b: int) -> str:
     return str(a + b)
 ```
+
+---
+
+## Events
+
+`stream()`/`astream()` yield `AgentEvent` — a discriminated union (by the
+`type` literal) of frozen Pydantic models. Every event carries
+`parent_tool_call_id: str | None`: `None` for top-level events, the parent
+`task`/subagent tool call's id for events forwarded flat from a subagent.
+
+| Event | `type` | Fields | Meaning |
+|---|---|---|---|
+| `TurnStarted` | `"turn_started"` | — | Context built; rounds about to run |
+| `RoundStarted` | `"round_started"` | `round`, `max_rounds` | A model round is starting (0-based) |
+| `TextDelta` | `"text_delta"` | `text` | Incremental assistant text (the projection target of `chat`) |
+| `ToolStarted` | `"tool_started"` | `tool_call_id`, `name`, `tool_input` | A tool call is about to execute (a pre-hook may still rewrite the input) |
+| `ToolFinished` | `"tool_finished"` | `tool_call_id`, `name`, `result`, `is_error` | Tool call completed — tool failure is `is_error=True`, not an exception |
+| `CompactionStarted` | `"compaction_started"` | — | Client-side compaction is summarizing older messages (LLM call) |
+| `CompactionFinished` | `"compaction_finished"` | `tokens_before`, `tokens_after` | Compaction replaced the head with a summary |
+| `RoundFinished` | `"round_finished"` | `round`, `usage: RoundUsage` | A round completed, with its token accounting |
+| `UsageLimitReached` | `"usage_limit_reached"` | `kind`, `used`, `limit`, `scope` | A usage limit was crossed; the next round is the wrap-up round |
+| `TurnFinished` | `"turn_finished"` | `text`, `diagnostics: TurnDiagnostics`, `output` | Terminal event: final text, diagnostics, structured-output JSON |
+
+`UsageLimitReached.kind` is `"total_tokens" | "tool_calls" | "cost"` (for
+`"cost"`, `used`/`limit` are USD); `scope="run"` means the shared pool
+spanning subagents tripped, `scope="turn"` one agent's own per-turn limit.
+
+```python
+for event in agent.stream("Summarize the report"):
+    match event.type:
+        case "text_delta":
+            print(event.text, end="", flush=True)
+        case "tool_started":
+            print(f"\n[{event.name}...]")
+        case "turn_finished":
+            print(f"\n({event.diagnostics.total_tokens} tokens)")
+```
+
+---
+
+## UsageLimits
+
+```python
+class UsageLimits(BaseModel, frozen=True):
+    total_tokens_limit: int | None = None   # > 0
+    tool_calls_limit: int | None = None     # >= 0
+    cost_limit: float | None = None         # USD, > 0
+```
+
+Limits enforced by the agent loop, shared across subagents: the agent that
+starts a turn with limits creates a run-wide pool that every subagent
+spawned during it debits — the effective budget only ever narrows (a child
+may carry its own narrower per-turn limits on top). Crossing a limit grants
+one wrap-up round and stops with `stopped_by="usage_limit"`; no exception.
+Checks are post-hoc, so a run may overshoot by the rounds in flight plus
+the bounded wrap-up calls.
+
+`cost_limit` is priced per round from, in order: provider-reported billed
+cost (`claude_cli` sends it), the runtime-overridable
+`anchor.llm.pricing.MODEL_PRICING` table, and genai-prices
+(`pip install astro-anchor[pricing]`); an unpriced model warns once and
+debits $0 (its tokens still count).
+
+---
+
+## RoundUsage
+
+Per-round token accounting (frozen). Fields: `round`, `prompt_tokens`,
+`completion_tokens`, `tool_schema_tokens`, `tool_result_tokens`,
+`cache_creation_tokens`, `cache_read_tokens`, `tool_calls`, `cost_usd`,
+plus the `total_tokens` property (full input + output, as billed).
+`prompt_tokens`/`completion_tokens` come from provider-reported usage;
+when the provider reports none on the stream they are estimated with the
+agent's tokenizer. `tool_schema_tokens`/`tool_result_tokens` are
+visibility subsets of the prompt, never added on top of it.
+
+---
+
+## TurnDiagnostics
+
+Accounting and outcome for one full turn (frozen), available as
+`agent.last_turn` and on `TurnFinished.diagnostics`.
+
+| Member | Type | Description |
+|---|---|---|
+| `rounds` | `tuple[RoundUsage, ...]` | This agent's own model rounds |
+| `stopped_by` | `Literal["stop", "max_rounds", "max_tokens", "usage_limit", "output_missing", "stuck"]` | Why the turn ended |
+| `children` | `tuple[ChildTurn, ...]` | Subagent turns observed while this turn ran |
+| `total_prompt_tokens` / `total_completion_tokens` / `total_tool_result_tokens` / `total_tokens` / `total_tool_calls` / `total_cost_usd` | properties | Sums over `rounds` |
+| `run_total_tokens` / `run_total_tool_calls` / `run_total_cost_usd` | properties | This turn **plus every subagent turn under it**, recursively |
+
+`stopped_by` values: `"stop"` — the model finished; `"max_rounds"` — the
+round cap cut the turn; `"max_tokens"` — the provider cut the response;
+`"usage_limit"` — a `UsageLimits` breach ended the turn after wrap-up;
+`"output_missing"` — structured output never validated within
+`max_output_retries`; `"stuck"` — the loop detected identical repeated
+tool calls and ended the turn after a nudge and wrap-up.
+
+`ChildTurn` (frozen): `tool_call_id`, `name`, `diagnostics` — one entry
+per subagent turn; a child's own `stopped_by` makes partial results
+machine-visible, and a child that died mid-turn still appears with the
+accounting it accrued.
+
+---
+
+## SubagentDefinition
+
+```python
+class SubagentDefinition(BaseModel):
+    name: str
+    description: str
+    system_prompt: str = ""
+    model: str | None = None            # None inherits the orchestrator's provider
+    tools: tuple[AgentTool, ...] = ()
+    output_model: type[BaseModel] | None = None
+    max_rounds: int = 6
+    usage_limits: UsageLimits | None = None   # narrower per-turn limits; the run pool still applies
+```
+
+Declarative description of a subagent for
+[`with_subagents`](#with_subagents). Each definition becomes an isolated
+sub-`Agent` with a clean context; the model delegates via the
+`task(agent_name, task)` meta-tool.
+
+---
+
+## Hooks and approval
+
+### HookResult
+
+```python
+class HookResult(BaseModel, frozen=True):
+    decision: Literal["allow", "deny", "ask"] = "allow"
+    reason: str | None = None
+    updated_input: dict[str, Any] | None = None    # pre-hooks
+    updated_output: str | None = None              # post-hooks
+```
+
+Decision returned by a tool hook. `decision`/`reason` apply to pre-hooks
+only — the reason is fed back to the model on deny; `"ask"` routes the
+call to the approval callback. Hook signatures:
+`PreToolHook = (tool_name, tool_input) -> HookResult | None` and
+`PostToolHook = (tool_name, tool_input, output) -> HookResult | None`
+(`None` = allow unchanged).
+
+### ApprovalRequest / ApprovalDecision
+
+```python
+class ApprovalRequest(BaseModel, frozen=True):
+    tool_call_id: str
+    name: str
+    tool_input: dict[str, Any]
+
+class ApprovalDecision(BaseModel, frozen=True):
+    approved: bool
+    reason: str | None = None                     # fed back to the model on deny
+    updated_input: dict[str, Any] | None = None   # replaces the input on approve
+
+ApprovalCallback = Callable[[ApprovalRequest],
+                            ApprovalDecision | Awaitable[ApprovalDecision]]
+```
+
+The inline human-in-the-loop seam — see [`with_approval`](#with_approval).
+
+### AgentCallback
+
+Observer protocol for loop events; all methods are optional no-ops and
+exceptions are swallowed and logged: `on_round_start(round_index)`,
+`on_round_end(round_index)`, `on_tool_start(name, tool_input)`,
+`on_tool_end(name, tool_input, result)`,
+`on_tool_error(name, tool_input, error)`. Register with
+[`with_callbacks`](#with_callbacks); `TracingAgentCallback` (observability)
+implements it.
 
 ---
 
@@ -450,6 +883,8 @@ def rag_tools(
 
 - [Agent Guide](../guides/agent.md) -- usage guide with examples
 - [LLM Providers Guide](../guides/llm-providers.md) -- multi-provider setup and fallbacks
+- [MCP Guide](../guides/mcp.md) -- consuming and exposing MCP servers
 - [LLM API Reference](llm.md) -- provider protocol, models, and errors
+- [MCP API Reference](mcp.md) -- bridge classes and configuration
 - [Pipeline API Reference](../api/pipeline.md) -- underlying pipeline
 - [Protocols Reference](../api/protocols.md) -- extension point protocols
