@@ -333,7 +333,7 @@ class TestDeliveryMaps:
         from anchor.llm.providers.claude_cli import _canonical, _delivery_maps
 
         call = ToolCall(id="t1", name="get_weather", arguments={"city": "Tokyo"})
-        by_key, by_name = _delivery_maps(
+        by_key = _delivery_maps(
             [
                 Message(role=Role.ASSISTANT, tool_calls=[call]),
                 Message(
@@ -342,13 +342,12 @@ class TestDeliveryMaps:
                 ),
             ]
         )
-        assert by_key[("get_weather", _canonical({"city": "Tokyo"}))] == "25C"
-        assert by_name["get_weather"] == "25C"
+        assert by_key[("get_weather", _canonical({"city": "Tokyo"}))] == ("25C", False)
 
     def test_result_without_matching_call_is_ignored(self):
         from anchor.llm.providers.claude_cli import _delivery_maps
 
-        by_key, by_name = _delivery_maps(
+        by_key = _delivery_maps(
             [
                 Message(
                     role=Role.TOOL,
@@ -357,7 +356,6 @@ class TestDeliveryMaps:
             ]
         )
         assert by_key == {}
-        assert by_name == {}
 
     def test_canonical_is_key_order_independent(self):
         from anchor.llm.providers.claude_cli import _canonical
@@ -510,7 +508,10 @@ class TestToolBridge:
         out = asyncio.run(handler({"city": "Tokyo"}))
         assert out == {"content": [{"type": "text", "text": "25C"}]}
 
-    def test_handler_falls_back_to_name_when_args_drift(self, fake_sdk):
+    def test_drifted_args_are_deferred_not_served_stale(self, fake_sdk):
+        """Regression (2026-08-31 review): the name-only fallback served a
+        STALE result to a genuinely new call with different arguments —
+        the loop never saw the new call. Different args now defer."""
         provider = _make_provider()
         call = ToolCall(id="t1", name="get_weather", arguments={"city": "Tokyo"})
         messages = [
@@ -520,9 +521,35 @@ class TestToolBridge:
             ),
         ]
         options, _ = _options(provider, messages, [_weather_schema()])
+        hook = options.hooks["PreToolUse"][0].hooks[0]
+        out = asyncio.run(
+            hook(
+                {"tool_name": "mcp__anchor__get_weather", "tool_input": {"city": "Paris"}},
+                "t2",
+                None,
+            )
+        )
+        assert out["hookSpecificOutput"]["permissionDecision"] == "defer"
+
+    def test_error_result_replays_with_is_error(self, fake_sdk):
+        """Regression (2026-08-31 review): a failed ToolResult replayed
+        success-shaped, hiding the error signal from the CLI model."""
+        provider = _make_provider()
+        call = ToolCall(id="t1", name="get_weather", arguments={"city": "Tokyo"})
+        messages = [
+            Message(role=Role.ASSISTANT, tool_calls=[call]),
+            Message(
+                role=Role.TOOL,
+                tool_result=ToolResult(
+                    tool_call_id="t1", content="boom", is_error=True
+                ),
+            ),
+        ]
+        options, _ = _options(provider, messages, [_weather_schema()])
         handler = options.mcp_servers["anchor"]["tools"][0].handler
-        out = asyncio.run(handler({"city": "tokyo"}))
-        assert out["content"][0]["text"] == "25C"
+        out = asyncio.run(handler({"city": "Tokyo"}))
+        assert out["isError"] is True
+        assert out["content"][0]["text"] == "boom"
 
     def test_each_tool_keeps_its_own_handler(self, fake_sdk):
         provider = _make_provider()

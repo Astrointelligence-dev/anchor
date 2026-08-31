@@ -127,8 +127,6 @@ def _estimate_cost(
     An unknown model logs one warning and prices at 0.0 — never raises
     mid-turn (the usage-limit contract), never silently either.
     """
-    if model_id in _PRICE_WARNED:
-        return 0.0
     from anchor.llm.pricing import estimate_round_cost
 
     cost = estimate_round_cost(
@@ -139,12 +137,16 @@ def _estimate_cost(
         cache_read_tokens=cache_read_tokens,
     )
     if cost is None:
-        _PRICE_WARNED.add(model_id)
-        logger.warning(
-            "cost_limit: no price data for model '%s' — its rounds "
-            "debit $0 (tokens still count)",
-            model_id,
-        )
+        # The memo only deduplicates the warning — the table is consulted
+        # every round, so a runtime MODEL_PRICING override for a model
+        # that already missed once starts pricing immediately.
+        if model_id not in _PRICE_WARNED:
+            _PRICE_WARNED.add(model_id)
+            logger.warning(
+                "cost_limit: no price data for model '%s' — its rounds "
+                "debit $0 (tokens still count)",
+                model_id,
+            )
         return 0.0
     return cost
 
@@ -372,6 +374,9 @@ class Agent:
                 or (t.name == "search_tools" and self._search_tool is not None)
                 or (t.name == "final_result" and self._output_tool is not None)
                 or (t.name == "memory" and self._memory_tool is not None)
+                or (t.name == "activate_skill" and self._activate_tool is not None)
+                or (t.name == "read_skill_file" and self._read_file_tool is not None)
+                or (t.name == "run_skill_script" and self._script_tool is not None)
             ):
                 msg = (
                     f"Tool name collision: '{t.name}' is already registered "
@@ -785,15 +790,30 @@ class Agent:
         and at least one bundled script.
         """
         registry = self._skill_registry
+
+        def _guard(name: str) -> None:
+            # Same loud-at-registration contract as the MCP bridge: two
+            # schemas with one name would reach the provider and
+            # first-match execution would shadow the meta-tool silently.
+            if any(t.name == name for t in self._all_active_tools()):
+                msg = (
+                    f"Tool name collision: '{name}' is reserved for a "
+                    "skill meta-tool"
+                )
+                raise ValueError(msg)
+
         if registry.on_demand_skills() and self._activate_tool is None:
+            _guard("activate_skill")
             self._activate_tool = _make_activate_skill_tool(registry)
 
         has_paths = any(s.path is not None for s in registry.all_skills())
         if has_paths and self._read_file_tool is None:
+            _guard("read_skill_file")
             self._read_file_tool = _make_read_skill_file_tool(registry)
 
         has_scripts = any(s.script_files() for s in registry.all_skills())
         if self._allow_skill_scripts and has_scripts and self._script_tool is None:
+            _guard("run_skill_script")
             self._script_tool = _make_run_skill_script_tool(registry)
 
     def _system_suffix(self) -> str:
@@ -1989,8 +2009,9 @@ class Agent:
             return None
         split = len(messages) - self._compaction_keep
         # Never sever a tool_use/tool_result pair: pull the split left
-        # so the kept tail starts at a non-TOOL message.
-        while split > 0 and messages[split].role == Role.TOOL:
+        # so the kept tail starts at a non-TOOL message. (split can equal
+        # len(messages) when keep_last=0 — everything is summarized.)
+        while 0 < split < len(messages) and messages[split].role == Role.TOOL:
             split -= 1
         if split <= 0:
             return None
@@ -2268,9 +2289,13 @@ class Agent:
         each call completes. :meth:`achat` is the text-only projection
         of this stream.
         """
+        # MCP connect runs BEFORE the message is persisted: a connect
+        # failure aborts the turn, and a retry would otherwise find the
+        # message duplicated in conversation memory (stream() orders its
+        # MCP guard the same way).
+        await self._ensure_mcp()
         if self._memory is not None:
             self._memory.add_user_message(message)
-        await self._ensure_mcp()
 
         self._reset_turn_state()
         messages, full_system = self._prepare_turn(

@@ -141,11 +141,18 @@ def _flatten(messages: list[Message]) -> tuple[str | None, str]:
 
 def _delivery_maps(
     messages: list[Message],
-) -> tuple[dict[tuple[str, str], str], dict[str, str]]:
-    """Pair executed tool calls with their results so a replay resolves locally."""
+) -> dict[tuple[str, str], tuple[str, bool]]:
+    """Pair executed tool calls with their results so a replay resolves locally.
+
+    Keyed strictly by ``(name, canonical_args)`` — a name-only fallback
+    used to serve a *stale* result to a genuinely new call with different
+    arguments (the model reasoned over another call's data and the loop
+    never saw the new call). A replay whose arguments drifted now defers
+    back to the loop and re-executes: different args are a different call.
+    The value carries ``is_error`` so failed results replay as failures.
+    """
     calls: dict[str, tuple[str, str]] = {}
-    by_key: dict[tuple[str, str], str] = {}
-    by_name: dict[str, str] = {}
+    by_key: dict[tuple[str, str], tuple[str, bool]] = {}
 
     for msg in messages:
         for call in msg.tool_calls or ():
@@ -153,9 +160,8 @@ def _delivery_maps(
         result = msg.tool_result
         if result is not None and result.tool_call_id in calls:
             name, args = calls[result.tool_call_id]
-            by_key[(name, args)] = result.content
-            by_name[name] = result.content
-    return by_key, by_name
+            by_key[(name, args)] = (result.content, result.is_error)
+    return by_key
 
 
 # ---------------------------------------------------------------------------
@@ -262,14 +268,23 @@ class ClaudeCLIProvider(BaseLLMProvider):
         sdk: Any,
         schemas: list[ToolSchema],
         by_key: dict[tuple[str, str], str],
-        by_name: dict[str, str],
     ) -> list[Any]:
         """Wrap caller schemas as SDK MCP tools that deliver stored results."""
 
         def make_handler(name: str) -> Any:
             async def handler(args: dict[str, Any]) -> dict[str, Any]:
-                text = by_key.get((name, _canonical(args)), by_name.get(name, ""))
-                return {"content": [{"type": "text", "text": text}]}
+                text, is_error = by_key.get(
+                    (name, _canonical(args)), ("", False),
+                )
+                result: dict[str, Any] = {
+                    "content": [{"type": "text", "text": text}],
+                }
+                if is_error:
+                    # The stored ToolResult failed — replaying it
+                    # success-shaped would hide the error signal from
+                    # the CLI model.
+                    result["isError"] = True
+                return result
 
             return handler
 
@@ -281,17 +296,21 @@ class ClaudeCLIProvider(BaseLLMProvider):
     def _defer_hooks(
         self,
         sdk: Any,
-        by_key: dict[tuple[str, str], str],
-        by_name: dict[str, str],
+        by_key: dict[tuple[str, str], tuple[str, bool]],
     ) -> dict[str, Any]:
-        """Defer caller tools back to Anchor; allow the ones we can answer."""
+        """Defer caller tools back to Anchor; allow the ones we can answer.
+
+        Only an exact ``(name, canonical_args)`` hit resolves locally —
+        any other call (new arguments included) defers to the loop, which
+        executes it for real. See :func:`_delivery_maps`.
+        """
 
         async def defer_hook(
             input_data: dict[str, Any], tool_use_id: str | None, context: Any
         ) -> dict[str, Any]:
             name = _strip_namespace(str(input_data.get("tool_name", "")))
             args = input_data.get("tool_input") or {}
-            if (name, _canonical(args)) in by_key or name in by_name:
+            if (name, _canonical(args)) in by_key:
                 return {}  # allow — the handler returns the caller's result
             return _DEFER
 
@@ -333,16 +352,16 @@ class ClaudeCLIProvider(BaseLLMProvider):
         if isinstance(self._builtin_tools, list):
             allowed += list(self._builtin_tools)
         if tools:
-            by_key, by_name = _delivery_maps(messages)
+            by_key = _delivery_maps(messages)
             options.mcp_servers = {
                 MCP_SERVER_NAME: sdk.create_sdk_mcp_server(
                     name=MCP_SERVER_NAME,
                     version="1.0.0",
-                    tools=self._sdk_tools(sdk, tools, by_key, by_name),
+                    tools=self._sdk_tools(sdk, tools, by_key),
                 )
             }
             allowed += [f"{MCP_TOOL_PREFIX}{s.name}" for s in tools]
-            options.hooks = self._defer_hooks(sdk, by_key, by_name)
+            options.hooks = self._defer_hooks(sdk, by_key)
         if allowed:
             options.allowed_tools = allowed
         if self._permission_mode:

@@ -68,9 +68,9 @@ class RetrievalMetricsCalculator:
         f1 = self._f1(precision, recall)
         mrr = self._mrr(top_k, relevant_set)
         ndcg = (
-            self._graded_ndcg(top_k, grades)
+            self._graded_ndcg(top_k, grades, effective_k)
             if grades is not None
-            else self._ndcg(top_k, relevant_set)
+            else self._ndcg(top_k, relevant_set, effective_k)
         )
         hit = self._hit_rate(top_k, relevant_set)
 
@@ -119,8 +119,15 @@ class RetrievalMetricsCalculator:
         return 0.0
 
     @staticmethod
-    def _ndcg(top_k: list[ContextItem], relevant: set[str]) -> float:
-        """Normalized Discounted Cumulative Gain (binary relevance)."""
+    def _ndcg(top_k: list[ContextItem], relevant: set[str], k: int) -> float:
+        """Normalized Discounted Cumulative Gain (binary relevance).
+
+        The ideal ranking is truncated at ``k`` (the metric's cutoff),
+        NOT at ``len(top_k)`` — a retriever returning fewer than k items
+        would otherwise be graded against a shrunken ideal and score an
+        inflated NDCG (a broken retriever returning only its 2 relevant
+        hits scored 1.0 at k=10).
+        """
         if not relevant or not top_k:
             return 0.0
 
@@ -131,7 +138,7 @@ class RetrievalMetricsCalculator:
                 dcg += 1.0 / math.log2(rank + 1)
 
         # Ideal DCG: best possible ranking (all relevant items first)
-        ideal_hits = min(len(relevant), len(top_k))
+        ideal_hits = min(len(relevant), k)
         idcg = sum(1.0 / math.log2(r + 1) for r in range(1, ideal_hits + 1))
 
         if idcg == 0.0:
@@ -139,8 +146,13 @@ class RetrievalMetricsCalculator:
         return dcg / idcg
 
     @staticmethod
-    def _graded_ndcg(top_k: list[ContextItem], grades: dict[str, float]) -> float:
-        """NDCG with graded relevance: gain = 2^grade - 1."""
+    def _graded_ndcg(
+        top_k: list[ContextItem], grades: dict[str, float], k: int,
+    ) -> float:
+        """NDCG with graded relevance: gain = 2^grade - 1.
+
+        The ideal ranking is truncated at ``k`` (see :meth:`_ndcg`).
+        """
         if not grades or not top_k:
             return 0.0
 
@@ -150,7 +162,7 @@ class RetrievalMetricsCalculator:
             if grade > 0:
                 dcg += (2.0**grade - 1.0) / math.log2(rank + 1)
 
-        ideal = sorted(grades.values(), reverse=True)[: len(top_k)]
+        ideal = sorted(grades.values(), reverse=True)[:k]
         idcg = sum(
             (2.0**grade - 1.0) / math.log2(rank + 1)
             for rank, grade in enumerate(ideal, start=1)
