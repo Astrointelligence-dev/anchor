@@ -56,12 +56,14 @@ Consequências aplicadas:
 - [x] Suíte final 2871 verdes; ruff/mypy = baseline; push da sessão
 - [x] Obsidian (repo note + daily) + Review section aqui
 
-## Pendências que o Arthur precisa fazer (1 min cada)
+## Pendências que o Arthur precisa fazer
 
-- **PyPI trusted publisher** (antes da primeira tag): projeto
-  `astro-anchor` → Publishing → owner `Astrointelligence-dev` (o repo
-  foi transferido; artcgranja/anchor é redirect e o OIDC declara o nome
-  canônico), repo `anchor`, workflow `release.yml`, environment `pypi`.
+- [x] **PyPI trusted publisher** — habilitado em 2026-08-31:
+  `Astrointelligence-dev/anchor` + `release.yml` + environment `pypi`
+  (verificado por screenshot da UI do PyPI). O pipeline de release está
+  armado de ponta a ponta; a primeira tag `v*` publica sozinha.
+  Opcional ainda aberto: required reviewer no environment `pypi` do
+  GitHub para aprovação manual antes de cada publish.
 
 ## O que resta para o deploy da 0.2.0 (depois desta sessão)
 
