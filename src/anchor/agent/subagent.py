@@ -18,13 +18,14 @@ meta-tool dispatching by name, mirroring ``activate_skill``).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from anchor._text import strip_markdown_fences
-from anchor.agent.events import TurnFinished, _forward
+from anchor.agent.events import RoundStarted, TextDelta, TurnFinished, _forward
 from anchor.agent.models import _USAGE_POOL, AgentTool, UsageLimits
 from anchor.agent.tool_decorator import tool
 
@@ -118,45 +119,71 @@ def _task_prompt(task: str, output_model: type[BaseModel] | None) -> str:
     return f"{task}{_schema_instruction(output_model)}"
 
 
-def _one_turn_sync(sub: Agent, prompt: str) -> tuple[str, str]:
+def _one_turn_sync(sub: Agent, prompt: str) -> tuple[str, str, str]:
     """One child turn: forward events to the parent's sink.
 
-    Returns ``(text, stopped_by)`` — the verdict makes a usage-limit
-    cut machine-visible to the runner. A turn that dies mid-flight
-    (provider error, cancellation) still forwards its accounting: the
-    child's rounds were debited to the pool, so the parent's
-    ``children`` aggregation must see them too.
+    Returns ``(text, last_text, stopped_by)``: ``text`` is the full turn
+    text (the tool result the orchestrator sees), ``last_text`` the last
+    non-empty round's text — the one structured output validates, since
+    ``text`` accumulates every round and narration in a tool round would
+    fail a schema-valid final reply. The verdict makes a usage-limit cut
+    machine-visible. A turn that dies mid-flight still forwards its
+    accounting — but only when THIS turn actually started (comparing
+    against the previous ``last_turn`` identity), or a pre-start failure
+    would replay the previous turn's diagnostics as a phantom ChildTurn.
     """
     text = ""
+    round_text = ""
+    last_text = ""
     stopped_by = "stop"
+    prev_turn = sub.last_turn
     try:
         for event in sub.stream(prompt):
             _forward(event)
-            if isinstance(event, TurnFinished):
+            if isinstance(event, RoundStarted):
+                if round_text:
+                    last_text = round_text
+                round_text = ""
+            elif isinstance(event, TextDelta):
+                round_text += event.text
+            elif isinstance(event, TurnFinished):
+                if round_text:
+                    last_text = round_text
                 text = event.text
                 stopped_by = event.diagnostics.stopped_by
     except BaseException:
-        if sub.last_turn is not None:
+        if sub.last_turn is not None and sub.last_turn is not prev_turn:
             _forward(TurnFinished(text="", diagnostics=sub.last_turn))
         raise
-    return text, stopped_by
+    return text, last_text or text, stopped_by
 
 
-async def _one_turn_async(sub: Agent, prompt: str) -> tuple[str, str]:
+async def _one_turn_async(sub: Agent, prompt: str) -> tuple[str, str, str]:
     """Async mirror of :func:`_one_turn_sync`."""
     text = ""
+    round_text = ""
+    last_text = ""
     stopped_by = "stop"
+    prev_turn = sub.last_turn
     try:
         async for event in sub.astream(prompt):
             _forward(event)
-            if isinstance(event, TurnFinished):
+            if isinstance(event, RoundStarted):
+                if round_text:
+                    last_text = round_text
+                round_text = ""
+            elif isinstance(event, TextDelta):
+                round_text += event.text
+            elif isinstance(event, TurnFinished):
+                if round_text:
+                    last_text = round_text
                 text = event.text
                 stopped_by = event.diagnostics.stopped_by
     except BaseException:
-        if sub.last_turn is not None:
+        if sub.last_turn is not None and sub.last_turn is not prev_turn:
             _forward(TurnFinished(text="", diagnostics=sub.last_turn))
         raise
-    return text, stopped_by
+    return text, last_text or text, stopped_by
 
 
 # Appended to a plain-text child result the loop cut early — a usage
@@ -200,16 +227,20 @@ def _run_sync(
     output_model: type[BaseModel] | None,
     max_output_retries: int,
 ) -> str:
-    text, stopped_by = _one_turn_sync(sub, _task_prompt(task, output_model))
+    text, last_text, stopped_by = _one_turn_sync(
+        sub, _task_prompt(task, output_model),
+    )
     if output_model is None:
         return _partial(text, stopped_by)
-    normalized, err = _validate_output(text, output_model)
+    normalized, err = _validate_output(last_text, output_model)
     for _ in range(max_output_retries):
         if err is None:
             break
         _guard_retry_budget(err)
-        text, _ = _one_turn_sync(sub, _retry_prompt(text, err, output_model))
-        normalized, err = _validate_output(text, output_model)
+        text, last_text, _ = _one_turn_sync(
+            sub, _retry_prompt(last_text, err, output_model),
+        )
+        normalized, err = _validate_output(last_text, output_model)
     if err is not None or normalized is None:
         msg = f"subagent output failed schema validation: {err}"
         raise ValueError(msg)
@@ -222,19 +253,28 @@ async def _run_async(
     output_model: type[BaseModel] | None,
     max_output_retries: int,
 ) -> str:
-    text, stopped_by = await _one_turn_async(
-        sub, _task_prompt(task, output_model),
-    )
-    if output_model is None:
-        return _partial(text, stopped_by)
-    normalized, err = _validate_output(text, output_model)
-    for _ in range(max_output_retries):
-        if err is None:
-            break
-        _guard_retry_budget(err)
-        retry = _retry_prompt(text, err, output_model)
-        text, _ = await _one_turn_async(sub, retry)
-        normalized, err = _validate_output(text, output_model)
+    # Serialize turns on this child: the async scheduler can dispatch two
+    # parallel calls to the same subagent, and a shared Agent instance
+    # cannot run two turns at once (per-turn state cross-wipes, the pool
+    # slot disarms for the sibling, outputs cross-attribute). Different
+    # children still run concurrently.
+    lock = sub._turn_lock
+    if lock is None:
+        lock = sub._turn_lock = asyncio.Lock()
+    async with lock:
+        text, last_text, stopped_by = await _one_turn_async(
+            sub, _task_prompt(task, output_model),
+        )
+        if output_model is None:
+            return _partial(text, stopped_by)
+        normalized, err = _validate_output(last_text, output_model)
+        for _ in range(max_output_retries):
+            if err is None:
+                break
+            _guard_retry_budget(err)
+            retry = _retry_prompt(last_text, err, output_model)
+            text, last_text, _ = await _one_turn_async(sub, retry)
+            normalized, err = _validate_output(last_text, output_model)
     if err is not None or normalized is None:
         msg = f"subagent output failed schema validation: {err}"
         raise ValueError(msg)

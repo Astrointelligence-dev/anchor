@@ -117,6 +117,191 @@ class TestAstreamMemoryOrder:
         memory.add_user_message.assert_not_called()
 
 
+class TestSubagentLastRoundValidation:
+    """Finding 8: structured output validated the text accumulated across
+    ALL rounds — narration in a tool round glued onto the final JSON and
+    burned retries even when every final reply was schema-valid."""
+
+    def test_narrating_tool_round_does_not_break_validation(self):
+        import json as _json
+
+        from anchor.llm.models import StopReason, StreamChunk, ToolCallDelta
+        from pydantic import BaseModel
+        from tests.test_agent.test_agent import (
+            _Tok,
+            _text_response,
+            _tool_use_response,
+        )
+
+        class Answer(BaseModel):
+            answer: str
+
+        narrate_then_tool = [
+            StreamChunk(content="Let me check. "),
+            StreamChunk(tool_call_delta=ToolCallDelta(
+                index=0, id="tc1", name="lookup",
+            )),
+            StreamChunk(tool_call_delta=ToolCallDelta(
+                index=0, arguments_fragment=_json.dumps({}),
+            )),
+            StreamChunk(stop_reason=StopReason.TOOL_USE),
+        ]
+        sub_provider = FakeLLMProvider([
+            narrate_then_tool,
+            _text_response('{"answer": "42"}'),
+        ])
+        sub = Agent(llm=sub_provider, tokenizer=_Tok())
+        sub.with_tools([_plain_tool("lookup")])
+
+        orch_provider = FakeLLMProvider([
+            _tool_use_response("tu_1", "researcher", {"task": "answer"}),
+            _text_response("done"),
+        ])
+        orch = Agent(llm=orch_provider, tokenizer=_Tok())
+        orch.with_tools([
+            sub.as_tool("researcher", "d", output_model=Answer),
+        ])
+
+        assert "".join(orch.chat("Go")) == "done"
+        # Exactly 2 child calls: narration + final JSON, NO retry burned.
+        assert len(sub_provider.seen_messages) == 2
+        from tests.test_agent.test_phase4_loop import _tool_results_of
+        (result,) = _tool_results_of(orch_provider, 1)
+        assert result.is_error is False
+        assert _json.loads(result.content) == {"answer": "42"}
+
+
+class TestNoPhantomChildTurn:
+    """Finding 2: a child failing BEFORE its turn started forwarded the
+    previous turn's diagnostics as a duplicate ChildTurn."""
+
+    def test_pre_start_failure_does_not_replay_old_diagnostics(self):
+        from tests.test_agent.test_agent import (
+            _Tok,
+            _text_response,
+            _tool_use_response,
+        )
+
+        sub_provider = FakeLLMProvider([_text_response("42")])
+        sub = Agent(llm=sub_provider, tokenizer=_Tok())
+
+        orch_provider = FakeLLMProvider([
+            _tool_use_response("tu_1", "researcher", {"task": "a"}),
+            _text_response("first done"),
+            _tool_use_response("tu_2", "researcher", {"task": "b"}),
+            _text_response("second done"),
+        ])
+        orch = Agent(llm=orch_provider, tokenizer=_Tok())
+        orch.with_tools([sub.as_tool("researcher", "d")])
+
+        assert "".join(orch.chat("Go")) == "first done"
+        assert len(orch.last_turn.children) == 1
+
+        # Make the child fail BEFORE _reset_turn_state: the sync MCP
+        # guard raises at the top of stream().
+        sub._mcp_configs.append("http://unreachable.example/mcp")
+        assert "".join(orch.chat("Again")) == "second done"
+        # Pre-fix: turn 1's diagnostics reappeared as a phantom child.
+        assert orch.last_turn.children == ()
+
+
+class TestSameChildSerialization:
+    """Finding 1: two parallel task calls to the same child ran two
+    turns concurrently on one Agent instance (pool disarm, output
+    cross-talk). The runner now serializes per child."""
+
+    @pytest.mark.asyncio
+    async def test_parallel_same_child_calls_serialize(self):
+        from tests.test_agent.test_agent import _Tok, _text_response
+        from tests.test_agent.test_phase4_loop import (
+            _multi_tool_use_response,
+            _tool_results_of,
+        )
+
+        sub_provider = FakeLLMProvider([
+            _text_response("answer-A"),
+            _text_response("answer-B"),
+        ])
+        sub = Agent(llm=sub_provider, tokenizer=_Tok())
+
+        orch_provider = FakeLLMProvider([
+            _multi_tool_use_response([
+                ("tu_1", "researcher", {"task": "a"}),
+                ("tu_2", "researcher", {"task": "b"}),
+            ]),
+            _text_response("done"),
+        ])
+        orch = Agent(llm=orch_provider, tokenizer=_Tok())
+        orch.with_tools([sub.as_tool("researcher", "d")])
+
+        text = ""
+        async for chunk in orch.achat("Go"):
+            text += chunk
+        assert text == "done"
+
+        # The serialization lock was armed on the shared child (pre-fix:
+        # the attribute did not exist), and both calls completed with
+        # their own results in order.
+        assert sub._turn_lock is not None
+        results = _tool_results_of(orch_provider, 1)
+        contents = {r.content for r in results}
+        assert contents == {"answer-A", "answer-B"}
+        assert len(orch.last_turn.children) == 2
+
+
+class TestRetrySeesOwnReply:
+    """Finding 9: a plain-text stop with structured output pending
+    appended only the nudge — the retry ran without the model's own
+    last answer in context, as consecutive user-role messages."""
+
+    def test_nudge_round_carries_assistant_reply(self):
+        from pydantic import BaseModel
+
+        from tests.test_agent.test_agent import (
+            _Tok,
+            _text_response,
+            _tool_use_response,
+        )
+
+        class Answer(BaseModel):
+            answer: str
+
+        provider = FakeLLMProvider([
+            _text_response("I think it is 42."),   # plain text, no tool
+            _tool_use_response("tu_1", "final_result", {"answer": "42"}),
+        ])
+        agent = Agent(llm=provider, tokenizer=_Tok())
+        agent.with_output_model(Answer)
+
+        result = agent.run("Question?")
+        assert result.answer == "42"
+
+        retry_messages = provider.seen_messages[1]
+        roles = [m.role for m in retry_messages]
+        # The model's own reply precedes the nudge — no user/user pair.
+        assistant_texts = [
+            str(m.content) for m in retry_messages
+            if m.role == Role.ASSISTANT
+        ]
+        assert any("I think it is 42." in t for t in assistant_texts)
+        assert [r for r in roles[-2:]] != [Role.USER, Role.USER]
+
+
+class TestAgentEnablesPromptCaching:
+    """Finding 10 (minimal leg): the Agent never enabled provider
+    prompt caching — no cache_control ever reached the wire."""
+
+    def test_create_provider_receives_prompt_caching(self):
+        from unittest.mock import MagicMock, patch
+
+        with patch(
+            "anchor.agent.agent.create_provider",
+            return_value=MagicMock(),
+        ) as cp:
+            Agent(model="claude-test")
+        assert cp.call_args.kwargs.get("prompt_caching") is True
+
+
 class TestPriceMemoDoesNotShadowOverrides:
     """Finding 42: the unknown-model memo was consulted BEFORE the price
     table — a runtime MODEL_PRICING override never took effect."""

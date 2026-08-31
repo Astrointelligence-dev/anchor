@@ -273,6 +273,7 @@ class Agent:
         "_tool_result_max_tokens",
         "_tool_timeout",
         "_tools",
+        "_turn_lock",
         "_usage_limits",
     )
 
@@ -300,12 +301,23 @@ class Agent:
         if llm is not None:
             self._llm: LLMProvider = llm
         else:
-            self._llm = create_provider(model, api_key=api_key, fallbacks=fallbacks)
+            # prompt_caching reaches only providers that understand it
+            # (Anthropic today; the base swallows it elsewhere). The tool
+            # loop re-sends a stable prefix every round — exactly the
+            # case server-side caching pays for. Opt out by passing your
+            # own ``llm=AnthropicProvider(prompt_caching=False)``.
+            self._llm = create_provider(
+                model, api_key=api_key, fallbacks=fallbacks,
+                prompt_caching=True,
+            )
 
         self._max_response_tokens = max_response_tokens
         self._max_rounds = max_rounds
         self._system_prompt = ""
         self._tools: list[AgentTool] = []
+        # Serializes turns when this agent runs as a shared subagent —
+        # created lazily by the subagent runner (event-loop bound).
+        self._turn_lock: asyncio.Lock | None = None
         self._memory: MemoryManager | None = None
         self._last_result: ContextResult | None = None
         self._last_turn: TurnDiagnostics | None = None
@@ -2148,6 +2160,7 @@ class Agent:
         *,
         run_tools: bool,
         stopped_by: str,
+        assistant_text: str = "",
     ) -> tuple[bool, str]:
         """Post-round control: ``(stop_loop, stopped_by)``.
 
@@ -2177,6 +2190,14 @@ class Agent:
                 self._output_failures += 1
                 if self._output_failures > self._max_output_retries:
                     return True, "output_missing"
+                if assistant_text:
+                    # Only the tool phase appends the assistant reply; a
+                    # no-tools round must add it here or the retry runs
+                    # blind to its own last answer and the request
+                    # carries consecutive user-role messages.
+                    messages.append(Message(
+                        role=Role.ASSISTANT, content=assistant_text,
+                    ))
                 messages.append(Message(
                     role=Role.USER,
                     content=(
@@ -2258,6 +2279,7 @@ class Agent:
                 yield RoundFinished(round=round_index, usage=usage)
                 stop_loop, stopped_by = self._round_verdict(
                     messages, run_tools=run_tools, stopped_by=stopped_by,
+                    assistant_text=state.text,
                 )
                 if stop_loop:
                     break
@@ -2346,6 +2368,7 @@ class Agent:
                 yield RoundFinished(round=round_index, usage=usage)
                 stop_loop, stopped_by = self._round_verdict(
                     messages, run_tools=run_tools, stopped_by=stopped_by,
+                    assistant_text=state.text,
                 )
                 if stop_loop:
                     break
