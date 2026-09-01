@@ -9,6 +9,13 @@ import struct
 from typing import TYPE_CHECKING, Any
 
 from anchor._math import cosine_similarity
+from anchor.models.scope import (
+    DEFAULT_VAULT,
+    ROOT_NAMESPACE,
+    RetrievalScope,
+    normalize_namespace,
+)
+from anchor.storage._where import scope_sql_clauses, sql_where_clauses
 
 if TYPE_CHECKING:
     from anchor.storage.sqlite._connection import SqliteConnectionManager
@@ -32,20 +39,31 @@ def _unpack_embedding(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{len(blob) // 4}f", blob))
 
 
-def _build_search_query(where: dict[str, Any] | None) -> tuple[str, list[Any]]:
-    """Build the embeddings SELECT with optional metadata equality filters.
+def _meta_expr(key: str) -> tuple[str, list[Any]]:
+    return "json_extract(metadata_json, ?)", [f"$.{key}"]
 
-    Filtering happens in SQL via ``json_extract`` so non-matching rows are
-    never unpacked or scored.
+
+def _build_search_query(
+    vault: str,
+    where: dict[str, Any] | None,
+    scope: RetrievalScope | None,
+) -> tuple[str, list[Any]]:
+    """Build the embeddings SELECT: vault bind + operators + scope ranges.
+
+    Filtering happens in SQL (``json_extract`` for metadata, boundary-aware
+    prefix ranges for the namespace column) so non-matching rows are never
+    unpacked or scored. Shared compiler: :mod:`anchor.storage._where`.
     """
-    sql = "SELECT item_id, embedding_blob FROM embeddings"
-    params: list[Any] = []
-    if where:
-        clauses = []
-        for key, value in where.items():
-            clauses.append("json_extract(metadata_json, ?) = ?")
-            params.extend([f"$.{key}", value])
-        sql += " WHERE " + " AND ".join(clauses)
+    sql = "SELECT item_id, embedding_blob FROM embeddings WHERE vault = ?"
+    params: list[Any] = [vault]
+    w_clauses, w_params = sql_where_clauses(where, _meta_expr)
+    if w_clauses:
+        sql += " AND " + " AND ".join(w_clauses)
+        params.extend(w_params)
+    s_clauses, s_params = scope_sql_clauses(scope, "namespace")
+    if s_clauses:
+        sql += " AND " + " AND ".join(s_clauses)
+        params.extend(s_params)
     return sql, params
 
 
@@ -60,24 +78,36 @@ class SqliteVectorStore:
     Implements the VectorStore protocol.
     """
 
-    __slots__ = ("_conn_manager",)
+    __slots__ = ("_conn_manager", "_vault")
 
-    def __init__(self, conn_manager: SqliteConnectionManager) -> None:
+    def __init__(
+        self, conn_manager: SqliteConnectionManager, *, vault: str = DEFAULT_VAULT,
+    ) -> None:
         self._conn_manager = conn_manager
+        self._vault = vault
+
+    @property
+    def vault(self) -> str:
+        return self._vault
 
     def add_embedding(
         self,
         item_id: str,
         embedding: list[float],
         metadata: dict[str, Any] | None = None,
+        *,
+        namespace: str = ROOT_NAMESPACE,
     ) -> None:
         blob = _pack_embedding(embedding)
         conn = self._conn_manager.get_connection()
         conn.execute(
             "INSERT OR REPLACE INTO embeddings "
-            "(item_id, embedding_blob, metadata_json) "
-            "VALUES (?, ?, ?)",
-            (item_id, blob, json.dumps(metadata or {})),
+            "(item_id, embedding_blob, metadata_json, vault, namespace) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                item_id, blob, json.dumps(metadata or {}),
+                self._vault, normalize_namespace(namespace),
+            ),
         )
         conn.commit()
 
@@ -86,9 +116,11 @@ class SqliteVectorStore:
         query_embedding: list[float],
         top_k: int = 10,
         where: dict[str, Any] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
     ) -> list[tuple[str, float]]:
         conn = self._conn_manager.get_connection()
-        sql, params = _build_search_query(where)
+        sql, params = _build_search_query(self._vault, where, scope)
         rows = conn.execute(sql, params).fetchall()
         if not rows:
             return []
@@ -103,7 +135,8 @@ class SqliteVectorStore:
     def delete(self, item_id: str) -> bool:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
-            "DELETE FROM embeddings WHERE item_id = ?", (item_id,)
+            "DELETE FROM embeddings WHERE item_id = ? AND vault = ?",
+            (item_id, self._vault),
         )
         conn.commit()
         return cursor.rowcount > 0
@@ -118,24 +151,36 @@ class AsyncSqliteVectorStore:
     Implements the AsyncVectorStore protocol.
     """
 
-    __slots__ = ("_conn_manager",)
+    __slots__ = ("_conn_manager", "_vault")
 
-    def __init__(self, conn_manager: SqliteConnectionManager) -> None:
+    def __init__(
+        self, conn_manager: SqliteConnectionManager, *, vault: str = DEFAULT_VAULT,
+    ) -> None:
         self._conn_manager = conn_manager
+        self._vault = vault
+
+    @property
+    def vault(self) -> str:
+        return self._vault
 
     async def add_embedding(
         self,
         item_id: str,
         embedding: list[float],
         metadata: dict[str, Any] | None = None,
+        *,
+        namespace: str = ROOT_NAMESPACE,
     ) -> None:
         blob = _pack_embedding(embedding)
         conn = await self._conn_manager.get_async_connection()
         await conn.execute(
             "INSERT OR REPLACE INTO embeddings "
-            "(item_id, embedding_blob, metadata_json) "
-            "VALUES (?, ?, ?)",
-            (item_id, blob, json.dumps(metadata or {})),
+            "(item_id, embedding_blob, metadata_json, vault, namespace) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                item_id, blob, json.dumps(metadata or {}),
+                self._vault, normalize_namespace(namespace),
+            ),
         )
         await conn.commit()
 
@@ -144,9 +189,11 @@ class AsyncSqliteVectorStore:
         query_embedding: list[float],
         top_k: int = 10,
         where: dict[str, Any] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
     ) -> list[tuple[str, float]]:
         conn = await self._conn_manager.get_async_connection()
-        sql, params = _build_search_query(where)
+        sql, params = _build_search_query(self._vault, where, scope)
         cursor = await conn.execute(sql, params)
         rows = await cursor.fetchall()
         if not rows:
@@ -162,7 +209,8 @@ class AsyncSqliteVectorStore:
     async def delete(self, item_id: str) -> bool:
         conn = await self._conn_manager.get_async_connection()
         cursor = await conn.execute(
-            "DELETE FROM embeddings WHERE item_id = ?", (item_id,)
+            "DELETE FROM embeddings WHERE item_id = ? AND vault = ?",
+            (item_id, self._vault),
         )
         await conn.commit()
         return cursor.rowcount > 0

@@ -10,19 +10,25 @@ if TYPE_CHECKING:
 
 _TABLES: list[str] = [
     """CREATE TABLE IF NOT EXISTS context_items (
-        id          TEXT PRIMARY KEY,
+        id          TEXT NOT NULL,
         content     TEXT NOT NULL,
         source      TEXT NOT NULL,
         score       REAL NOT NULL DEFAULT 0.0,
         priority    INTEGER NOT NULL DEFAULT 5,
         token_count INTEGER NOT NULL DEFAULT 0,
         metadata_json TEXT NOT NULL DEFAULT '{}',
-        created_at  TEXT NOT NULL
+        created_at  TEXT NOT NULL,
+        vault       TEXT NOT NULL DEFAULT '__default__',
+        namespace   TEXT NOT NULL DEFAULT '/',
+        PRIMARY KEY (vault, id)
     )""",
     """CREATE TABLE IF NOT EXISTS embeddings (
-        item_id       TEXT PRIMARY KEY,
+        item_id       TEXT NOT NULL,
         embedding_blob BLOB NOT NULL,
-        metadata_json  TEXT NOT NULL DEFAULT '{}'
+        metadata_json  TEXT NOT NULL DEFAULT '{}',
+        vault         TEXT NOT NULL DEFAULT '__default__',
+        namespace     TEXT NOT NULL DEFAULT '/',
+        PRIMARY KEY (vault, item_id)
     )""",
     """CREATE TABLE IF NOT EXISTS documents (
         doc_id        TEXT PRIMARY KEY,
@@ -50,6 +56,8 @@ _TABLES: list[str] = [
 ]
 
 _INDEXES: list[str] = [
+    "CREATE INDEX IF NOT EXISTS idx_context_items_scope ON context_items(vault, namespace)",
+    "CREATE INDEX IF NOT EXISTS idx_embeddings_scope ON embeddings(vault, namespace)",
     "CREATE INDEX IF NOT EXISTS idx_memory_entries_user_id ON memory_entries(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_memory_entries_session_id ON memory_entries(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_memory_entries_memory_type ON memory_entries(memory_type)",

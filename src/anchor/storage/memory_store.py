@@ -14,26 +14,48 @@ from typing import Any
 
 from anchor._math import cosine_similarity
 from anchor.models.context import ContextItem
+from anchor.models.scope import (
+    DEFAULT_VAULT,
+    ROOT_NAMESPACE,
+    RetrievalScope,
+    normalize_namespace,
+)
+from anchor.storage._where import matches_where
 
 logger = logging.getLogger(__name__)
 
 
 class InMemoryContextStore:
-    """Dict-backed context store. Implements ContextStore protocol."""
+    """Dict-backed context store. Implements ContextStore protocol.
 
-    __slots__ = ("_items", "_lock")
+    Bound to one vault at construction (front #3): items are stamped
+    with the store's vault on write, and only that vault is visible —
+    the mount is the isolation boundary, not the caller's queries.
+    """
 
-    def __init__(self) -> None:
+    __slots__ = ("_items", "_lock", "_vault")
+
+    def __init__(self, *, vault: str = DEFAULT_VAULT) -> None:
         self._items: dict[str, ContextItem] = {}
         self._lock = threading.Lock()
+        self._vault = vault
+
+    @property
+    def vault(self) -> str:
+        return self._vault
 
     def add(self, item: ContextItem) -> None:
+        if item.vault != self._vault:
+            item = item.model_copy(update={"vault": self._vault})
         with self._lock:
             self._items[item.id] = item
 
     def get(self, item_id: str) -> ContextItem | None:
         with self._lock:
-            return self._items.get(item_id)
+            item = self._items.get(item_id)
+        if item is None or item.vault != self._vault:
+            return None
+        return item
 
     def get_all(self) -> list[ContextItem]:
         with self._lock:
@@ -58,21 +80,40 @@ class InMemoryVectorStore:
     FAISS, Chroma, Qdrant, etc. via the VectorStore protocol.
     """
 
-    __slots__ = ("_embeddings", "_large_store_warned", "_lock", "_metadata")
+    __slots__ = (
+        "_embeddings",
+        "_large_store_warned",
+        "_lock",
+        "_metadata",
+        "_namespaces",
+        "_vault",
+    )
 
     _LARGE_STORE_THRESHOLD: int = 5000
 
-    def __init__(self) -> None:
+    def __init__(self, *, vault: str = DEFAULT_VAULT) -> None:
         self._embeddings: dict[str, list[float]] = {}
         self._metadata: dict[str, dict[str, Any]] = {}
+        self._namespaces: dict[str, str] = {}
         self._large_store_warned: bool = False
         self._lock = threading.Lock()
+        self._vault = vault
+
+    @property
+    def vault(self) -> str:
+        return self._vault
 
     def add_embedding(
-        self, item_id: str, embedding: list[float], metadata: dict[str, Any] | None = None
+        self,
+        item_id: str,
+        embedding: list[float],
+        metadata: dict[str, Any] | None = None,
+        *,
+        namespace: str = ROOT_NAMESPACE,
     ) -> None:
         with self._lock:
             self._embeddings[item_id] = embedding
+            self._namespaces[item_id] = normalize_namespace(namespace)
             if metadata:
                 self._metadata[item_id] = metadata
 
@@ -81,6 +122,8 @@ class InMemoryVectorStore:
         query_embedding: list[float],
         top_k: int = 10,
         where: dict[str, Any] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
     ) -> list[tuple[str, float]]:
         with self._lock:
             if not self._embeddings:
@@ -95,10 +138,14 @@ class InMemoryVectorStore:
                 self._large_store_warned = True
             results: list[tuple[str, float]] = []
             for item_id, emb in self._embeddings.items():
-                if where is not None:
-                    meta = self._metadata.get(item_id, {})
-                    if any(meta.get(k) != v for k, v in where.items()):
-                        continue
+                if scope is not None and not scope.matches(
+                    self._namespaces.get(item_id, ROOT_NAMESPACE)
+                ):
+                    continue
+                if where is not None and not matches_where(
+                    self._metadata.get(item_id, {}), where
+                ):
+                    continue
                 score = cosine_similarity(query_embedding, emb)
                 results.append((item_id, score))
             return heapq.nlargest(top_k, results, key=lambda x: x[1])
@@ -107,6 +154,7 @@ class InMemoryVectorStore:
         with self._lock:
             removed = self._embeddings.pop(item_id, None) is not None
             self._metadata.pop(item_id, None)
+            self._namespaces.pop(item_id, None)
             return removed
 
     @staticmethod

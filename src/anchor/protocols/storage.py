@@ -10,6 +10,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from anchor.models.context import ContextItem
 from anchor.models.memory import MemoryEntry
+from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
 
 
 @runtime_checkable
@@ -84,7 +85,12 @@ class VectorStore(Protocol):
     """
 
     def add_embedding(
-        self, item_id: str, embedding: list[float], metadata: dict[str, Any] | None = None
+        self,
+        item_id: str,
+        embedding: list[float],
+        metadata: dict[str, Any] | None = None,
+        *,
+        namespace: str = ROOT_NAMESPACE,
     ) -> None:
         """Store an embedding vector associated with an item id.
 
@@ -94,6 +100,8 @@ class VectorStore(Protocol):
             embedding: The dense vector representation of the item.
             metadata: Optional key-value metadata attached to the vector
                 entry (e.g., source filename, chunk index).
+            namespace: Hierarchical path the entry lives under inside the
+                store's vault (canonical form, e.g. ``/contratos/2026``).
 
         Side Effects:
             The embedding is persisted in the vector index.  If an entry
@@ -107,6 +115,8 @@ class VectorStore(Protocol):
         query_embedding: list[float],
         top_k: int = 10,
         where: dict[str, Any] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
     ) -> list[tuple[str, float]]:
         """Find the most similar embeddings to a query vector.
 
@@ -114,9 +124,16 @@ class VectorStore(Protocol):
             query_embedding: The dense vector to compare against stored
                 embeddings.
             top_k: Maximum number of results to return.
-            where: Optional metadata filter — only entries whose metadata
-                contains every ``key: value`` pair are considered
-                (pre-filtering, applied before top_k).
+            where: Optional metadata filter, PRE-applied before top_k.
+                Plain ``key: value`` pairs mean equality; a value may
+                instead be an operator dict —
+                ``{"year": {"$gte": 2024, "$lt": 2026}}`` — with the
+                operator core ``$eq $ne $in $nin $gt $gte $lt $lte``.
+                Unknown operators raise ``ValueError``.
+            scope: Optional namespace scope (include/exclude prefixes,
+                exclude wins), PRE-applied before top_k. The vault is
+                never part of the scope — stores are bound to their
+                vault at construction.
 
         Returns:
             A list of ``(item_id, score)`` tuples ordered by descending
@@ -335,13 +352,20 @@ class AsyncVectorStore(Protocol):
     """
 
     async def add_embedding(
-        self, item_id: str, embedding: list[float], metadata: dict[str, Any] | None = None
+        self,
+        item_id: str,
+        embedding: list[float],
+        metadata: dict[str, Any] | None = None,
+        *,
+        namespace: str = ROOT_NAMESPACE,
     ) -> None: ...
     async def search(
         self,
         query_embedding: list[float],
         top_k: int = 10,
         where: dict[str, Any] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
     ) -> list[tuple[str, float]]: ...
     async def delete(self, item_id: str) -> bool: ...
 

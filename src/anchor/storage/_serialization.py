@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from anchor.models.context import ContextItem, SourceType
+from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE
 from anchor.models.memory import MemoryEntry
 
 
@@ -21,6 +22,8 @@ def context_item_to_row(item: ContextItem) -> dict[str, Any]:
         "token_count": item.token_count,
         "metadata_json": json.dumps(item.metadata, default=str),
         "created_at": item.created_at.isoformat(),
+        "vault": item.vault,
+        "namespace": item.namespace,
     }
 
 
@@ -37,6 +40,8 @@ def row_to_context_item(row: dict[str, Any] | Any) -> ContextItem:
         token_count=r["token_count"],
         metadata=json.loads(r["metadata_json"]),
         created_at=datetime.fromisoformat(r["created_at"]),
+        vault=r.get("vault") or DEFAULT_VAULT,
+        namespace=r.get("namespace") or ROOT_NAMESPACE,
     )
 
 
