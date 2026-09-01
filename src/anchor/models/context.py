@@ -7,8 +7,10 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import TypedDict
+
+from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE, normalize_namespace
 
 
 class StepDiagnostic(TypedDict):
@@ -62,8 +64,28 @@ class ContextItem(BaseModel):
     token_count: int = Field(default=0, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    # Front #3: vault = mount the item lives in (hard boundary, stamped
+    # by the store layer); namespace = hierarchical path inside it.
+    vault: str = DEFAULT_VAULT
+    namespace: str = ROOT_NAMESPACE
 
     model_config = ConfigDict(frozen=True)
+
+    @field_validator("vault")
+    @classmethod
+    def _validate_vault(cls, v: str) -> str:
+        if not v.strip():
+            msg = "vault must not be empty"
+            raise ValueError(msg)
+        if "/" in v:
+            msg = "vault is a flat mount name — '/' belongs to namespaces"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("namespace")
+    @classmethod
+    def _validate_namespace(cls, ns: str) -> str:
+        return normalize_namespace(ns)
 
 
 class ContextWindow(BaseModel):

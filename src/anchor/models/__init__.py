@@ -12,8 +12,11 @@ from .context import (
 )
 from .memory import ConversationTurn, MemoryEntry, MemoryType, Role
 from .query import QueryBundle
+from .scope import DEFAULT_VAULT, ROOT_NAMESPACE, RetrievalScope
 
 __all__ = [
+    "DEFAULT_VAULT",
+    "ROOT_NAMESPACE",
     "BudgetAllocation",
     "ContextItem",
     "ContextResult",
@@ -24,6 +27,7 @@ __all__ = [
     "OverflowStrategy",
     "PipelineDiagnostics",
     "QueryBundle",
+    "RetrievalScope",
     "Role",
     "SourceType",
     "StepDiagnostic",
