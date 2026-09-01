@@ -103,7 +103,7 @@ def _make_embeddings(spec: str) -> Any:
     raise typer.Exit(code=1)
 
 
-def _open_context_store(db_path: Path) -> Any:
+def _open_context_store(db_path: Path, vault: str = "__default__") -> Any:
     from anchor.storage.sqlite import (
         SqliteConnectionManager,
         SqliteContextStore,
@@ -112,15 +112,17 @@ def _open_context_store(db_path: Path) -> Any:
 
     manager = SqliteConnectionManager(db_path)
     ensure_tables(manager.get_connection())
-    return SqliteContextStore(manager)
+    return SqliteContextStore(manager, vault=vault)
 
 
-def _open_vector_store(db_path: Path, dimensions: int) -> Any:
+def _open_vector_store(
+    db_path: Path, dimensions: int, vault: str = "__default__",
+) -> Any:
     """Prefer sqlite-vec (real KNN); fall back to the brute-force store."""
     try:
         from anchor.storage.sqlite import SqliteVecVectorStore
 
-        return SqliteVecVectorStore(db_path, dimensions=dimensions)
+        return SqliteVecVectorStore(db_path, dimensions=dimensions, vault=vault)
     except ImportError:
         from anchor.storage.sqlite import (
             SqliteConnectionManager,
@@ -134,7 +136,7 @@ def _open_vector_store(db_path: Path, dimensions: int) -> Any:
         )
         manager = SqliteConnectionManager(db_path)
         ensure_tables(manager.get_connection())
-        return SqliteVectorStore(manager)
+        return SqliteVectorStore(manager, vault=vault)
 
 
 @app.command()
@@ -150,8 +152,12 @@ def index(
         help="Embedding provider: none | openai[:model] | local[:model] | voyage[:model]",
     ),
     chunk_size: int = typer.Option(384, "--chunk-size", "-c", help="Chunk size in tokens"),
-    language: str = typer.Option(
-        "english", "--language", "-l", help="Snowball language for BM25 stemming"
+    vault: str = typer.Option(
+        "__default__", "--vault", help="Vault (hard isolation mount) to index into"
+    ),
+    namespace: str = typer.Option(
+        "/", "--namespace", "-n",
+        help="Namespace path to stamp on the ingested chunks (e.g. /contratos/2026)",
     ),
 ) -> None:
     """Ingest documents into a local index (chunks + optional dense vectors)."""
@@ -173,7 +179,12 @@ def index(
         console.print("[yellow]No content ingested.[/yellow]")
         raise typer.Exit(code=1)
 
-    context_store = _open_context_store(db)
+    from anchor.models.scope import normalize_namespace
+
+    ns = normalize_namespace(namespace)
+    items = [item.model_copy(update={"namespace": ns}) for item in items]
+
+    context_store = _open_context_store(db, vault)
     for item in items:
         context_store.add(item)
 
@@ -181,9 +192,11 @@ def index(
     if provider is not None:
         with console.status(f"Embedding {len(items)} chunks..."):
             vectors = provider.embed_documents([item.content for item in items])
-            vector_store = _open_vector_store(db, dimensions=len(vectors[0]))
+            vector_store = _open_vector_store(db, len(vectors[0]), vault)
             for item, vector in zip(items, vectors, strict=True):
-                vector_store.add_embedding(item.id, vector, item.metadata)
+                vector_store.add_embedding(
+                    item.id, vector, item.metadata, namespace=ns,
+                )
 
     table = Table(title=f"Indexed into {db}")
     table.add_column("Metric", style="cyan")
@@ -191,8 +204,49 @@ def index(
     table.add_row("Chunks", str(len(items)))
     table.add_row("Total tokens", str(sum(item.token_count for item in items)))
     table.add_row("Dense vectors", str(len(items)) if provider else "no (BM25 only)")
-    table.add_row("BM25 language", language)
+    table.add_row("Vault", vault)
+    table.add_row("Namespace", ns)
     console.print(table)
+
+
+@app.command()
+def migrate(
+    db: Path = typer.Option(  # noqa: B008 -- typer.Option() must be called in default
+        Path("anchor.db"), "--db", help="SQLite database file to migrate"
+    ),
+) -> None:
+    """Migrate a pre-vault index in place (adds vault/namespace scoping).
+
+    Idempotent: tables gain the scope columns with the ``__default__``
+    sentinel, and an old sqlite-vec index is rebuilt by copying the
+    embedding blobs (no re-embedding). ``anchor index`` runs the same
+    migration automatically; this command exists for explicit runs.
+    """
+    if not db.exists():
+        console.print(f"[red]No database at {db}.[/red]")
+        raise typer.Exit(code=1)
+
+    import re
+    import sqlite3
+
+    from anchor.storage.sqlite import SqliteConnectionManager, ensure_tables
+
+    manager = SqliteConnectionManager(db)
+    ensure_tables(manager.get_connection())
+
+    # If a sqlite-vec index exists, opening the store migrates its shape;
+    # the declared dimension is read back from the existing DDL.
+    row = sqlite3.connect(str(db)).execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'vec_index'"
+    ).fetchone()
+    if row and row[0]:
+        match = re.search(r"float\[(\d+)\]", row[0])
+        if match:
+            from anchor.storage.sqlite import SqliteVecVectorStore
+
+            SqliteVecVectorStore(db, dimensions=int(match.group(1))).close()
+
+    console.print(f"[green]{db} migrado (vault/namespace prontos).[/green]")
 
 
 @app.command()
@@ -211,6 +265,15 @@ def query(
     language: str = typer.Option(
         "english", "--language", "-l", help="Snowball language for BM25 stemming"
     ),
+    vault: str = typer.Option(
+        "__default__", "--vault", help="Vault (hard isolation mount) to search"
+    ),
+    include: list[str] = typer.Option(  # noqa: B008 -- typer.Option() must be called in default
+        [], "--include", help="Namespace prefix(es) to include (repeatable)"
+    ),
+    exclude: list[str] = typer.Option(  # noqa: B008 -- typer.Option() must be called in default
+        [], "--exclude", help="Namespace prefix(es) to exclude (repeatable; wins)"
+    ),
 ) -> None:
     """Run hybrid retrieval (BM25 + optional dense, fused with RRF)."""
     if not db.exists():
@@ -218,31 +281,42 @@ def query(
         raise typer.Exit(code=1)
 
     from anchor.models.query import QueryBundle
-    from anchor.retrieval import HybridRetriever, SparseRetriever
+    from anchor.models.scope import RetrievalScope
+    from anchor.retrieval import SparseRetriever
+    from anchor.retrieval._rrf import rrf_fuse
 
-    context_store = _open_context_store(db)
+    scope = (
+        RetrievalScope(include=tuple(include), exclude=tuple(exclude))
+        if include or exclude
+        else None
+    )
+
+    context_store = _open_context_store(db, vault)
     items = context_store.get_all()
+    if scope is not None:
+        # BM25 is in-memory over the loaded items: scoping = indexing
+        # only what the scope allows (exclude wins inside matches()).
+        items = [item for item in items if scope.matches(item.namespace)]
     if not items:
-        console.print("[yellow]Index is empty.[/yellow]")
+        console.print("[yellow]Index is empty (for this vault/scope).[/yellow]")
         raise typer.Exit(code=1)
 
     sparse = SparseRetriever(language=language)
     sparse.index(items)
-    retrievers: list[Any] = [sparse]
+    bundle = QueryBundle(query_str=query_text)
+    ranked: list[list[Any]] = [sparse.retrieve(bundle, top_k=top_k)]
 
     provider = _make_embeddings(embeddings)
     if provider is not None:
         from anchor.retrieval import DenseRetriever
 
-        vector_store = _open_vector_store(db, dimensions=provider.dimensions)
-        retrievers.append(
-            DenseRetriever(vector_store, context_store, embeddings=provider)
-        )
+        vector_store = _open_vector_store(db, provider.dimensions, vault)
+        dense = DenseRetriever(vector_store, context_store, embeddings=provider)
+        ranked.append(dense.retrieve(bundle, top_k=top_k, scope=scope))
 
-    retriever: Any = (
-        HybridRetriever(retrievers) if len(retrievers) > 1 else retrievers[0]
+    results = (
+        rrf_fuse(ranked, top_k=top_k) if len(ranked) > 1 else ranked[0][:top_k]
     )
-    results = retriever.retrieve(QueryBundle(query_str=query_text), top_k=top_k)
 
     if not results:
         console.print("[yellow]No results.[/yellow]")

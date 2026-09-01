@@ -384,7 +384,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0,<8" },
     { name = "rich", marker = "extra == 'cli'", specifier = ">=13,<14" },
     { name = "sentence-transformers", marker = "extra == 'local-embeddings'", specifier = ">=3,<6" },
-    { name = "sqlite-vec", marker = "extra == 'sqlite-vec'", specifier = ">=0.1.6,<1" },
+    { name = "sqlite-vec", marker = "extra == 'sqlite-vec'", specifier = ">=0.1.9,<1" },
     { name = "tiktoken", marker = "extra == 'tiktoken'", specifier = ">=0.7,<1" },
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12,<1" },
     { name = "voyageai", marker = "extra == 'voyage'", specifier = ">=0.3,<1" },

@@ -156,6 +156,19 @@ when structured output is still pending) and ends the turn with
 `stopped_by="usage_limit"` — no exception is raised. A child cut mid-run
 wraps up the same way and returns a marked partial result. Returns `self`.
 
+#### with_scope
+
+```python
+def with_scope(self, scope: RetrievalScope) -> Agent
+```
+
+Set the agent's retrieval scope — **namespaces only** (the vault is a
+store mount, bound at construction, never part of a query-time object).
+The scope is published for the duration of each tool call, so
+scope-aware tools (`rag_tools`, custom tools via `current_scope()`) and
+subagent turns see it; a subagent's effective scope is the intersection
+with its own — a child can only narrow, never widen. Returns `self`.
+
 #### with_hooks
 
 ```python
@@ -627,12 +640,38 @@ class SubagentDefinition(BaseModel):
     output_model: type[BaseModel] | None = None
     max_rounds: int = 6
     usage_limits: UsageLimits | None = None   # narrower per-turn limits; the run pool still applies
+    scope: RetrievalScope | None = None       # narrower namespace scope; the parent's still intersects
 ```
 
 Declarative description of a subagent for
 [`with_subagents`](#with_subagents). Each definition becomes an isolated
 sub-`Agent` with a clean context; the model delegates via the
 `task(agent_name, task)` meta-tool.
+
+---
+
+## RetrievalScope
+
+```python
+class RetrievalScope(BaseModel, frozen=True):
+    include: tuple[str, ...] = ()   # namespace prefixes; empty = whole vault
+    exclude: tuple[str, ...] = ()   # exclude ALWAYS wins
+```
+
+Navigation scope over hierarchical namespaces (`/campanha-1/sessoes`).
+Prefix matching is boundary-aware (`/campanha-1` never matches
+`/campanha-10`). `matches(namespace)` evaluates one path;
+`intersect(child)` produces the effective child scope — excludes union,
+includes keep the deeper prefix per pair, and disjoint non-empty
+includes yield a scope that matches nothing. Importable from `anchor`;
+`current_scope()` (from `anchor.agent`) returns the scope published for
+the current tool call.
+
+Vector stores accept `search(..., scope=...)` as a pre-filter, and
+`rag_tools`/`rag_skill`/`retriever_step` thread it through. Passing a
+**dict of mounts** to `rag_tools({"juridico": r1, "notas": r2})` gives
+the search tool a `vault` argument restricted to the mounted names —
+an unmounted vault is an error result, never a lookup.
 
 ---
 

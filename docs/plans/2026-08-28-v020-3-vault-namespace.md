@@ -188,13 +188,22 @@ GraphScope(vault="dnd", exclude=["/spoilers"])         # vault menos exclusões
 
 ## Escopo
 
-- [ ] `vault` e `namespace` no `ContextItem` e nos stores
-- [ ] Filtro hierárquico por prefixo, **pré-filtro no índice** (não pós)
-- [ ] Operadores além de igualdade no `where` (conjunto definido pela pesquisa)
-- [ ] `GraphScope`/`RetrievalScope` com `include`/`exclude` e precedência
-- [ ] Escopo por agente e por `SubagentDefinition`, com interseção obrigatória
-- [ ] Implementação nos backends: in-memory, sqlite-vec, pgvector
-- [ ] Migração dos dados existentes
+- [x] `vault` e `namespace` no `ContextItem` e nos stores (Fases 1-2)
+- [x] Filtro hierárquico por prefixo, **pré-filtro no índice** (ranges
+      boundary-aware; vec0 via subquery pushdown — OR direto no KNN é
+      pós-filtro silencioso, verificado)
+- [x] Operadores no `where`: core convergente eq/ne/in/nin/gt/gte/lt/lte
+- [x] `RetrievalScope` com include/exclude, exclude vence, intersect()
+      só estreita (GraphScope vira alias no #4)
+- [x] Escopo por agente (`with_scope`, publicado na janela da tool call)
+      e por `SubagentDefinition.scope`, interseção obrigatória provada
+      por mutação
+- [x] Backends: in-memory, sqlite, sqlite-vec (partition key), pgvector
+      (iterative scan 0.8+ c/ guard), redis (vault na chave)
+- [x] Migração in-place (`ensure_tables` + rebuild do vec0 por blob copy
+      + `anchor migrate`); sentinela `__default__`
+- [x] Mounts nomeados no `rag_tools` (LLM escolhe entre os montados)
+- [x] CLI `--vault/--namespace/--include/--exclude` + smoke end-to-end
 
 **Fora:** ACL por usuário, criptografia por vault, cotas.
 
