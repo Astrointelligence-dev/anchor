@@ -28,6 +28,7 @@ from anchor._text import strip_markdown_fences
 from anchor.agent.events import RoundStarted, TextDelta, TurnFinished, _forward
 from anchor.agent.models import _USAGE_POOL, AgentTool, UsageLimits
 from anchor.agent.tool_decorator import tool
+from anchor.models.scope import RetrievalScope
 
 if TYPE_CHECKING:
     from anchor.agent.agent import Agent
@@ -50,6 +51,9 @@ class SubagentDefinition(BaseModel):
     # Narrower per-turn limits for this child; the run's shared pool
     # still applies on top — the effective budget only ever narrows.
     usage_limits: UsageLimits | None = None
+    # Narrower retrieval scope for this child; the parent's published
+    # scope still applies on top (intersection) — it only ever narrows.
+    scope: RetrievalScope | None = None
 
 
 def _is_subagent_tool(t: AgentTool) -> bool:

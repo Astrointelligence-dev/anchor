@@ -30,6 +30,7 @@ from anchor.llm.registry import create_provider
 from anchor.memory.manager import MemoryManager
 from anchor.models.budget import TokenBudget
 from anchor.models.context import ContextResult
+from anchor.models.scope import RetrievalScope
 from anchor.pipeline.pipeline import ContextPipeline
 from anchor.protocols.tokenizer import Tokenizer
 
@@ -57,6 +58,7 @@ from .hooks import (
 )
 from .memory_tool import MEMORY_INSTRUCTIONS, FileMemoryBackend, memory_tool
 from .models import (
+    _ACTIVE_SCOPE,
     _USAGE_POOL,
     AgentTool,
     ChildTurn,
@@ -231,6 +233,7 @@ class Agent:
     __slots__ = (
         "_activate_tool",
         "_active_pool",
+        "_active_scope",
         "_agent_callbacks",
         "_allow_skill_scripts",
         "_approval_callback",
@@ -261,6 +264,7 @@ class Agent:
         "_pre_hooks",
         "_read_file_tool",
         "_result_digests",
+        "_scope",
         "_script_tool",
         "_search_tool",
         "_skill_registry",
@@ -318,6 +322,11 @@ class Agent:
         # Serializes turns when this agent runs as a shared subagent —
         # created lazily by the subagent runner (event-loop bound).
         self._turn_lock: asyncio.Lock | None = None
+        # Front #3: navigation scope (namespaces only — the vault is a
+        # store mount). _active_scope is the turn's effective scope:
+        # inherited (from the spawning tool call) ∩ own.
+        self._scope: RetrievalScope | None = None
+        self._active_scope: RetrievalScope | None = None
         self._memory: MemoryManager | None = None
         self._last_result: ContextResult | None = None
         self._last_turn: TurnDiagnostics | None = None
@@ -428,6 +437,19 @@ class Agent:
                     "astro-anchor[pricing] for full model coverage.",
                 )
         self._usage_limits = limits
+        return self
+
+    def with_scope(self, scope: RetrievalScope) -> Agent:
+        """Set the agent's retrieval scope (namespaces only). Returns self.
+
+        The scope is published for the duration of each tool call, so
+        scope-aware tools (``rag_tools``) and subagent turns see it; a
+        subagent's effective scope is the intersection with its own —
+        a child can only narrow, never widen (the same doctrine as
+        ``usage_limits``). The vault is NOT part of the scope: stores
+        are mounted on their vault at construction.
+        """
+        self._scope = scope
         return self
 
     def with_hooks(
@@ -652,27 +674,9 @@ class Agent:
                     "(MULTI_AGENT.md: no nesting)"
                 )
                 raise ValueError(msg)
-            if definition.model is None:
-                sub = Agent(
-                    llm=self._llm,
-                    max_rounds=definition.max_rounds,
-                    tokenizer=self._tokenizer,
-                )
-            else:
-                sub = Agent(
-                    model=definition.model,
-                    max_rounds=definition.max_rounds,
-                    tokenizer=self._tokenizer,
-                )
-            if definition.system_prompt:
-                sub.with_system_prompt(definition.system_prompt)
-            if definition.tools:
-                sub.with_tools(list(definition.tools))
-            if definition.usage_limits is not None:
-                # Narrower per-turn limits for this child; the shared
-                # pool still applies on top — the budget only narrows.
-                sub.with_usage_limits(definition.usage_limits)
-            self._subagents[definition.name] = (definition, sub)
+            self._subagents[definition.name] = (
+                definition, self._build_subagent(definition),
+            )
 
         if self._subagents and self._task_tool is None:
             if any(t.name == "task" for t in self._all_active_tools()):
@@ -683,6 +687,33 @@ class Agent:
                 raise ValueError(msg)
             self._task_tool = _make_task_tool(self._subagents)
         return self
+
+    def _build_subagent(self, definition: SubagentDefinition) -> Agent:
+        if definition.model is None:
+            sub = Agent(
+                llm=self._llm,
+                max_rounds=definition.max_rounds,
+                tokenizer=self._tokenizer,
+            )
+        else:
+            sub = Agent(
+                model=definition.model,
+                max_rounds=definition.max_rounds,
+                tokenizer=self._tokenizer,
+            )
+        if definition.system_prompt:
+            sub.with_system_prompt(definition.system_prompt)
+        if definition.tools:
+            sub.with_tools(list(definition.tools))
+        if definition.usage_limits is not None:
+            # Narrower per-turn limits for this child; the shared
+            # pool still applies on top — the budget only narrows.
+            sub.with_usage_limits(definition.usage_limits)
+        if definition.scope is not None:
+            # Narrower scope for this child; the parent's published
+            # scope intersects on top — it only narrows.
+            sub.with_scope(definition.scope)
+        return sub
 
     def as_tool(
         self,
@@ -1437,9 +1468,11 @@ class Agent:
             # and reset in this same frame, so it can never leak into
             # the consumer's context (unlike a turn-long ambient set).
             pool_token = _USAGE_POOL.set(self._active_pool)
+            scope_token = _ACTIVE_SCOPE.set(self._active_scope)
             try:
                 result = self._execute_call(tc)
             finally:
+                _ACTIVE_SCOPE.reset(scope_token)
                 _USAGE_POOL.reset(pool_token)
                 _EVENT_SINK.reset(token)
             results.append(result)
@@ -1502,6 +1535,7 @@ class Agent:
             # hand-off are per-call and die with the task.
             _EVENT_SINK.set((self._child_sink(tc, queue.put_nowait), tc.id))
             _USAGE_POOL.set(self._active_pool)
+            _ACTIVE_SCOPE.set(self._active_scope)
             try:
                 return index, await self._aexecute_call(tc, semaphore)
             except Exception as exc:
@@ -2107,6 +2141,13 @@ class Agent:
         pool is already exhausted: the turn goes straight to its
         wrap-up round.
         """
+        # Scope entry rides the same hook: effective = inherited ∩ own.
+        inherited_scope = _ACTIVE_SCOPE.get()
+        if inherited_scope is not None and self._scope is not None:
+            self._active_scope = inherited_scope.intersect(self._scope)
+        else:
+            self._active_scope = self._scope or inherited_scope
+
         inherited = _USAGE_POOL.get()
         if inherited is not None:
             self._active_pool = inherited

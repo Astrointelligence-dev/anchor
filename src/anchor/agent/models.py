@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from anchor.models.scope import RetrievalScope
+
 
 class AgentTool(BaseModel):
     """A tool that the Agent can use during conversation.
@@ -319,6 +321,14 @@ class _UsagePool:
 # run()'s retry loop) — never across a generator yield, so it cannot
 # leak into the consumer's context. Subagents executing inside a tool
 # call read it at turn start and debit the same pool object directly.
+# The retrieval scope active for the current tool call: published in the
+# same set/reset window as _USAGE_POOL, inherited by subagent turns (the
+# child's effective scope = published ∩ its own — it can only narrow).
+# Read by scope-aware tools via anchor.agent.current_scope().
+_ACTIVE_SCOPE: ContextVar[RetrievalScope | None] = ContextVar(
+    "anchor_active_scope", default=None,
+)
+
 _USAGE_POOL: ContextVar[_UsagePool | None] = ContextVar(
     "anchor_usage_pool", default=None,
 )

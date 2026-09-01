@@ -40,7 +40,7 @@ from anchor.agent.skills import (
     rag_skill,
 )
 from anchor.agent.skills.memory import memory_tools
-from anchor.agent.skills.rag import rag_tools
+from anchor.agent.skills.rag import current_scope, rag_tools
 from anchor.agent.subagent import SubagentDefinition
 from anchor.agent.tool_decorator import tool
 
@@ -73,6 +73,7 @@ __all__ = [
     "TurnStarted",
     "UsageLimitReached",
     "UsageLimits",
+    "current_scope",
     "load_skill",
     "load_skills_directory",
     "memory_skill",
