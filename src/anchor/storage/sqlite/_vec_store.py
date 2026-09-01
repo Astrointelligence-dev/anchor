@@ -187,7 +187,7 @@ class SqliteVecVectorStore:
             sub_clauses += s_clauses
             sub_params += s_params
             rowid_filter = (
-                " AND rowid IN (SELECT rowid FROM vec_items WHERE "
+                " AND rowid IN (SELECT rowid FROM vec_items WHERE "  # noqa: S608 -- fixed templates, values parameterized
                 + " AND ".join(sub_clauses)
                 + ")"
             )

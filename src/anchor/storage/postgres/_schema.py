@@ -30,22 +30,28 @@ async def ensure_tables(
 
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS context_items (
-            id          TEXT PRIMARY KEY,
+            id          TEXT NOT NULL,
             content     TEXT NOT NULL,
             source      TEXT NOT NULL,
             score       DOUBLE PRECISION NOT NULL DEFAULT 0.0,
             priority    INTEGER NOT NULL DEFAULT 5,
             token_count INTEGER NOT NULL DEFAULT 0,
             metadata    JSONB NOT NULL DEFAULT '{}',
-            created_at  TIMESTAMPTZ NOT NULL
+            created_at  TIMESTAMPTZ NOT NULL,
+            vault       TEXT NOT NULL DEFAULT '__default__',
+            namespace   TEXT NOT NULL DEFAULT '/',
+            PRIMARY KEY (vault, id)
         )
     """)
 
     await conn.execute(f"""
         CREATE TABLE IF NOT EXISTS embeddings (
-            item_id   TEXT PRIMARY KEY,
+            item_id   TEXT NOT NULL,
             embedding vector({embedding_dim}),
-            metadata  JSONB NOT NULL DEFAULT '{{}}'
+            metadata  JSONB NOT NULL DEFAULT '{{}}',
+            vault     TEXT NOT NULL DEFAULT '__default__',
+            namespace TEXT NOT NULL DEFAULT '/',
+            PRIMARY KEY (vault, item_id)
         )
     """)
 
@@ -106,4 +112,14 @@ async def ensure_tables(
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_embeddings_metadata ON embeddings "
         "USING gin (metadata jsonb_path_ops)"
+    )
+    # Scope btree: vault bind + boundary-aware namespace prefix ranges.
+    # text_pattern_ops makes the range/prefix scans collation-independent.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_embeddings_scope ON embeddings "
+        "(vault, namespace text_pattern_ops)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_context_items_scope ON context_items "
+        "(vault, namespace text_pattern_ops)"
     )

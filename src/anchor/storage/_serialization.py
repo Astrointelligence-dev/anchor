@@ -7,8 +7,8 @@ from datetime import datetime
 from typing import Any
 
 from anchor.models.context import ContextItem, SourceType
-from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE
 from anchor.models.memory import MemoryEntry
+from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE
 
 
 def context_item_to_row(item: ContextItem) -> dict[str, Any]:

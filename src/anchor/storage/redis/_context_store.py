@@ -5,26 +5,46 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from anchor.models.context import ContextItem
+from anchor.models.scope import DEFAULT_VAULT
 
 if TYPE_CHECKING:
     from anchor.storage.redis._connection import RedisConnectionManager
 
 
 class RedisContextStore:
-    """Redis-backed context store. Implements the ContextStore protocol."""
+    """Redis-backed context store. Implements the ContextStore protocol.
 
-    __slots__ = ("_conn_manager",)
+    Bound to one vault at construction (front #3): the vault is part of
+    the key path (``{prefix}ctx:{vault}:{id}``), so cross-vault access is
+    structurally impossible — the same pattern as the connection-manager
+    prefix. Pre-vault keys (``ctx:{id}``) belong to the ``__default__``
+    vault and are found via a legacy-key fallback on read.
+    """
 
-    def __init__(self, conn_manager: RedisConnectionManager) -> None:
+    __slots__ = ("_conn_manager", "_vault")
+
+    def __init__(
+        self, conn_manager: RedisConnectionManager, *, vault: str = DEFAULT_VAULT,
+    ) -> None:
         self._conn_manager = conn_manager
+        self._vault = vault
+
+    @property
+    def vault(self) -> str:
+        return self._vault
 
     def _key(self, item_id: str) -> str:
+        return f"{self._conn_manager.prefix}ctx:{self._vault}:{item_id}"
+
+    def _legacy_key(self, item_id: str) -> str:
         return f"{self._conn_manager.prefix}ctx:{item_id}"
 
     def _ids_key(self) -> str:
-        return f"{self._conn_manager.prefix}ctx:_ids"
+        return f"{self._conn_manager.prefix}ctx:{self._vault}:_ids"
 
     def add(self, item: ContextItem) -> None:
+        if item.vault != self._vault:
+            item = item.model_copy(update={"vault": self._vault})
         client = self._conn_manager.get_client()
         data = item.model_dump_json()
         pipe = client.pipeline()
@@ -35,6 +55,8 @@ class RedisContextStore:
     def get(self, item_id: str) -> ContextItem | None:
         client = self._conn_manager.get_client()
         data = client.get(self._key(item_id))
+        if data is None and self._vault == DEFAULT_VAULT:
+            data = client.get(self._legacy_key(item_id))
         if data is None:
             return None
         return ContextItem.model_validate_json(data)
@@ -77,20 +99,32 @@ class RedisContextStore:
 
 
 class AsyncRedisContextStore:
-    """Async Redis-backed context store. Implements the AsyncContextStore protocol."""
+    """Async Redis-backed context store (vault-bound, same keys as sync)."""
 
-    __slots__ = ("_conn_manager",)
+    __slots__ = ("_conn_manager", "_vault")
 
-    def __init__(self, conn_manager: RedisConnectionManager) -> None:
+    def __init__(
+        self, conn_manager: RedisConnectionManager, *, vault: str = DEFAULT_VAULT,
+    ) -> None:
         self._conn_manager = conn_manager
+        self._vault = vault
+
+    @property
+    def vault(self) -> str:
+        return self._vault
 
     def _key(self, item_id: str) -> str:
+        return f"{self._conn_manager.prefix}ctx:{self._vault}:{item_id}"
+
+    def _legacy_key(self, item_id: str) -> str:
         return f"{self._conn_manager.prefix}ctx:{item_id}"
 
     def _ids_key(self) -> str:
-        return f"{self._conn_manager.prefix}ctx:_ids"
+        return f"{self._conn_manager.prefix}ctx:{self._vault}:_ids"
 
     async def add(self, item: ContextItem) -> None:
+        if item.vault != self._vault:
+            item = item.model_copy(update={"vault": self._vault})
         client = self._conn_manager.get_async_client()
         data = item.model_dump_json()
         pipe = client.pipeline()
@@ -101,6 +135,8 @@ class AsyncRedisContextStore:
     async def get(self, item_id: str) -> ContextItem | None:
         client = self._conn_manager.get_async_client()
         data = await client.get(self._key(item_id))
+        if data is None and self._vault == DEFAULT_VAULT:
+            data = await client.get(self._legacy_key(item_id))
         if data is None:
             return None
         return ContextItem.model_validate_json(data)

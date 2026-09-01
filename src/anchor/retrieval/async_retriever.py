@@ -11,9 +11,11 @@ from anchor._math import cosine_similarity
 from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
+from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
 from anchor.protocols.embeddings import EmbeddingProvider
 from anchor.protocols.storage import AsyncContextStore, AsyncVectorStore
 from anchor.retrieval._rrf import rrf_fuse
+from anchor.storage._where import matches_where
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +120,16 @@ class AsyncDenseRetriever:
                 return
             vectors = await self._embed_documents([item.content for item in items])
             for item, embedding in zip(items, vectors, strict=True):
-                await self._vector_store.add_embedding(
-                    item.id, embedding, item.metadata
-                )
+                # namespace only when set — legacy-store compatibility.
+                if item.namespace != ROOT_NAMESPACE:
+                    await self._vector_store.add_embedding(
+                        item.id, embedding, item.metadata,
+                        namespace=item.namespace,
+                    )
+                else:
+                    await self._vector_store.add_embedding(
+                        item.id, embedding, item.metadata
+                    )
                 await self._context_store.add(item)
             return
 
@@ -139,20 +148,23 @@ class AsyncDenseRetriever:
         query: QueryBundle,
         top_k: int = 10,
         where: dict[str, Any] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
     ) -> list[ContextItem]:
         """Asynchronously retrieve items most similar to the query.
 
         Parameters:
             query: The query bundle containing the user's query text.
             top_k: Maximum number of items to return.
-            where: Optional metadata equality filter (store-backed mode).
+            where: Optional metadata filter (equality or operator dicts).
+            scope: Optional namespace scope (include/exclude, exclude wins).
 
         Returns:
             A list of ``ContextItem`` objects ranked by similarity
             (most similar first).
         """
         if self._vector_store is not None and self._context_store is not None:
-            return await self._aretrieve_from_store(query, top_k, where)
+            return await self._aretrieve_from_store(query, top_k, where, scope)
 
         if not self._items:
             return []
@@ -168,9 +180,9 @@ class AsyncDenseRetriever:
             item_embedding = item.metadata.get("embedding")
             if item_embedding is None:
                 continue
-            if where is not None and any(
-                item.metadata.get(k) != v for k, v in where.items()
-            ):
+            if scope is not None and not scope.matches(item.namespace):
+                continue
+            if where is not None and not matches_where(item.metadata, where):
                 continue
             score = self._similarity_fn(embedding, item_embedding)
             if self._min_score is not None and score < self._min_score:
@@ -197,6 +209,7 @@ class AsyncDenseRetriever:
         query: QueryBundle,
         top_k: int,
         where: dict[str, Any] | None,
+        scope: RetrievalScope | None = None,
     ) -> list[ContextItem]:
         if self._vector_store is None or self._context_store is None:  # pragma: no cover
             msg = "store-backed retrieval requires vector_store and context_store"
@@ -206,12 +219,12 @@ class AsyncDenseRetriever:
             if query.embedding is not None
             else await self._embed_query(query.query_str)
         )
+        kwargs: dict[str, Any] = {}
         if where is not None:
-            results = await self._vector_store.search(
-                embedding, top_k=top_k, where=where
-            )
-        else:
-            results = await self._vector_store.search(embedding, top_k=top_k)
+            kwargs["where"] = where
+        if scope is not None:
+            kwargs["scope"] = scope
+        results = await self._vector_store.search(embedding, top_k=top_k, **kwargs)
 
         items: list[ContextItem] = []
         for item_id, score in results:

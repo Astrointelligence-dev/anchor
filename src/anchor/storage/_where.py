@@ -19,7 +19,7 @@ from typing import Any
 
 from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
 
-_SQL_OPS: dict[str, str] = {
+SQL_OPS: dict[str, str] = {
     "$eq": "=",
     "$ne": "!=",
     "$gt": ">",
@@ -27,26 +27,50 @@ _SQL_OPS: dict[str, str] = {
     "$lt": "<",
     "$lte": "<=",
 }
-_SET_OPS = ("$in", "$nin")
+SET_OPS = ("$in", "$nin")
 
 # The character immediately after '/' in ASCII — upper bound of a
 # prefix range. Safe for UTF-8 namespaces.
 _AFTER_SLASH = "0"
 
 
-def _is_op_dict(cond: Any) -> bool:
+def is_op_dict(cond: Any) -> bool:
     return isinstance(cond, dict) and any(
         isinstance(k, str) and k.startswith("$") for k in cond
     )
 
 
-def _check_op(op: str) -> None:
-    if op not in _SQL_OPS and op not in _SET_OPS:
+def check_operator(op: str) -> None:
+    if op not in SQL_OPS and op not in SET_OPS:
         msg = (
             f"unknown where operator {op!r} — supported: "
-            f"{sorted([*_SQL_OPS, *_SET_OPS])}"
+            f"{sorted([*SQL_OPS, *SET_OPS])}"
         )
         raise ValueError(msg)
+
+
+def _matches_cond(val: Any, op: str, operand: Any) -> bool:
+    check_operator(op)
+    if op == "$eq":
+        return bool(val == operand)
+    if op == "$ne":
+        return bool(val != operand)
+    if op == "$in":
+        return val in operand
+    if op == "$nin":
+        return val not in operand
+    if val is None:
+        return False
+    try:
+        if op == "$gt":
+            return bool(val > operand)
+        if op == "$gte":
+            return bool(val >= operand)
+        if op == "$lt":
+            return bool(val < operand)
+        return bool(val <= operand)  # $lte
+    except TypeError:
+        return False
 
 
 def matches_where(metadata: dict[str, Any], where: dict[str, Any] | None) -> bool:
@@ -55,34 +79,13 @@ def matches_where(metadata: dict[str, Any], where: dict[str, Any] | None) -> boo
         return True
     for key, cond in where.items():
         val = metadata.get(key)
-        if not _is_op_dict(cond):
+        if not is_op_dict(cond):
             if val != cond:
                 return False
             continue
         for op, operand in cond.items():
-            _check_op(op)
-            if op == "$eq" and val != operand:
+            if not _matches_cond(val, op, operand):
                 return False
-            if op == "$ne" and val == operand:
-                return False
-            if op == "$in" and val not in operand:
-                return False
-            if op == "$nin" and val in operand:
-                return False
-            if op in ("$gt", "$gte", "$lt", "$lte"):
-                if val is None:
-                    return False
-                try:
-                    if op == "$gt" and not val > operand:
-                        return False
-                    if op == "$gte" and not val >= operand:
-                        return False
-                    if op == "$lt" and not val < operand:
-                        return False
-                    if op == "$lte" and not val <= operand:
-                        return False
-                except TypeError:
-                    return False
     return True
 
 
@@ -100,13 +103,13 @@ def sql_where_clauses(
     params: list[Any] = []
     for key, cond in (where or {}).items():
         expr, expr_params = expr_for_key(key)
-        if not _is_op_dict(cond):
+        if not is_op_dict(cond):
             clauses.append(f"{expr} = ?")
             params.extend([*expr_params, cond])
             continue
         for op, operand in cond.items():
-            _check_op(op)
-            if op in _SET_OPS:
+            check_operator(op)
+            if op in SET_OPS:
                 values = list(operand)
                 if not values:
                     # IN () matches nothing; NOT IN () matches everything.
@@ -117,7 +120,7 @@ def sql_where_clauses(
                 clauses.append(f"{expr} {neg}IN ({placeholders})")
                 params.extend([*expr_params, *values])
             else:
-                clauses.append(f"{expr} {_SQL_OPS[op]} ?")
+                clauses.append(f"{expr} {SQL_OPS[op]} ?")
                 params.extend([*expr_params, operand])
     return clauses, params
 

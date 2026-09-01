@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from anchor.embeddings._base import as_embedding_provider
 from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
+from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
 from anchor.protocols.embeddings import EmbeddingProvider
 from anchor.protocols.storage import ContextStore, VectorStore
 from anchor.protocols.tokenizer import Tokenizer
@@ -74,7 +76,14 @@ class DenseRetriever:
             )
             raise RetrieverError(msg)
         for item, embedding in zip(items, vectors, strict=True):
-            self._vector_store.add_embedding(item.id, embedding, item.metadata)
+            # namespace only when set, so custom VectorStore implementations
+            # written before front #3 keep working unchanged.
+            if item.namespace != ROOT_NAMESPACE:
+                self._vector_store.add_embedding(
+                    item.id, embedding, item.metadata, namespace=item.namespace,
+                )
+            else:
+                self._vector_store.add_embedding(item.id, embedding, item.metadata)
             self._context_store.add(item)
         return len(items)
 
@@ -83,14 +92,18 @@ class DenseRetriever:
         query: QueryBundle,
         top_k: int = 10,
         where: dict[str, object] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
     ) -> list[ContextItem]:
         """Retrieve items most similar to the query embedding.
 
         Parameters:
             query: The query bundle (uses ``query.embedding`` when present).
             top_k: Maximum number of items to return.
-            where: Optional metadata equality filter, pushed down to the
-                vector store (pre-filtering).
+            where: Optional metadata filter (equality or operator dicts),
+                pushed down to the vector store (pre-filtering).
+            scope: Optional namespace scope (include/exclude prefixes,
+                exclude wins), pushed down to the vector store.
         """
         if query.embedding is not None:
             query_embedding = query.embedding
@@ -100,12 +113,14 @@ class DenseRetriever:
             msg = "Either provide query.embedding or configure an embedding provider"
             raise RetrieverError(msg)
 
-        # Pass `where` only when set, so custom VectorStore implementations
-        # written before the filter existed keep working unchanged.
+        # Pass `where`/`scope` only when set, so custom VectorStore
+        # implementations written before the filters existed keep working.
+        kwargs: dict[str, Any] = {}
         if where is not None:
-            results = self._vector_store.search(query_embedding, top_k=top_k, where=where)
-        else:
-            results = self._vector_store.search(query_embedding, top_k=top_k)
+            kwargs["where"] = where
+        if scope is not None:
+            kwargs["scope"] = scope
+        results = self._vector_store.search(query_embedding, top_k=top_k, **kwargs)
         items: list[ContextItem] = []
         for item_id, score in results:
             if self._min_score is not None and score < self._min_score:
