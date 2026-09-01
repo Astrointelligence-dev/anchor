@@ -1,6 +1,6 @@
 # v0.2 · #3 — Vault, namespace e filtragem
 
-**Status:** em implementação (sessão 9, 2026-09-01) · **Tamanho:** médio ·
+**Status:** implementado (sessão 9, 2026-09-01; fases 1-5 em `8f5937b..968eae3`) — pendente: ritual xhigh + benchmark de recall · **Tamanho:** médio ·
 **Depende de:** nada · **Bloqueia:** #4 (grafo de conhecimento)
 
 ## Pesquisa (2026-09-01) — resultados
