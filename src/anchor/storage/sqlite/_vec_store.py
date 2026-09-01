@@ -84,6 +84,26 @@ class SqliteVecVectorStore:
             "namespace TEXT NOT NULL DEFAULT '/', "
             "UNIQUE (vault, item_id))"
         )
+        # Pre-vault vec_items (table existed, CREATE skipped): migrate in
+        # place. Migrated rows belong to __default__, never to this
+        # store's vault — old data must not be claimed by whatever vault
+        # happens to open the file first.
+        cols = {
+            row[1]
+            for row in self._conn.execute(
+                "PRAGMA table_info(vec_items)"
+            ).fetchall()
+        }
+        if "vault" not in cols:
+            self._conn.execute(
+                "ALTER TABLE vec_items ADD COLUMN "
+                "vault TEXT NOT NULL DEFAULT '__default__'"
+            )
+        if "namespace" not in cols:
+            self._conn.execute(
+                "ALTER TABLE vec_items ADD COLUMN "
+                "namespace TEXT NOT NULL DEFAULT '/'"
+            )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vec_items_scope "
             "ON vec_items(vault, namespace)"
@@ -96,6 +116,34 @@ class SqliteVecVectorStore:
             f"vault TEXT PARTITION KEY, "
             f"embedding float[{dimensions}] distance_metric=cosine)"
         )
+        # Pre-vault vec0 cannot be ALTERed (virtual table): rebuild by
+        # copying the embedding blobs — no re-embedding involved.
+        vcols = {
+            row[1]
+            for row in self._conn.execute(
+                "PRAGMA table_info(vec_index)"
+            ).fetchall()
+        }
+        if "vault" not in vcols:
+            # RENAME on a vec0 vtab leaves its shadow tables behind, so
+            # the blobs take a round trip through a plain staging table
+            # and the new vec0 is created under the final name.
+            self._conn.execute(
+                "CREATE TABLE _vec_migrating AS "
+                "SELECT rowid AS old_rowid, embedding FROM vec_index"
+            )
+            self._conn.execute("DROP TABLE vec_index")
+            self._conn.execute(
+                f"CREATE VIRTUAL TABLE vec_index USING vec0("
+                f"vault TEXT PARTITION KEY, "
+                f"embedding float[{dimensions}] distance_metric=cosine)"
+            )
+            self._conn.execute(
+                "INSERT INTO vec_index (rowid, vault, embedding) "
+                "SELECT old_rowid, '__default__', embedding "
+                "FROM _vec_migrating"
+            )
+            self._conn.execute("DROP TABLE _vec_migrating")
         self._conn.commit()
 
     @property

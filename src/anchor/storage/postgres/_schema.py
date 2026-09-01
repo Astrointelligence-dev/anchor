@@ -113,6 +113,20 @@ async def ensure_tables(
         "CREATE INDEX IF NOT EXISTS idx_embeddings_metadata ON embeddings "
         "USING gin (metadata jsonb_path_ops)"
     )
+    # Front #3 migration: pre-vault tables gain the scope columns in
+    # place (metadata-only ALTER since PG 11; IF NOT EXISTS makes it
+    # idempotent). Composite (vault, id) PKs exist only on fresh tables —
+    # the PK rebuild on legacy tables is deferred until needed.
+    for table in ("context_items", "embeddings"):
+        await conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
+            f"vault TEXT NOT NULL DEFAULT '__default__'"
+        )
+        await conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
+            f"namespace TEXT NOT NULL DEFAULT '/'"
+        )
+
     # Scope btree: vault bind + boundary-aware namespace prefix ranges.
     # text_pattern_ops makes the range/prefix scans collation-independent.
     await conn.execute(

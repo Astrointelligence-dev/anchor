@@ -66,10 +66,36 @@ _INDEXES: list[str] = [
 ]
 
 
+# Front #3 migration: pre-vault tables gain the scope columns in place
+# (ALTER ADD COLUMN with constant defaults — cheap and idempotent, runs
+# before the scope indexes that need the columns). The composite
+# (vault, id) PRIMARY KEY exists only on freshly created tables: SQLite
+# cannot ALTER a PK, and the full-table rebuild is deferred until
+# multi-vault-in-one-legacy-db actually needs it.
+_SCOPE_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "context_items": [
+        ("vault", "TEXT NOT NULL DEFAULT '__default__'"),
+        ("namespace", "TEXT NOT NULL DEFAULT '/'"),
+    ],
+    "embeddings": [
+        ("vault", "TEXT NOT NULL DEFAULT '__default__'"),
+        ("namespace", "TEXT NOT NULL DEFAULT '/'"),
+    ],
+}
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
-    """Create all storage tables and indexes if they do not exist."""
+    """Create tables/indexes if missing and migrate pre-vault shapes."""
     for ddl in _TABLES:
         conn.execute(ddl)
+    for table, columns in _SCOPE_COLUMNS.items():
+        existing = {
+            row[1]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
     for ddl in _INDEXES:
         conn.execute(ddl)
     conn.commit()
@@ -79,6 +105,13 @@ async def ensure_tables_async(conn: aiosqlite.Connection) -> None:
     """Async variant of :func:`ensure_tables`."""
     for ddl in _TABLES:
         await conn.execute(ddl)
+    for table, columns in _SCOPE_COLUMNS.items():
+        cursor = await conn.execute(f"PRAGMA table_info({table})")
+        rows = await cursor.fetchall()
+        existing = {row[1] for row in rows}
+        for name, decl in columns:
+            if name not in existing:
+                await conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
     for ddl in _INDEXES:
         await conn.execute(ddl)
     await conn.commit()
