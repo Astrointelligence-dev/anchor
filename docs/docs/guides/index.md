@@ -15,7 +15,8 @@ can copy into your project.
 | [Pipeline](pipeline.md) | Steps, callbacks, decorators, and async execution |
 | [Retrieval](retrieval.md) | Dense, sparse, and hybrid retrieval with RRF |
 | [Advanced Retrieval](advanced-retrieval.md) | Rerankers, routers, and classification-based dispatch |
-| [Memory](memory.md) | Sliding window, summary buffer, and graph memory |
+| [Memory](memory.md) | Sliding window, summary buffer, and long-term facts |
+| [Knowledge Graph](knowledge-graph.md) | Entities, evidenced relations, scope-aware navigation |
 
 ## Data
 

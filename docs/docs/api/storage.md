@@ -264,3 +264,13 @@ Implements `MemoryEntryStore` and `GarbageCollectableStore`. Thread-safe.
 !!! note
     Not suitable for concurrent multi-process access. For multi-worker
     deployments, implement `MemoryEntryStore` with a database backend.
+
+---
+
+## Graph stores
+
+`InMemoryGraphStore`, `SqliteGraphStore`, `AsyncSqliteGraphStore` and
+`PostgresGraphStore` implement the `GraphStore` / `AsyncGraphStore`
+protocols — vault-bound at construction like every store, edges invalidated
+never deleted, one visibility rule shared by every backend. See
+[Knowledge Graph](graph.md).

@@ -330,18 +330,21 @@ side-effect-only step that returns items unchanged.
 
 ### `graph_retrieval_step(graph, store, entity_extractor, ...) -> PipelineStep`
 
-Create a step that retrieves memory entries linked to graph entities via BFS
-traversal.
+Create a step that retrieves the memory entries a query's entities lead to
+in the knowledge graph (the item id is the `MemoryEntry.id`). The walk
+honours the scope published by the running agent turn intersected with the
+static `scope`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `graph` | `SimpleGraphMemory` | (required) | Graph memory instance to traverse. |
+| `graph` | `KnowledgeGraph` | (required) | The graph to walk (see [Knowledge Graph](graph.md)). |
 | `store` | `MemoryEntryStore` | (required) | Store holding `MemoryEntry` objects. |
-| `entity_extractor` | `Callable[[str], list[str]]` | (required) | Maps query string to entity IDs. |
-| `max_depth` | `int` | `2` | Maximum BFS traversal depth. |
+| `entity_extractor` | `Callable[[str], list[str]]` | (required) | Maps query string to entity names. |
+| `max_depth` | `int` | `2` | Maximum traversal depth. |
 | `max_items` | `int` | `5` | Maximum `ContextItem` objects to return. |
 | `name` | `str` | `"graph_retrieval"` | Step name for diagnostics. |
 | `on_error` | `"raise" \| "skip"` | `"skip"` | Error handling policy. |
+| `scope` | `RetrievalScope \| None` | `None` | Static namespace scope (keyword-only). |
 
 ### `create_eviction_promoter(extractor, store, consolidator=None) -> Callable`
 

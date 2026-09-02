@@ -516,6 +516,32 @@ def graph_hubs(
     console.print(table)
 
 
+@graph_app.command("communities")
+def graph_communities(
+    db: Path = _DB_OPT,
+    vault: str = _VAULT_OPT,
+    include: list[str] = _INCLUDE_OPT,
+    exclude: list[str] = _EXCLUDE_OPT,
+) -> None:
+    """Clusters of the visible graph (Leiden with the [graph] extra, else Louvain)."""
+    scope = _scope_option(include, exclude)
+    graph = _require_graph(db, vault)
+    partition = graph.communities(**scope_kwargs(scope))
+    degrees = dict(graph.hubs(k=len(partition) or 1, **scope_kwargs(scope)))
+    groups: dict[int, list[str]] = {}
+    for node_id, community in partition.items():
+        groups.setdefault(community, []).append(node_id)
+    table = Table(title=f"{len(groups)} communities")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Size", style="cyan", width=5)
+    table.add_column("Members (by degree)", style="green")
+    for community, members in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        members.sort(key=lambda n: (-degrees.get(n, 0), n))
+        shown = ", ".join(members[:8]) + (" …" if len(members) > 8 else "")
+        table.add_row(str(community), str(len(members)), shown)
+    console.print(table)
+
+
 @graph_app.command("backlinks")
 def graph_backlinks(
     name: str = typer.Argument(..., help="Node (name or alias)"),

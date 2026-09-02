@@ -115,7 +115,7 @@ Create PipelineStep instances for use with pipeline.add_step():
   reranker_step(name, reranker)                -- run a Reranker
   query_transform_step(name, transformer)       -- transform the query
   classified_retriever_step(name, classifier, retriever_map)
-  graph_retrieval_step(name, graph_memory)      -- retrieve from graph memory
+  graph_retrieval_step(graph, store, extractor) -- memory entries reached through the knowledge graph
   auto_promotion_step(name, promoter)           -- promote items by importance
   create_eviction_promoter(memory, threshold)   -- factory for auto-promotion
 
@@ -320,3 +320,19 @@ Collectors: InMemoryMetricsCollector, LoggingMetricsCollector
   # Execute
   result = pipeline.build(QueryBundle(query_str="How does context engineering work?"))
   print(result.formatted_output)  # Ready for LLM API call
+
+## Knowledge Graph (anchor.graph)
+
+  KnowledgeGraph(store=None)   -- nodes (canonical keys), typed evidenced edges, bi-temporal
+  .add_node / .add_edge / .link_item / .unlink_item / .invalidate_edge
+  .neighbors / .backlinks / .path / .explain / .related_items / .mentions
+  .query(seeds, top_k)         -- personalized PageRank, scores land on items
+  .hubs(k) / .communities()    -- degree ranking; Louvain (igraph Leiden with [graph])
+  Every read takes scope=RetrievalScope and as_of=datetime; a node without
+  visible evidence does not exist for the scope and is never crossed.
+  Stores: InMemoryGraphStore, SqliteGraphStore, AsyncSqliteGraphStore, PostgresGraphStore
+  Extractors: StructureExtractor, WikilinkExtractor (free), LLMGraphExtractor(llm) (opt-in)
+  GraphIndexer(graph, extractors).index(items) / .index_entries(memory_entries)
+  GraphRetriever(graph, context_store, vector_store=None)  -- first-class Retriever
+  MemoryManager(graph=GraphIndexer(...))                  -- memory kept in the graph
+  CLI: anchor index --graph; anchor graph query|path|explain|hubs|communities|backlinks

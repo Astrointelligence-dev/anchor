@@ -81,3 +81,46 @@ class TestPersonalizedPagerank:
         near = personalized_pagerank(_chain(), {"a": 1.0}, damping=0.3)
         far = personalized_pagerank(_chain(), {"a": 1.0}, damping=0.9)
         assert far["d"] > near["d"]
+
+
+class TestCommunities:
+    def _two_cliques(self) -> dict[str, list[str]]:
+        pairs = [("a", "b"), ("b", "c"), ("a", "c"), ("x", "y"), ("y", "z"), ("x", "z"), ("c", "x")]
+        return adjacency(pairs)
+
+    def test_louvain_finds_the_two_cliques(self) -> None:
+        from anchor.graph.algorithms import louvain, modularity
+
+        adj = self._two_cliques()
+        adj["lonely"] = []
+        part = louvain(adj)
+        assert part["a"] == part["b"] == part["c"]
+        assert part["x"] == part["y"] == part["z"]
+        assert part["a"] != part["x"]
+        assert part["lonely"] not in (part["a"], part["x"])
+        assert sorted(set(part.values())) == [0, 1, 2]  # renumbered by first appearance
+        assert modularity(adj, part) > 0.3
+        assert louvain(adj) == part  # deterministic
+
+    def test_modularity_matches_networkx(self) -> None:
+        nx = pytest.importorskip("networkx")
+        from anchor.graph.algorithms import louvain, modularity
+
+        adj = self._two_cliques()
+        part = louvain(adj)
+        g = nx.Graph()
+        for a, nbrs in adj.items():
+            for b in nbrs:
+                g.add_edge(a, b)
+        groups: dict[int, set[str]] = {}
+        for n, c in part.items():
+            groups.setdefault(c, set()).add(n)
+        assert modularity(adj, part) == pytest.approx(
+            nx.community.modularity(g, list(groups.values())), abs=1e-9
+        )
+
+    def test_empty_graph(self) -> None:
+        from anchor.graph.algorithms import louvain, modularity
+
+        assert louvain({}) == {}
+        assert modularity({}, {}) == 0.0

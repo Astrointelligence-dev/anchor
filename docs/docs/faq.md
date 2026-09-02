@@ -154,10 +154,11 @@ description: Frequently asked questions about anchor
     redundant information.
 
 ??? question "What is graph memory?"
-    Graph memory stores relationships between entities (people, places, concepts)
-    as a knowledge graph. It enables queries like "What does the user know about
-    Project X?" by traversing entity relationships. See the memory management
-    guide for details.
+    The knowledge graph (`KnowledgeGraph`) stores entities and notes as nodes
+    and typed, evidenced relations as edges, over memory and documents at the
+    same time. It answers "what is connected to Project X, and why?" by
+    walking relationships (`neighbors`, `path`, `explain`) under the same
+    scope rules as retrieval. See the [Knowledge Graph guide](guides/knowledge-graph.md).
 
 ---
 

@@ -21,13 +21,28 @@ from datetime import datetime
 from itertools import pairwise
 from typing import Any, Literal
 
-from anchor.graph.algorithms import adjacency, degree, personalized_pagerank
+from anchor.graph.algorithms import adjacency, degree, louvain, personalized_pagerank
 from anchor.models.graph import GraphEdge, GraphNode, Provenance, normalize_key
 from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
 from anchor.protocols.storage import GraphStore
 from anchor.storage.memory_store import InMemoryGraphStore
 
 Direction = Literal["out", "in", "both"]
+
+
+def _leiden(adj: dict[str, list[str]]) -> dict[str, int] | None:
+    """Leiden via igraph when installed (``pip install astro-anchor[graph]``), else ``None``."""
+    try:
+        import igraph  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    nodes = sorted(adj)
+    index = {n: i for i, n in enumerate(nodes)}
+    edges = sorted({(index[a], index[b]) for a in nodes for b in adj[a] if index[a] < index[b]})
+    graph = igraph.Graph(n=len(nodes), edges=edges)
+    membership = graph.community_leiden(objective_function="modularity", n_iterations=-1).membership
+    renumber: dict[int, int] = {}
+    return {n: renumber.setdefault(int(membership[index[n]]), len(renumber)) for n in nodes}
 
 
 def _match_key(text: str) -> str:
@@ -51,10 +66,13 @@ class KnowledgeGraph:
         graph.query(["alice"], top_k=5)                # [("mem-001", score)]
     """
 
-    __slots__ = ("_store",)
+    __slots__ = ("_communities_cache", "_store")
 
     def __init__(self, store: GraphStore | None = None) -> None:
         self._store: GraphStore = store if store is not None else InMemoryGraphStore()
+        # (scope, as_of, store.version) → partition; derived data is never
+        # persisted — recomputed lazily when the graph changes (roadmap #4).
+        self._communities_cache: tuple[tuple[Any, ...], dict[str, int]] | None = None
 
     @property
     def store(self) -> GraphStore:
@@ -363,6 +381,29 @@ class KnowledgeGraph:
         deg = degree(adj)
         ranked = sorted(((n, deg.get(n, 0)) for n in sub.nodes), key=lambda kv: (-kv[1], kv[0]))
         return ranked[:k]
+
+    def communities(
+        self,
+        *,
+        scope: RetrievalScope | None = None,
+        as_of: datetime | None = None,
+    ) -> dict[str, int]:
+        """``{node_id: community_id}`` over the visible subgraph, cached by graph version.
+
+        Engine: igraph's Leiden when the ``[graph]`` extra is installed,
+        else the built-in deterministic Louvain. Isolated nodes
+        get their own community.
+        """
+        key = (scope, as_of, self._store.version)
+        if self._communities_cache is not None and self._communities_cache[0] == key:
+            return dict(self._communities_cache[1])
+        sub = self._store.subgraph(scope=scope, as_of=as_of)
+        adj = adjacency((e.source, e.target) for e in sub.edges)
+        for node_id in sub.nodes:
+            adj.setdefault(node_id, [])
+        partition = _leiden(adj) or louvain(adj)
+        self._communities_cache = (key, partition)
+        return dict(partition)
 
     def _exists(self, node_id: str, scope: RetrievalScope | None) -> bool:
         if self._store.get_node(node_id) is None:

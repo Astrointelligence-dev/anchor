@@ -269,73 +269,82 @@ class LLMGraphExtractor:
 
     def _parse(self, data: dict[str, Any]) -> Extraction:
         result = Extraction()
-        seen_nodes: set[str] = set()
-
-        def node(name: Any, **meta: Any) -> str | None:
-            if not isinstance(name, str) or not name.strip():
-                return None
-            key = normalize_key(name)
-            if key not in seen_nodes:
-                seen_nodes.add(key)
-                aliases = meta.pop("aliases", ())
-                result.nodes.append(
-                    GraphNode(
-                        id=name,
-                        label=name.strip(),
-                        aliases=tuple(a for a in aliases if isinstance(a, str) and a.strip()),
-                        metadata={"kind": "entity", "extractor": "llm", **meta},
-                    )
-                )
-            return key
-
+        nodes: dict[str, GraphNode] = {}
         for ent in data.get("entities") or []:
             if isinstance(ent, dict):
-                node(ent.get("name"), type=ent.get("type"), aliases=ent.get("aliases") or ())
-        seen_edges: set[tuple[str, str, str]] = set()
+                _add_node(nodes, ent.get("name"), ent.get("type"), ent.get("aliases") or ())
+        seen: set[tuple[str, str, str]] = set()
         for rel in data.get("relations") or []:
-            if not isinstance(rel, dict) or not isinstance(rel.get("relation"), str):
+            edge = _parse_relation(rel, nodes)
+            if edge is None:
                 continue
-            src, tgt = rel.get("source"), rel.get("target")
-            if not (isinstance(src, str) and src.strip() and isinstance(tgt, str) and tgt.strip()):
-                continue
-            try:
-                relation = normalize_key(rel["relation"])
-            except ValueError:
-                continue
-            if normalize_key(src) == normalize_key(tgt):
-                continue
-            source, target = node(src), node(tgt)
-            if source is None or target is None:  # unreachable: validated above
-                continue
-            key = (source, relation, target)
-            if key in seen_edges:
-                continue
-            seen_edges.add(key)
-            provenance = rel.get("provenance")
-            confidence = rel.get("confidence", 0.9)
-            if provenance not in _PROVENANCE:
-                provenance = "ambiguous"
-            if not isinstance(confidence, int | float):
-                confidence = 0.9
-            confidence = max(0.0, min(1.0, float(confidence)))
-            if provenance == "ambiguous":
-                confidence = min(confidence, 0.3)
-            fact = rel.get("fact")
-            result.edges.append(
-                GraphEdge(
-                    source=source,
-                    target=target,
-                    relation=relation,
-                    fact=fact if isinstance(fact, str) and fact.strip() else None,
-                    provenance=provenance,  # type: ignore[arg-type]
-                    confidence=confidence,
-                    metadata={"extractor": "llm"},
-                )
-            )
+            key = (edge.source, edge.relation, edge.target)
+            if key not in seen:
+                seen.add(key)
+                result.edges.append(edge)
+        result.nodes = list(nodes.values())
         return result
 
     def __repr__(self) -> str:
         return f"LLMGraphExtractor(llm={self._llm!r})"
+
+
+def _add_node(
+    nodes: dict[str, GraphNode], name: Any, kind: Any = None, aliases: Any = ()
+) -> str | None:
+    """Register an entity by canonical key (first spelling wins). Returns the key."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    key = normalize_key(name)
+    if key not in nodes:
+        alias_list = aliases if isinstance(aliases, list | tuple) else ()
+        meta: dict[str, Any] = {"kind": "entity", "extractor": "llm"}
+        if kind is not None:
+            meta["type"] = kind
+        nodes[key] = GraphNode(
+            id=name,
+            label=name.strip(),
+            aliases=tuple(a for a in alias_list if isinstance(a, str) and a.strip()),
+            metadata=meta,
+        )
+    return key
+
+
+def _parse_relation(rel: Any, nodes: dict[str, GraphNode]) -> GraphEdge | None:
+    """One relation dict → edge (endpoints registered as nodes), or ``None`` if unusable."""
+    if not isinstance(rel, dict) or not isinstance(rel.get("relation"), str):
+        return None
+    src, tgt = rel.get("source"), rel.get("target")
+    if not (isinstance(src, str) and isinstance(tgt, str)):
+        return None
+    try:
+        relation = normalize_key(rel["relation"])
+        if normalize_key(src) == normalize_key(tgt):
+            return None
+    except ValueError:
+        return None
+    source, target = _add_node(nodes, src), _add_node(nodes, tgt)
+    if source is None or target is None:
+        return None
+    provenance = rel.get("provenance")
+    confidence = rel.get("confidence", 0.9)
+    if provenance not in _PROVENANCE:
+        provenance = "ambiguous"
+    if not isinstance(confidence, int | float):
+        confidence = 0.9
+    confidence = max(0.0, min(1.0, float(confidence)))
+    if provenance == "ambiguous":
+        confidence = min(confidence, 0.3)
+    fact = rel.get("fact")
+    return GraphEdge(
+        source=source,
+        target=target,
+        relation=relation,
+        fact=fact if isinstance(fact, str) and fact.strip() else None,
+        provenance=provenance,  # type: ignore[arg-type]
+        confidence=confidence,
+        metadata={"extractor": "llm"},
+    )
 
 
 def entry_to_item(entry: MemoryEntry, *, vault: str) -> ContextItem:

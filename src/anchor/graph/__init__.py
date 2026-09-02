@@ -1,6 +1,14 @@
 """Knowledge graph over memory and documents (roadmap #4)."""
 
-from .algorithms import adjacency, bfs, degree, personalized_pagerank, shortest_path
+from .algorithms import (
+    adjacency,
+    bfs,
+    degree,
+    louvain,
+    modularity,
+    personalized_pagerank,
+    shortest_path,
+)
 from .knowledge_graph import KnowledgeGraph
 
 __all__ = [
@@ -8,6 +16,8 @@ __all__ = [
     "adjacency",
     "bfs",
     "degree",
+    "louvain",
+    "modularity",
     "personalized_pagerank",
     "shortest_path",
 ]

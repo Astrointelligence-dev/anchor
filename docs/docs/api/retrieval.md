@@ -26,6 +26,29 @@ class AsyncReranker(Protocol):
 
 ## Core Retrievers
 
+### GraphRetriever
+
+Spreading activation (personalized PageRank) from the knowledge-graph nodes
+a query mentions, optionally seeded by the nearest passages of a
+`VectorStore`; items keep their canonical ids so `HybridRetriever` fuses
+them by RRF. Implements `Retriever` (`scope` honoured).
+
+```python
+GraphRetriever(
+    graph: KnowledgeGraph,
+    context_store: ContextStore,
+    entity_extractor: Callable[[str], list[str]] | None = None,
+    *,
+    vector_store: VectorStore | None = None,
+    embeddings: EmbeddingProvider | None = None,
+    seed_k: int = 5,
+    damping: float = 0.5,
+    tokenizer: Tokenizer | None = None,
+)
+```
+
+See [Knowledge Graph](graph.md).
+
 ### DenseRetriever
 
 Embedding-based retrieval via a `VectorStore` backend.

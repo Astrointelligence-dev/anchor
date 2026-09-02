@@ -13,8 +13,8 @@ The memory system has three tiers:
    (`SlidingWindowMemory` or `SummaryBufferMemory`).
 2. **Persistent facts** -- long-term entries in a `MemoryEntryStore`,
    managed through `MemoryManager`.
-3. **Graph memory** -- an optional entity-relationship graph
-   (`SimpleGraphMemory`) for structured knowledge.
+3. **Knowledge graph** -- an optional graph over memory *and* documents
+   (`KnowledgeGraph`), see the [Knowledge Graph guide](knowledge-graph.md).
 
 `MemoryManager` sits on top, producing `ContextItem` objects for the pipeline.
 
@@ -140,36 +140,31 @@ mem = SummaryBufferMemory(max_tokens=512, progressive_compact_fn=progressive)
     If the compaction function raises an exception, the raw turn content
     is used as a fallback so evicted data is never lost.
 
-## SimpleGraphMemory
+## Knowledge graph
 
-An in-memory directed graph for entity-relationship tracking without an
-external graph database.
+Memory facts can feed the same knowledge graph as your documents. Give the
+`MemoryManager` a `GraphIndexer` and every fact added is indexed (the item
+id is the entry id), an updated fact is re-extracted, and a deleted fact
+takes its evidence with it:
 
 ```python
-from anchor import SimpleGraphMemory
+from anchor import GraphIndexer, KnowledgeGraph, LLMGraphExtractor, MemoryManager
 
-graph = SimpleGraphMemory()
-graph.add_entity("alice", {"type": "person", "role": "engineer"})
-graph.add_entity("project-x", {"type": "project"})
-graph.add_relationship("alice", "works_on", "project-x")
+graph = KnowledgeGraph()
+manager = MemoryManager(
+    persistent_store=store,
+    graph=GraphIndexer(graph, extractors=[LLMGraphExtractor(llm)]),
+)
+manager.add_fact("Alice works on Project X with Bob.")
 
-graph.add_entity("bob", {"type": "person"})
-graph.add_relationship("bob", "works_on", "project-x")
-graph.link_memory("alice", "mem-001")
-graph.link_memory("project-x", "mem-002")
-
-# BFS traversal: find related entities within 2 hops
-related = graph.get_related_entities("alice", max_depth=2)
-print(related)  # ['project-x', 'bob']
-
-# Collect memory IDs for entity and its neighborhood
-memory_ids = graph.get_related_memory_ids("alice", max_depth=2)
-print(memory_ids)  # ['mem-001', 'mem-002']
+graph.neighbors("alice", max_depth=2)      # ['project_x', 'bob']
+graph.related_items("Project X")           # [<entry id>]
 ```
 
-!!! tip
-    `add_relationship` auto-creates nodes for source and target if they
-    do not already exist. `link_memory` requires the entity to exist.
+`graph_retrieval_step(graph, store, entity_extractor)` pulls the memory
+entries a query's entities lead to into the pipeline. The full API, the
+scope rules and the wikilink extractors for documents are in the
+[Knowledge Graph guide](knowledge-graph.md).
 
 ## Eviction Policies
 

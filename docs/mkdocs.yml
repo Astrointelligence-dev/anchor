@@ -79,6 +79,7 @@ nav:
     - Retrieval: guides/retrieval.md
     - Advanced Retrieval: guides/advanced-retrieval.md
     - Memory: guides/memory.md
+    - Knowledge Graph: guides/knowledge-graph.md
     - Ingestion: guides/ingestion.md
     - Query Transform: guides/query-transform.md
     - Classifiers: guides/classifiers.md
@@ -105,6 +106,7 @@ nav:
     - Pipeline: api/pipeline.md
     - Retrieval: api/retrieval.md
     - Memory: api/memory.md
+    - Knowledge Graph: api/graph.md
     - Ingestion: api/ingestion.md
     - Query: api/query.md
     - Evaluation: api/evaluation.md

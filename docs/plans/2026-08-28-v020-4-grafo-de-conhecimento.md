@@ -395,16 +395,30 @@ indexador é síncrono). Suíte 3048 verdes; ruff/mypy no baseline.
 
 ### E. Comunidades + hubs + docs
 
-- [ ] `graph/algorithms.py`: `label_propagation` ou Louvain próprio (≤150
+- [x] `graph/algorithms.py`: ~~`label_propagation`~~ Louvain ou Louvain próprio (≤150
       linhas), testado contra `networkx` (dev-dep) por modularidade; cache
       por `(vault, scope, graph_version)`; `KnowledgeGraph.communities()`,
       rótulo de comunidade em `explain`/`hubs`.
-- [ ] Extra `[graph]` = `igraph`: Leiden + `personalized_pagerank` em C
+- [x] Extra `[graph]` = `igraph`: Leiden + `personalized_pagerank` em C
       quando instalado (mesma API, troca de motor).
-- [ ] Docs (`guides/memory.md`, `api/memory.md`, `api/pipeline.md`, `faq.md`,
+- [x] Docs (`guides/memory.md`, `api/memory.md`, `api/pipeline.md`, `faq.md`,
       `cookbook/production-patterns.md` — lista no doc de pesquisa),
       CHANGELOG (Breaking: `link_memory` → `link_item`; Added), `llms.txt`.
 - [ ] Ritual xhigh do diff da frente + juiz; Review preenchido.
+
+**Fase E entregue** (sessão 11). Louvain próprio (fase local + agregação,
+ordem fixa → determinístico, ~90 linhas) no lugar do label propagation:
+o LPA com desempate pelo menor rótulo **colapsava dois triângulos ligados
+por uma aresta numa comunidade só** (provado no teste); a `modularity`
+inicial também estava errada e foi trocada pela forma por comunidade,
+conferida contra `networkx.community.modularity` (igual a 1e-9). Extra
+`[graph]` = igraph: `_leiden` troca o motor quando importável (teste só
+roda com o extra instalado). `communities()` cacheado por `(scope, as_of,
+store.version)`; `anchor graph communities`. Docs: guia
+`guides/knowledge-graph.md` e `api/graph.md` novos; `guides/memory.md`,
+`api/memory.md`, `api/pipeline.md`, `api/retrieval.md`, `api/storage.md`,
+`api/ingestion.md`, `faq.md`, índices e `llms.txt` atualizados; `mkdocs
+build --strict` limpo. Ritual xhigh: abaixo, no Review.
 
 ## Review
 

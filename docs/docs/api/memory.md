@@ -126,30 +126,11 @@ SummaryBufferMemory(
 
 ---
 
-## SimpleGraphMemory
+## KnowledgeGraph
 
-In-memory directed graph for entity-relationship tracking.
-
-```python
-SimpleGraphMemory()
-```
-
-| Property | Type | Description |
-|---|---|---|
-| `entities` | `list[str]` | All entity IDs. |
-| `relationships` | `list[tuple[str, str, str]]` | All edges as `(source, relation, target)`. |
-
-| Method | Returns | Description |
-|---|---|---|
-| `add_entity(entity_id, metadata=None)` | `None` | Add or update an entity node. |
-| `add_relationship(source, relation, target)` | `None` | Add a directed edge. Auto-creates missing nodes. |
-| `link_memory(entity_id, memory_id)` | `None` | Link a `MemoryEntry.id` to an entity. Raises `KeyError` if missing. |
-| `get_related_entities(entity_id, max_depth=2)` | `list[str]` | BFS traversal, both directions. Starting entity excluded. |
-| `get_memory_ids_for_entity(entity_id)` | `list[str]` | Memory IDs linked to one entity. |
-| `get_related_memory_ids(entity_id, max_depth=2)` | `list[str]` | Deduplicated memory IDs from entity and neighbors. |
-| `get_entity_metadata(entity_id)` | `dict[str, Any]` | Copy of entity metadata. Raises `KeyError` if missing. |
-| `remove_entity(entity_id)` | `None` | Remove entity, edges, and memory links. |
-| `clear()` | `None` | Remove everything. |
+The entity graph moved to `anchor.graph` and now spans memory and
+documents: see [Knowledge Graph](graph.md). `MemoryManager(graph=GraphIndexer(...))`
+keeps it in step with the persistent store.
 
 ---
 

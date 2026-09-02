@@ -424,3 +424,37 @@ class TestScope:
         # a child asking for "/" cannot see more than the parent
         assert g.nodes(scope=parent.intersect(widen)) == g.nodes(scope=parent)
         assert "villain" not in g.nodes(scope=parent.intersect(widen))
+
+
+class TestCommunities:
+    def test_communities_follow_scope_and_cache_by_version(self) -> None:
+        g = _campaign()
+        g.add_edge("far-a", "r", "far-b")
+        part = g.communities()
+        assert part["hero"] == part["city"]
+        assert part["far-a"] == part["far-b"] != part["hero"]
+        assert g.communities() is not part  # a copy each call...
+        assert g.communities() == part  # ...but served from the cache
+        assert "villain" not in g.communities(scope=NO_SECRET)
+        # the graph changed → recomputed from the current subgraph, not the cache
+        from anchor.graph.algorithms import adjacency, louvain
+
+        for a, b in (("far-a", "hero"), ("far-a", "city"), ("far-b", "hero"), ("far-b", "city")):
+            g.add_edge(a, "r", b)
+        sub = g.store.subgraph()
+        fresh = louvain(adjacency((e.source, e.target) for e in sub.edges))
+        assert g.communities() == fresh
+        assert len(g.edges("far-a")) == 3
+
+    def test_igraph_engine_when_installed(self) -> None:
+        pytest.importorskip("igraph")
+        from anchor.graph.knowledge_graph import _leiden
+
+        g = _campaign()
+        sub = g.store.subgraph()
+        from anchor.graph.algorithms import adjacency
+
+        adj = adjacency((e.source, e.target) for e in sub.edges)
+        part = _leiden(adj)
+        assert part is not None
+        assert set(part) == set(adj)
