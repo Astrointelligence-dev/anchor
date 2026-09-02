@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from anchor._math import cosine_similarity as _cosine_similarity
+from anchor.models.memory import _compute_content_hash
 from anchor.protocols.memory import MemoryOperation
 
 if TYPE_CHECKING:
@@ -79,6 +80,9 @@ class SimilarityConsolidator:
         return existing.model_copy(
             update={
                 "content": content,
+                # model_copy skips validators: recompute the hash or the merged
+                # entry keeps the OLD one and dedupe misfires against it.
+                "content_hash": _compute_content_hash(content),
                 "tags": merged_tags,
                 "links": merged_links,
                 "source_turns": merged_source_turns,
