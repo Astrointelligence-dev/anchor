@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from typing import Any
 
 from anchor.exceptions import RetrieverError
 from anchor.graph.knowledge_graph import KnowledgeGraph
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
-from anchor.models.scope import RetrievalScope, same_vault
+from anchor.models.scope import RetrievalScope, same_vault, scope_kwargs
 from anchor.protocols.embeddings import EmbeddingProvider
 from anchor.protocols.storage import ContextStore, VectorStore
 from anchor.protocols.tokenizer import Tokenizer
 from anchor.tokens.counter import get_default_counter
+
+logger = logging.getLogger(__name__)
 
 
 class GraphRetriever:
@@ -79,8 +81,7 @@ class GraphRetriever:
         else:
             msg = "GraphRetriever has a vector_store but no embeddings and query.embedding is None"
             raise RetrieverError(msg)
-        kwargs: dict[str, Any] = {} if scope is None else {"scope": scope}
-        hits = self._vector_store.search(embedding, top_k=self._seed_k, **kwargs)
+        hits = self._vector_store.search(embedding, top_k=self._seed_k, **scope_kwargs(scope))
         return [item_id for item_id, _ in hits]
 
     def retrieve(
@@ -91,25 +92,35 @@ class GraphRetriever:
         scope: RetrievalScope | None = None,
     ) -> list[ContextItem]:
         """Items ranked by activation from the query's seeds, within *scope*."""
+        # One scoped load serves both the mention matcher and the walk.
+        sub = self._graph.store.subgraph(scope=scope)
         if self._entity_extractor is not None:
             names = self._entity_extractor(query.query_str)
         else:
-            names = self._graph.mentions(query.query_str, scope=scope)
+            names = self._graph.mentions(query.query_str, scope=scope, subgraph=sub)
         ranked = self._graph.query(
             names,
             item_seeds=self._item_seeds(query, scope),
             top_k=top_k,
             scope=scope,
             damping=self._damping,
+            subgraph=sub,
         )
-        if not ranked:
+        # Resolve first, normalize after: an id the context store does not
+        # hold (a memory entry indexed via index_entries, say) must not be the
+        # score everything else is divided by.
+        resolved = [
+            (item, score)
+            for item_id, score in ranked
+            if (item := self._context_store.get(item_id)) is not None
+        ]
+        if not resolved:
+            if ranked:
+                logger.debug("graph ranked %d items, none resolve", len(ranked))
             return []
-        top = ranked[0][1]
+        top = resolved[0][1]
         items: list[ContextItem] = []
-        for item_id, score in ranked:
-            item = self._context_store.get(item_id)
-            if item is None:
-                continue
+        for item, score in resolved:
             items.append(
                 item.model_copy(
                     update={

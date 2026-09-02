@@ -9,13 +9,12 @@ in-memory reference. Edges are invalidated in place; the live
 
 from __future__ import annotations
 
-import asyncio
 import threading
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from anchor.models.graph import GraphEdge, GraphNode, Subgraph
+from anchor.models.graph import GraphEdge, GraphNode, Subgraph, require_aware
 from anchor.models.scope import (
     DEFAULT_VAULT,
     ROOT_NAMESPACE,
@@ -25,6 +24,7 @@ from anchor.models.scope import (
 )
 from anchor.storage._graph_sql import (
     EDGE_COLUMNS,
+    check_new_edge,
     edge_to_row,
     merge_edge,
     merge_node,
@@ -104,9 +104,13 @@ class SqliteGraphStore:
             current = self.get_node(node.id)
             stored = node if current is None else merge_node(current, node)
             row = node_to_row(stored)
+            # ON CONFLICT ... DO UPDATE keeps the rowid (and so the insertion
+            # order every read relies on); INSERT OR REPLACE would re-insert.
             conn.execute(
-                "INSERT OR REPLACE INTO graph_nodes "
-                "(vault, id, label, aliases_json, metadata_json) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO graph_nodes (vault, id, label, aliases_json, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(vault, id) DO UPDATE SET "
+                "label = excluded.label, aliases_json = excluded.aliases_json, "
+                "metadata_json = excluded.metadata_json",
                 (self._vault, row["id"], row["label"], row["aliases_json"], row["metadata_json"]),
             )
             self._bump(conn)
@@ -126,6 +130,7 @@ class SqliteGraphStore:
 
     def add_edge(self, edge: GraphEdge) -> GraphEdge:
         with self._lock:
+            check_new_edge(edge)
             conn = self._conn()
             if edge.evidence:
                 known = {
@@ -148,6 +153,11 @@ class SqliteGraphStore:
                     "INSERT OR IGNORE INTO graph_nodes (vault, id, label) VALUES (?, ?, ?)",
                     (self._vault, node_id, node_id),
                 )
+                conn.executemany(  # the item mentions both endpoints
+                    "INSERT OR IGNORE INTO graph_node_items (vault, node_id, item_id) "
+                    "VALUES (?, ?, ?)",
+                    [(self._vault, node_id, i) for i in edge.evidence],
+                )
             live = conn.execute(
                 _EDGE_SELECT + " WHERE vault = ? AND source = ? AND relation = ? "
                 "AND target = ? AND invalidated_at IS NULL",
@@ -157,14 +167,17 @@ class SqliteGraphStore:
                 evidence = self._evidence_of(conn, [live["id"]]).get(live["id"], [])
                 current = row_to_edge(live, evidence)
                 stored = merge_edge(current, edge)
+                row = edge_to_row(stored)
                 conn.execute(
                     "UPDATE graph_edges SET confidence = ?, provenance = ?, fact = ?, "
-                    "metadata_json = ? WHERE vault = ? AND id = ?",
+                    "valid_from = ?, valid_to = ?, metadata_json = ? WHERE vault = ? AND id = ?",
                     (
-                        stored.confidence,
-                        stored.provenance,
-                        stored.fact,
-                        edge_to_row(stored)["metadata_json"],
+                        row["confidence"],
+                        row["provenance"],
+                        row["fact"],
+                        row["valid_from"],
+                        row["valid_to"],
+                        row["metadata_json"],
                         self._vault,
                         stored.id,
                     ),
@@ -195,7 +208,9 @@ class SqliteGraphStore:
     def invalidate_edge(self, edge_id: str, *, at: datetime | None = None) -> bool:
         with self._lock:
             conn = self._conn()
-            stamp = (at if at is not None else datetime.now(UTC)).isoformat()
+            when = require_aware(at, "at") if at is not None else datetime.now(UTC)
+            assert when is not None  # noqa: S101 -- narrowed above
+            stamp = when.isoformat()
             cursor = conn.execute(
                 "UPDATE graph_edges SET invalidated_at = ? "
                 "WHERE vault = ? AND id = ? AND invalidated_at IS NULL",
@@ -234,15 +249,11 @@ class SqliteGraphStore:
                 msg = f"node '{node_id}' does not exist in the graph"
                 raise KeyError(msg)
             ns = normalize_namespace(namespace)
-            known = conn.execute(
-                "SELECT namespace FROM graph_items WHERE vault = ? AND item_id = ?",
-                (self._vault, item_id),
-            ).fetchone()
-            if known is not None and known[0] != ns:
-                msg = f"item '{item_id}' is already linked under namespace '{known[0]}', not '{ns}'"
-                raise ValueError(msg)
+            # The latest link decides the item's namespace (a re-indexed,
+            # moved document moves its evidence, as the ContextStore does).
             conn.execute(
-                "INSERT OR IGNORE INTO graph_items (vault, item_id, namespace) VALUES (?, ?, ?)",
+                "INSERT INTO graph_items (vault, item_id, namespace) VALUES (?, ?, ?) "
+                "ON CONFLICT(vault, item_id) DO UPDATE SET namespace = excluded.namespace",
                 (self._vault, item_id, ns),
             )
             conn.execute(
@@ -276,19 +287,16 @@ class SqliteGraphStore:
                 (self._vault, item_id),
             )
             invalidated = 0
-            stamp = datetime.now(UTC).isoformat()
-            for edge_id in edge_ids:
-                left = conn.execute(
-                    "SELECT 1 FROM graph_edge_items WHERE vault = ? AND edge_id = ? LIMIT 1",
-                    (self._vault, edge_id),
-                ).fetchone()
-                if left is None:
-                    done = conn.execute(
-                        "UPDATE graph_edges SET invalidated_at = ? "
-                        "WHERE vault = ? AND id = ? AND invalidated_at IS NULL",
-                        (stamp, self._vault, edge_id),
-                    )
-                    invalidated += done.rowcount
+            if edge_ids:
+                # One statement: every touched live edge left with no evidence.
+                done = conn.execute(
+                    "UPDATE graph_edges SET invalidated_at = ? WHERE vault = ? "  # noqa: S608 -- placeholders only
+                    f"AND id IN ({_marks(len(edge_ids))}) AND invalidated_at IS NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM graph_edge_items ei "
+                    "WHERE ei.vault = graph_edges.vault AND ei.edge_id = graph_edges.id)",
+                    (datetime.now(UTC).isoformat(), self._vault, *edge_ids),
+                )
+                invalidated = done.rowcount
             self._bump(conn)
             return invalidated
 
@@ -307,14 +315,19 @@ class SqliteGraphStore:
 
     # -- reads ----------------------------------------------------------
 
-    def _visible(self, conn: sqlite3.Connection, scope: RetrievalScope | None) -> set[str] | None:
+    def _visible(
+        self, conn: sqlite3.Connection, scope: RetrievalScope | None
+    ) -> tuple[set[str] | None, bool]:
+        """(visible item ids or None when unscoped, whether the root namespace is visible)."""
         if scope is None:
-            return None
+            return None, True
         clauses, params = scope_sql_clauses(scope, "namespace")
         sql = "SELECT item_id FROM graph_items WHERE vault = ?" + "".join(  # noqa: S608 -- compiled clauses, placeholders only
             f" AND {c}" for c in clauses
         )
-        return {r[0] for r in conn.execute(sql, (self._vault, *params))}
+        return {r[0] for r in conn.execute(sql, (self._vault, *params))}, scope.matches(
+            ROOT_NAMESPACE
+        )
 
     def _node_items_of(
         self, conn: sqlite3.Connection, node_ids: Iterable[str] | None
@@ -350,7 +363,7 @@ class SqliteGraphStore:
 
     def node_items(self, node_id: str, *, scope: RetrievalScope | None = None) -> list[str]:
         conn = self._conn()
-        visible = self._visible(conn, scope)
+        visible, _ = self._visible(conn, scope)
         items = self._node_items_of(conn, [node_id]).get(node_id, [])
         return [i for i in items if visible is None or i in visible]
 
@@ -382,12 +395,12 @@ class SqliteGraphStore:
         ).fetchall()
         evidence = self._evidence_of(conn, [r["id"] for r in rows])
         edges = [row_to_edge(r, evidence.get(r["id"], [])) for r in rows]
-        visible = self._visible(conn, scope)
+        visible, root = self._visible(conn, scope)
         node_items: dict[str, list[str]] = {}
         if visible is not None:
             ends = [e.source for e in edges] + [e.target for e in edges]
             node_items = self._node_items_of(conn, ends)
-        return visible_edges(edges, node_items, visible, as_of)
+        return visible_edges(edges, node_items, visible, as_of, root)
 
     def subgraph(
         self,
@@ -396,7 +409,7 @@ class SqliteGraphStore:
         as_of: datetime | None = None,
     ) -> Subgraph:
         conn = self._conn()
-        visible = self._visible(conn, scope)
+        visible, root = self._visible(conn, scope)
         node_items = self._node_items_of(conn, None)
         all_nodes = [
             row_to_node(r)
@@ -406,7 +419,7 @@ class SqliteGraphStore:
                 (self._vault,),
             )
         ]
-        kept = set(visible_nodes([n.id for n in all_nodes], node_items, visible))
+        kept = set(visible_nodes([n.id for n in all_nodes], node_items, visible, root))
         nodes = {n.id: n for n in all_nodes if n.id in kept}
         rows = conn.execute(
             _EDGE_SELECT + " WHERE vault = ? AND invalidated_at IS NULL ORDER BY rowid",
@@ -420,86 +433,8 @@ class SqliteGraphStore:
             for n in nodes
         }
         return Subgraph(
-            nodes=nodes, edges=visible_edges(edges, node_items, visible, as_of), items=items
+            nodes=nodes, edges=visible_edges(edges, node_items, visible, as_of, root), items=items
         )
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(db={self._conn_manager.db_path!s}, vault={self._vault!r})"
-
-
-class AsyncSqliteGraphStore:
-    """Async twin of :class:`SqliteGraphStore`. Implements AsyncGraphStore.
-
-    Runs the sync store in a worker thread (``asyncio.to_thread``) — which
-    is what aiosqlite does underneath anyway, and the connection manager
-    hands every thread its own connection.
-    """
-
-    # ponytail: a native aiosqlite twin when the graph sits on a hot async path.
-    __slots__ = ("_sync",)
-
-    def __init__(
-        self, conn_manager: SqliteConnectionManager, *, vault: str = DEFAULT_VAULT
-    ) -> None:
-        self._sync = SqliteGraphStore(conn_manager, vault=vault)
-
-    @property
-    def vault(self) -> str:
-        return self._sync.vault
-
-    @property
-    def version(self) -> int:
-        return self._sync.version
-
-    async def upsert_node(self, node: GraphNode) -> GraphNode:
-        return await asyncio.to_thread(self._sync.upsert_node, node)
-
-    async def get_node(self, node_id: str) -> GraphNode | None:
-        return await asyncio.to_thread(self._sync.get_node, node_id)
-
-    async def add_edge(self, edge: GraphEdge) -> GraphEdge:
-        return await asyncio.to_thread(self._sync.add_edge, edge)
-
-    async def get_edge(self, edge_id: str) -> GraphEdge | None:
-        return await asyncio.to_thread(self._sync.get_edge, edge_id)
-
-    async def invalidate_edge(self, edge_id: str, *, at: datetime | None = None) -> bool:
-        return await asyncio.to_thread(self._sync.invalidate_edge, edge_id, at=at)
-
-    async def remove_node(self, node_id: str) -> bool:
-        return await asyncio.to_thread(self._sync.remove_node, node_id)
-
-    async def link_item(self, node_id: str, item_id: str, namespace: str = ROOT_NAMESPACE) -> None:
-        await asyncio.to_thread(self._sync.link_item, node_id, item_id, namespace)
-
-    async def unlink_item(self, item_id: str) -> int:
-        return await asyncio.to_thread(self._sync.unlink_item, item_id)
-
-    async def node_items(self, node_id: str, *, scope: RetrievalScope | None = None) -> list[str]:
-        return await asyncio.to_thread(self._sync.node_items, node_id, scope=scope)
-
-    async def edges_of(
-        self,
-        node_id: str,
-        *,
-        direction: Literal["out", "in", "both"] = "both",
-        scope: RetrievalScope | None = None,
-        as_of: datetime | None = None,
-    ) -> list[GraphEdge]:
-        return await asyncio.to_thread(
-            self._sync.edges_of, node_id, direction=direction, scope=scope, as_of=as_of
-        )
-
-    async def subgraph(
-        self,
-        *,
-        scope: RetrievalScope | None = None,
-        as_of: datetime | None = None,
-    ) -> Subgraph:
-        return await asyncio.to_thread(self._sync.subgraph, scope=scope, as_of=as_of)
-
-    async def clear(self) -> None:
-        await asyncio.to_thread(self._sync.clear)
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({self._sync!r})"

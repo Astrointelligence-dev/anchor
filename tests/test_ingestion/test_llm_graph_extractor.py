@@ -6,6 +6,8 @@ import json
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from anchor.graph import KnowledgeGraph
 from anchor.ingestion import GraphIndexer, LLMGraphExtractor
 from anchor.ingestion.graph_extractors import _EXTRACTION_PROMPT, DEFAULT_RELATIONS
@@ -115,8 +117,8 @@ class TestLLMGraphExtractor:
         stats = indexer.index_entries([entry])
         assert stats.items == 1
         assert graph.items("ana lima") == ["mem-ana"]
-        assert graph.neighbors("Ana") == []  # alias is not an id...
-        assert graph.mentions("what does Ana own?") == ["ana_lima"]  # ...but the matcher knows it
+        assert graph.neighbors("Ana") == ["team_payments", "billing_service", "mystery"]  # alias
+        assert graph.mentions("what does Ana own?") == ["ana_lima"]
         hop = graph.explain("ana lima", "billing service")[0]
         assert (hop.relation, hop.provenance, hop.evidence) == (
             "on_call_for",
@@ -126,3 +128,19 @@ class TestLLMGraphExtractor:
         assert graph.query(["team payments"], top_k=1) == [
             ("mem-ana", graph.query(["team payments"])[0][1])
         ]
+
+
+class TestReviewRegressions:
+    @pytest.mark.parametrize("payload", ['{"entities": true}', '{"relations": 7}', "[1, 2]"])
+    def test_unexpected_json_shapes_are_fail_soft(self, payload: str, caplog) -> None:
+        with caplog.at_level(logging.WARNING):
+            found = LLMGraphExtractor(FakeLLM(payload)).extract(_item())
+        assert found.nodes == []
+        assert found.edges == []
+        assert "graph extraction failed" in caplog.text
+
+    def test_non_dict_entities_are_skipped_quietly(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING):
+            found = LLMGraphExtractor(FakeLLM('{"entities": [1, 2]}')).extract(_item())
+        assert found.nodes == []
+        assert caplog.text == ""

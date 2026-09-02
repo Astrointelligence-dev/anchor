@@ -1,6 +1,6 @@
 # v0.2 · #4 — Grafo de conhecimento sobre memória e documentos
 
-**Status:** em execução (sessão 11, 2026-09-02: pesquisa + 4 decisões fechadas) · **Tamanho:** grande · **Depende de:** #3 (vault/namespace) ✅
+**Status:** fechada (sessão 11, 2026-09-02: pesquisa, 4 decisões, fases A–E, ritual xhigh) · **Tamanho:** grande · **Depende de:** #3 (vault/namespace) ✅
 **Sessão:** abrir com pesquisa, depois implementar. Provavelmente mais de uma sessão.
 
 ---
@@ -113,12 +113,12 @@ Fechadas pelo Arthur em 2026-09-02 (sessão 11), todas na recomendação da pesq
 ## Escopo
 
 - [x] ~~Mergear `feature/storage-layer-gaps`~~ → revisado; reescrever usando-o como referência (decisão sessão 11)
-- [ ] `SimpleGraphMemory` → grafo sobre `ContextItem`, com vault/namespace
-- [ ] Arestas com proveniência e validade temporal
-- [ ] Extração: wikilinks primeiro, extrator LLM depois
-- [ ] Detecção de comunidade + hubs (extra `[graph]`)
-- [ ] API de navegação: `query` (BFS com orçamento), `path`, `explain`, `backlinks`
-- [ ] `GraphScope` aplicado em toda travessia (de #3)
+- [x] `SimpleGraphMemory` → grafo sobre `ContextItem`, com vault/namespace (`KnowledgeGraph`; `SimpleGraphMemory` deletado)
+- [x] Arestas com proveniência e validade temporal
+- [x] Extração: wikilinks primeiro, extrator LLM depois (opt-in)
+- [x] Detecção de comunidade + hubs (extra `[graph]`)
+- [x] API de navegação: `query` (PPR), `path`, `explain`, `backlinks`, `neighbors`, `hubs`, `communities`
+- [x] ~~`GraphScope`~~ `RetrievalScope` aplicado em toda travessia (de #3)
 - [x] ~~`graph_scope` no `SubagentDefinition`~~ → coberto por `SubagentDefinition.scope` (mesmo `RetrievalScope`)
 
 **Fora:** export Obsidian (a decidir), Neo4j/FalkorDB, visualização.
@@ -134,9 +134,9 @@ sets, `ABTestRunner`. O modo clássico de falhar aqui é entregar um grafo lindo
 que ninguém consulta e um retrieval que não melhorou. Se o grafo não ganhar do
 RRF, isso se descobre em uma sessão em vez de em seis.
 
-- [ ] Golden set montado **antes** do construtor
-- [ ] A/B grafo vs híbrido+RRF, com número publicado no Review
-- [ ] Teste de vazamento: nó excluído invisível por qualquer caminho
+- [x] Golden set montado **antes** do construtor (`tests/fixtures/graph_corpus`, 40 notas / 30 queries)
+- [x] A/B grafo vs híbrido+RRF, com número publicado (fase B e Review)
+- [x] Teste de vazamento: nó excluído invisível por qualquer caminho (decoy em memória, SQLite, Postgres e CLI)
 
 ## Pesquisa — sessão 11 (2026-09-02)
 
@@ -341,8 +341,9 @@ graph query|path|explain|hubs|backlinks` com `--vault/--include/--exclude`.
 Worktree `.worktrees/storage-layer-gaps` removido (branch mantido como
 referência).
 
-Desvios: `AsyncSqliteGraphStore` delega ao store síncrono via
-`asyncio.to_thread` (é o que o aiosqlite faz por baixo; conexões do manager
+Desvios: `AsyncSqliteGraphStore` delegava ao store síncrono via
+`asyncio.to_thread` (**deletado no ritual**: zero consumidores, vazava
+conexões por thread — ver Review) (é o que o aiosqlite faz por baixo; conexões do manager
 são thread-local) — `ponytail:` twin nativo quando o grafo estiver num
 caminho async quente; `PostgresGraphStore.version` é contador in-process
 (caches derivados vivem in-process; `graph_meta` quando outro processo
@@ -409,7 +410,9 @@ indexador é síncrono). Suíte 3048 verdes; ruff/mypy no baseline.
 **Fase E entregue** (sessão 11). Louvain próprio (fase local + agregação,
 ordem fixa → determinístico, ~90 linhas) no lugar do label propagation:
 o LPA com desempate pelo menor rótulo **colapsava dois triângulos ligados
-por uma aresta numa comunidade só** (provado no teste); a `modularity`
+por uma aresta numa comunidade só** (observado ao rodar o teste dos dois
+triângulos; o LPA foi substituído antes do commit, então só o Louvain tem
+teste no tree); a `modularity`
 inicial também estava errada e foi trocada pela forma por comunidade,
 conferida contra `networkx.community.modularity` (igual a 1e-9). Extra
 `[graph]` = igraph: `_leiden` troca o motor quando importável (teste só
@@ -418,8 +421,135 @@ store.version)`; `anchor graph communities`. Docs: guia
 `guides/knowledge-graph.md` e `api/graph.md` novos; `guides/memory.md`,
 `api/memory.md`, `api/pipeline.md`, `api/retrieval.md`, `api/storage.md`,
 `api/ingestion.md`, `faq.md`, índices e `llms.txt` atualizados; `mkdocs
-build --strict` limpo. Ritual xhigh: abaixo, no Review.
+build --strict` limpo. Ritual xhigh: no Review.
 
-## Review
+## Review — sessão 11 (2026-09-02)
 
-_(preencher ao final)_
+### Números da frente (antes do ritual)
+
+Cinco fases em cinco commits (`4aedd9f` A, `3935305` B, `cedbf46` C,
+`1b3670e` D, `da441a9` E) sobre `f7489a6` (pesquisa + decisões). O A/B da
+fase B (recall@5 / MRR, 30 queries): híbrido+RRF **0.94 / 0.85**, grafo só
+0.85 / 0.66, RRF(híbrido, grafo) 0.94 / 0.73, RRF 2:1 0.94 / 0.77. **O grafo
+de wikilinks não ganha do híbrido em retrieval neste corpus**; o extrator
+LLM ficou opt-in, como a regra de verificação do plano previa.
+
+### Ritual xhigh `6cbedfd..dev` (10 finders → dedup ~30 → 6 verificadores → sweep → juiz)
+
+**Placar: 15 findings reportados (14 CONFIRMED + 1 PLAUSIBLE), todos
+corrigidos; 8 do sweep, todos corrigidos; ~12 de limpeza aplicados.** Cada
+verificador rodou o repro (SQLite, CLI real, `asyncio`); o Postgres foi
+rodado de novo via docker depois das correções (7 testes).
+
+#### Correção (os 15 do ReportFindings)
+
+1. ⚙ `anchor index --vault X --graph` crashava: chunks só recebiam o
+   namespace, nunca o vault do mount. **Crítico.**
+2. ⚙ `valid_from`/`valid_to` naive → `TypeError` em toda leitura; no SQLite
+   permanente. Agora **rejeitado na construção** (`require_aware`, juiz
+   preferiu fail-loud a assumir UTC).
+3. ⚙ Reindexar com outro `--namespace` levantava e deixava o estado partido
+   (`context_items` em /b, `graph_items` em /a). **Último link vence**,
+   como o `ContextStore`.
+4. ⚙ Tag `#` no frontmatter → id vazio → abortava o `index --graph`.
+5. ⚙ Seed/nome vazio levantava em `query`/`related_items`; o step derrubava
+   todas as entidades sob `on_error="skip"`.
+6. ⚙ Pontas de aresta sem evidência: `RetrievalScope()` escondia o que a
+   leitura sem escopo mostrava (o próprio exemplo do docstring); só
+   `WikilinkExtractor` deixava a nota-fonte invisível. **A evidência da
+   aresta evidencia as duas pontas; nó sem evidência vive na raiz `/`;
+   `RetrievalScope()` é a identidade** (teste de propriedade adicionado).
+7. ⚙ `merge_edge` descartava `valid_from`/`valid_to`/`invalidated_at` ao
+   reforçar. Regra única: valor recebido quando existe; `invalidated_at`
+   no `add_edge` é `ValueError`.
+8. ⚙ `MemoryManager.clear()` usava `list_all()` (sem expirados); GC e
+   `_store_with_consolidation` escreviam no store por fora do hook.
+   **`GraphIndexingEntryStore`** decora o store para todo escritor; os 4
+   hooks do manager saíram.
+9. ⚙ `KnowledgeGraph` aceitava store async (coroutine nunca awaitada).
+10. ⚙ `INSERT OR REPLACE` reordenava nós no SQLite; label placeholder de
+    ponta auto-criada nunca era substituído.
+11. ⚙ Cache de `communities()` não expirava com `as_of=None`.
+12. ⚙ `GraphRetriever` normalizava pelo score de um id descartado (memória).
+13. ⚙ Alias não resolvia em `path`/`explain`/`backlinks`/`node` (a CLI
+    prometia "name or alias").
+14. ⚙ `_visible` full scan por nó visitado (600 nós: 0,03 s → 0,30 s sob
+    escopo, 601 scans); `retrieve()` carregava o subgrafo 2×, a CLI 3×.
+    **Motor de travessia trocado**: um `subgraph()` por leitura +
+    `bfs`/`shortest_path` (medido pelo juiz: `path` longo 1,37 s → 26 ms).
+15. ⚙ `PostgresGraphStore.upsert_node` sem transação (merge perdido em
+    concorrência); twin async do SQLite vazava uma conexão por thread do
+    executor e fazia SELECT no loop.
+
+#### Sweep (8, corrigidos)
+
+Label placeholder (item 10); extrator só-arestas quebrava o indexador;
+guia importava `LLMGraphExtractor` de `anchor` (o export existia — o sweep
+errou nesse); `llms.txt` ainda tinha `SimpleGraphMemory`;
+`examples/graph_memory.py` importava a classe deletada (reescrito);
+`[all]` sem `graph` e dev sem igraph (o Leiden nunca rodava no CI); README
+sem o grafo; `add_edge` do SQLite sem `BEGIN IMMEDIATE` entre processos
+(fica: RLock cobre o processo; `ponytail:` anotado).
+
+#### Juiz adversarial (2 lentes: ponytail + SOTA) e a discussão
+
+Nove decisões do plano de correção: **D1 A+B aprovado; D2 aprovado com
+condição** (colapsar só `[\s\-_]+`, não `\W+` — `C++`/`.NET` viravam
+`c`/`net`; `_match_key` fica como tokenizador de menções); **D3 recusado**
+(dois `SqliteGraphStore` no mesmo arquivo precisam concordar via
+`graph_meta`; o Postgres ganhou a linha por paridade); **D4 motor aprovado,
+memo recusado** (um load por chamada não deixa o que memoizar; `subgraph=`
+passa entre `mentions` e `query`); **D5 callback recusado** (o GC dispara os
+hooks em `dry_run=True` — desligaria memória viva), decorador aprovado;
+**D6 exit 0 aprovado**; **D7 com condição** (`valid_from` = recebido, não
+`min`); **D8 rejeitar naive**; **D9 deletar o twin async do SQLite**.
+
+Dois pontos discutidos: (1) "A só nos stores, não no indexer" — cedeu: o
+namespace entra só por `link_item`, então o `link_item` por ponta no
+indexer é o registro, e A no store é o invariante da API manual; (2) o
+curto-circuito por `content_hash` no decorador — refutou com repro: o
+consolidador faz `model_copy(update={"content": ...})` e **deixa o hash
+stale** (bug pré-existente, commit separado); aprovou comparar `content`.
+
+#### Limpeza aplicada
+
+`merge_node`/`merge_edge`/`visible_*` são a única implementação (o
+in-memory era a "referência" que não usava as regras); `scope_kwargs` no
+retriever; `bfs`/`shortest_path` deixaram de ser código morto (são o
+motor); `GraphEdge.weight` e `IndexStats` por emissão removidos;
+`_parse` do extrator LLM dentro do `try` (`{"entities": true}` escapava);
+`unlink_item` em um `UPDATE` (N+1 fora).
+
+#### Deferido, com motivo
+
+- **`AsyncKnowledgeGraph`**: `PostgresGraphStore` cumpre `AsyncGraphStore`
+  e é testado direto; a API de navegação async chega com o primeiro
+  consumidor async (follow-up, README v0.4).
+- **Resolver de itens no `GraphRetriever`**: resolve só via `ContextStore`;
+  memória entra por `graph_retrieval_step` (que agora tem `id=entry.id`).
+  Um `resolver` injetável unificaria os dois caminhos.
+- **Commits por chunk no SQLite** (26/chunk): medido 0,03 s no corpus com
+  WAL/NORMAL; `ponytail:` batching quando um vault grande doer.
+- **`_store_with_consolidation` ignora `DELETE`** e **GC dispara hooks em
+  `dry_run`**: pré-existentes, fora do diff, anotados.
+- **Nó sem evidência após `unlink_item`** vira nó de raiz (documentado, sem
+  GC de nós).
+
+### Lições (correções registradas aqui, sem arquivo de lessons)
+
+- **Testar o invariante, não o exemplo**: `RetrievalScope()` ≡ `None` é
+  uma propriedade; os testes hand-linkavam evidência por nó e codificavam o
+  meu modelo mental, não a regra — o próprio docstring violava a regra e
+  ninguém viu até o ritual. Todo escopo novo ganha um teste de identidade.
+- **`ruff check --fix` no diretório inteiro** toca arquivos alheios (duas
+  vezes nesta sessão); fixar só nos arquivos tocados.
+- **Edits por heredoc depois de `ruff format`**: um `assert old in t` que
+  falha no meio do script deixa os arquivos anteriores gravados e os
+  seguintes não — custou três rodadas. Um arquivo por script, verificar por
+  `grep -c` depois.
+- **O SOTA decide detalhes que o gosto não decide**: `\W+` vs separadores
+  no `normalize_key`, hash vs conteúdo no curto-circuito — o juiz só
+  desempatou porque rodou o caso concreto.
+
+Suíte **3087 verdes** (+ 7 Postgres via docker); ruff 150 (baseline 154);
+mypy 140 = baseline.

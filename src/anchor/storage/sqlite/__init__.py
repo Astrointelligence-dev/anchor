@@ -13,7 +13,7 @@ from anchor.storage.sqlite._document_store import (
     SqliteDocumentStore,
 )
 from anchor.storage.sqlite._entry_store import AsyncSqliteEntryStore, SqliteEntryStore
-from anchor.storage.sqlite._graph_store import AsyncSqliteGraphStore, SqliteGraphStore
+from anchor.storage.sqlite._graph_store import SqliteGraphStore
 from anchor.storage.sqlite._schema import ensure_tables, ensure_tables_async
 from anchor.storage.sqlite._vec_store import SqliteVecVectorStore
 from anchor.storage.sqlite._vector_store import (
@@ -25,7 +25,6 @@ __all__ = [
     "AsyncSqliteContextStore",
     "AsyncSqliteDocumentStore",
     "AsyncSqliteEntryStore",
-    "AsyncSqliteGraphStore",
     "AsyncSqliteVectorStore",
     "SqliteConnectionManager",
     "SqliteContextStore",

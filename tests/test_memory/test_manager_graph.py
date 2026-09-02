@@ -66,3 +66,58 @@ class TestManagerGraph:
         entry = manager.add_fact("alice bob")
         assert manager.update_fact(entry.id, "x y") is not None
         assert manager.delete_fact(entry.id) is True
+
+
+class TestGraphIndexingEntryStore:
+    def test_every_writer_keeps_the_graph_in_step(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from anchor.ingestion import GraphIndexingEntryStore
+        from anchor.memory.gc import MemoryGarbageCollector
+        from anchor.models.memory import MemoryEntry
+        from anchor.pipeline.memory_steps import _store_with_consolidation
+
+        graph = KnowledgeGraph()
+        inner = InMemoryEntryStore()
+        store = GraphIndexingEntryStore(
+            inner, GraphIndexer(graph, extractors=[WordPairExtractor()])
+        )
+        # the consolidation step writes straight to the store
+        _store_with_consolidation([MemoryEntry(id="e1", content="alice bob")], store, None)
+        assert graph.neighbors("alice") == ["bob"]
+        # unchanged content: no re-extraction (version stays)
+        version = graph.store.version
+        store.add(MemoryEntry(id="e1", content="alice bob"))
+        assert graph.store.version == version
+        # changed content: old evidence goes, new comes
+        store.add(MemoryEntry(id="e1", content="alice carol"))
+        assert graph.neighbors("alice") == ["carol"]
+        assert graph.items("bob") == []
+        # the garbage collector deletes straight on the store
+        expired = MemoryEntry(
+            id="e2", content="dave erin", expires_at=datetime.now(UTC) - timedelta(days=1)
+        )
+        store.add(expired)
+        assert graph.items("dave") == ["e2"]
+        MemoryGarbageCollector(store).collect_expired()
+        assert graph.items("dave") == []
+        # clear unlinks expired entries too
+        store.add(
+            MemoryEntry(
+                id="e3", content="fay gus", expires_at=datetime.now(UTC) - timedelta(days=1)
+            )
+        )
+        store.clear()
+        assert graph.items("fay") == []
+        assert graph.items("alice") == []
+        assert store.list_all() == []
+        assert store.inner is inner
+        assert store.search("x") == []
+        assert store.list_all_unfiltered() == []  # forwarded
+
+    def test_manager_wraps_the_store(self) -> None:
+        from anchor.ingestion import GraphIndexingEntryStore
+
+        manager, graph = _manager()
+        assert isinstance(manager.persistent_store, GraphIndexingEntryStore)
+        assert manager.persistent_store.graph is graph

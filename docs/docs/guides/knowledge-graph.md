@@ -48,10 +48,14 @@ graph.path("hero", "city", scope=no_secret)   # None if the only route crossed t
 Rules, identical on every backend:
 
 - an item is visible when the scope matches its namespace;
-- a node is visible when at least one of its items is (a node without any
-  evidence exists only unscoped);
+- a node is visible when at least one of its items is; a node without any
+  evidence (a hand-added one) lives at the root namespace `/` — visible under
+  an empty include, hidden by `exclude=("/",)` or a narrower include, exactly
+  like memory;
 - an edge is visible when it is live at `as_of`, both endpoints are visible
-  and at least one evidence item is visible.
+  and at least one evidence item is visible. An edge's evidence evidences
+  both endpoints (the item mentions them), so `RetrievalScope()` is the
+  identity: it shows exactly what an unscoped read shows.
 
 A hidden node is a wall, not a bridge: `path` and `explain` refuse to cross
 it, `backlinks` and `hubs` never list it, `query` never scores its items.
@@ -88,9 +92,12 @@ graph.unlink_item(items[0].id)       # removal: edges left without evidence are 
 `LLMGraphExtractor(llm)` extracts entities (name, type, aliases) and typed
 relations (`relation`, `fact`, `provenance`, `confidence`) in a single call,
 with a suggested vocabulary (`DEFAULT_RELATIONS`) and no second "gleaning"
-pass. Give it to a `MemoryManager` and the graph follows the persistent
-store: added facts are indexed, updated facts re-extracted, deleted facts
-take their evidence with them.
+pass. Give it to a `MemoryManager` and the persistent store is wrapped in a
+`GraphIndexingEntryStore`: whoever writes — the manager, the pipeline's
+consolidation step, the garbage collector — added entries are indexed,
+rewritten entries re-extracted, deleted or cleared entries take their
+evidence with them. Entries that already exist when the graph is attached
+are not backfilled: run `indexer.index_entries(store.list_all())` once.
 
 ```python
 from anchor import GraphIndexer, KnowledgeGraph, LLMGraphExtractor, MemoryManager
@@ -142,8 +149,8 @@ pip install "astro-anchor[graph]"      # Leiden + C-speed algorithms via igraph
 
 ## Persistence and the CLI
 
-`SqliteGraphStore` (+ `AsyncSqliteGraphStore`) and `PostgresGraphStore`
-persist the graph next to the index, vault-bound at construction like every
+`SqliteGraphStore` and `PostgresGraphStore` (async, drive it directly —
+`KnowledgeGraph` is synchronous) persist the graph next to the index, vault-bound at construction like every
 store. The CLI builds and navigates it:
 
 ```bash

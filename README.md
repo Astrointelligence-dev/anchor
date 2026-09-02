@@ -84,6 +84,7 @@ print(result.diagnostics)        # Token usage, timing, overflow info
 
 - **Hybrid RAG** — Dense embeddings + BM25 sparse retrieval with Reciprocal Rank Fusion
 - **Smart Memory** — Token-aware sliding window with automatic eviction
+- **Knowledge Graph** — Entities and evidenced, bi-temporal relations over memory *and* documents; scope-aware navigation (`path`, `explain`, `backlinks`), graph retrieval fused by RRF, `anchor graph` CLI
 - **Token Budgets** — Priority-ranked context assembly that never exceeds your window
 - **LLM Providers** — Unified interface for Anthropic, OpenAI, Gemini, Grok, Ollama, OpenRouter, LiteLLM with fallback
 - **MCP Bridge** — Bidirectional Model Context Protocol integration for consuming and exposing MCP tools
@@ -229,9 +230,9 @@ uv run ruff check src/ tests/
 ## Roadmap
 
 - **v0.1.0** — Hybrid RAG, Memory, Pipeline, Formatters, Async, Decorator API, Agent Framework, [Full docs](https://artcgranja.github.io/anchor/)
-- **v0.2.0** (next) — Agent loop 2026: event stream, usage limits, subagents, hooks + approval seam, structured output, memory tool, MCP bridge; embeddings layer, sqlite-vec + pgvector (HNSW), skills to the agentskills.io spec
+- **v0.2.0** (next) — Agent loop 2026: event stream, usage limits, subagents, hooks + approval seam, structured output, memory tool, MCP bridge; embeddings layer, sqlite-vec + pgvector (HNSW), skills to the agentskills.io spec; vaults, namespaces and `RetrievalScope`; knowledge graph over memory and documents
 - **v0.3.0** — Production deployment guides, additional vector backends by demand
-- **v0.4.0** — GraphRAG, LangChain/LlamaIndex adapters, webhook-based event system
+- **v0.4.0** — LangChain/LlamaIndex adapters, webhook-based event system, async navigation API for the Postgres graph
 - **v1.0.0** — Stable public API, plugin ecosystem, managed cloud offering
 
 ## License

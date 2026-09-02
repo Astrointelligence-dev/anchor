@@ -23,7 +23,8 @@ class TestParentChildChunker:
         assert parent_child_chunker.chunk("   ") == []
 
     def test_short_text_single_parent_single_child(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         text = "hello world"
         chunks = parent_child_chunker.chunk(text)
@@ -31,7 +32,8 @@ class TestParentChildChunker:
         assert chunks[0] == "hello world"
 
     def test_child_chunks_fit_within_parent(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         # 30 words => should produce multiple parents (parent_chunk_size=20)
         text = " ".join(f"word{i}" for i in range(30))
@@ -50,7 +52,8 @@ class TestParentChildChunker:
                 assert word in parent_text
 
     def test_chunk_with_metadata_includes_parent_info(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         text = " ".join(f"w{i}" for i in range(15))
         pairs = parent_child_chunker.chunk_with_metadata(text)
@@ -65,7 +68,8 @@ class TestParentChildChunker:
             assert parent_child_chunker.get_parent(meta["parent_id"]) is not None
 
     def test_chunk_returns_strings_only(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         text = " ".join(f"w{i}" for i in range(15))
         chunks = parent_child_chunker.chunk(text)
@@ -115,7 +119,8 @@ class TestParentChildChunker:
         assert "child_chunk_size=5" in r
 
     def test_chunk_with_metadata_empty_input(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         assert parent_child_chunker.chunk_with_metadata("") == []
         assert parent_child_chunker.chunk_with_metadata("   ") == []
@@ -159,7 +164,8 @@ class TestParentExpander:
         assert result[0].content == "full parent text here"
 
     def test_deduplicates_by_parent_id(
-        self, parent_expander: ParentExpander,
+        self,
+        parent_expander: ParentExpander,
     ) -> None:
         items = [
             ContextItem(
@@ -178,7 +184,8 @@ class TestParentExpander:
         assert result[0].content == "same parent text"
 
     def test_passthrough_non_child_items(
-        self, parent_expander: ParentExpander,
+        self,
+        parent_expander: ParentExpander,
     ) -> None:
         item = ContextItem(
             content="regular item",

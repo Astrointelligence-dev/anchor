@@ -13,15 +13,24 @@ Design, fixed in docs/plans/2026-08-28-v020-4-grafo-de-conhecimento.md:
   use ``links_to`` (wikilink), ``contains`` (structure) and ``similar_to``
   (embedding); an LLM extractor emits its own predicates.
 - An obsolete edge is invalidated, never deleted: ``invalidated_at`` is
-  transaction time, ``valid_from``/``valid_to`` is world time.
-- Visibility under a scope is decided by evidence: a node without a
-  visible evidence item does not exist for that scope, and an edge whose
-  evidence is all hidden is hidden too — exclusion filters the node, and
-  an excluded node is a wall, not a bridge.
+  transaction time, ``valid_from``/``valid_to`` is world time. Every
+  datetime is timezone-aware — a naive one is rejected at construction, never
+  on the read after the write.
+- **Visibility under a scope is decided by evidence** (the one rule, stated
+  here and referenced everywhere): an item is visible when the scope matches
+  its namespace; a node is visible when one of its evidence items is, and a
+  node with no evidence at all lives at the root namespace ``/`` (visible
+  under an empty include, hidden by ``exclude=("/",)`` or a narrower
+  include — the same rule memory follows); an edge is visible when it is live
+  at ``as_of``, both endpoints are visible and, if it carries evidence, one
+  evidence item is visible. Exclusion filters the node, and an excluded node
+  is a wall, not a bridge. An edge's evidence evidences both its endpoints
+  (the item mentions them), so an empty ``RetrievalScope()`` is the identity.
 """
 
 from __future__ import annotations
 
+import re
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -35,17 +44,21 @@ Provenance = Literal["extracted", "inferred", "ambiguous"]
 the extractor could not resolve it (graphify's three tags)."""
 
 _PROVENANCE_RANK: dict[str, int] = {"extracted": 2, "inferred": 1, "ambiguous": 0}
+_SEPARATORS = re.compile(r"[\s\-_]+")
 
 
 def normalize_key(text: str) -> str:
     """Canonical key for node ids and relation labels.
 
-    NFKC + casefold + whitespace collapsed to ``_``: ``"Project X"``,
-    ``"project x"`` and ``"PROJECT  X"`` converge on ``"project_x"``, so a
-    wikilink target and an LLM-extracted entity land on the same node.
-    Raises ``ValueError`` on empty input.
+    NFKC + casefold, then every run of whitespace, hyphens and underscores
+    becomes one ``_`` (leading/trailing runs dropped): ``"Project X"``,
+    ``"project-x"`` and ``"PROJECT_X"`` converge on ``"project_x"``, so a
+    wikilink target, a file stem and an LLM-extracted entity land on the
+    same node. Other punctuation is kept — ``C++``, ``C#`` and ``.NET`` stay
+    distinct. Raises ``ValueError`` on empty input.
     """
-    key = "_".join(unicodedata.normalize("NFKC", text).casefold().split())
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    key = _SEPARATORS.sub("_", folded).strip("_")
     if not key:
         msg = "graph key must not be empty"
         raise ValueError(msg)
@@ -55,6 +68,14 @@ def normalize_key(text: str) -> str:
 def best_provenance(a: Provenance, b: Provenance) -> Provenance:
     """The stronger of two provenance tags (extracted > inferred > ambiguous)."""
     return a if _PROVENANCE_RANK[a] >= _PROVENANCE_RANK[b] else b
+
+
+def require_aware(value: datetime | None, name: str = "datetime") -> datetime | None:
+    """Refuse a naive datetime: world/transaction time must carry a timezone."""
+    if value is not None and value.tzinfo is None:
+        msg = f"{name} must be timezone-aware (got naive {value.isoformat()})"
+        raise ValueError(msg)
+    return value
 
 
 class GraphNode(BaseModel):
@@ -111,16 +132,17 @@ class GraphEdge(BaseModel):
     def _dedupe(cls, v: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(dict.fromkeys(v))
 
-    @property
-    def weight(self) -> int:
-        """How much support the edge has — the evidence count (min 1)."""
-        return max(1, len(self.evidence))
+    @field_validator("valid_from", "valid_to", "created_at", "invalidated_at")
+    @classmethod
+    def _aware(cls, v: datetime | None, info: Any) -> datetime | None:
+        return require_aware(v, info.field_name)
 
     def is_live(self, as_of: datetime | None = None) -> bool:
         """Not invalidated, and valid in world time at *as_of* (default: now)."""
         if self.invalidated_at is not None:
             return False
-        at = as_of if as_of is not None else datetime.now(UTC)
+        at = require_aware(as_of, "as_of") if as_of is not None else datetime.now(UTC)
+        assert at is not None  # noqa: S101 -- narrowed above
         if self.valid_from is not None and self.valid_from > at:
             return False
         return not (self.valid_to is not None and self.valid_to <= at)

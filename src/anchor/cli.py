@@ -245,7 +245,9 @@ def index(
     except ValueError as e:
         console.print(f"[red]--namespace: {e}[/red]")
         raise typer.Exit(code=1) from None
-    items = [item.model_copy(update={"namespace": ns}) for item in items]
+    # The mount owns the vault: stamp it here so the graph indexer (which
+    # refuses cross-vault items) sees the same vault the stores are mounted on.
+    items = [item.model_copy(update={"namespace": ns, "vault": vault}) for item in items]
 
     context_store = _open_context_store(db, vault)
     for item in items:
@@ -451,7 +453,7 @@ def graph_path(
     trail = graph.path(source, target, **scope_kwargs(scope))
     if trail is None:
         console.print("[yellow]No path.[/yellow]")
-        raise typer.Exit(code=1)
+        raise typer.Exit()
     console.print(" -> ".join(trail))
 
 
@@ -470,7 +472,7 @@ def graph_explain(
     hops = graph.explain(source, target, **scope_kwargs(scope))
     if not hops:
         console.print("[yellow]No path.[/yellow]")
-        raise typer.Exit(code=1)
+        raise typer.Exit()
     table = Table(title=f"{source} -> {target}")
     for col, style in (
         ("Source", "magenta"),

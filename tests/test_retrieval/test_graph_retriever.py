@@ -51,13 +51,17 @@ class TestGraphRetriever:
         assert items[0].score > items[1].score > items[2].score > 0
         assert items[0].source == SourceType.RETRIEVAL
         assert items[0].metadata["retrieval_method"] == "graph"
-        assert items[0].metadata["graph_seeds"] == ["checkout-service"]
+        assert items[0].metadata["graph_seeds"] == ["checkout_service"]
         assert items[0].token_count > 0
 
     def test_custom_entity_extractor(self) -> None:
         graph, store = _world()
         r = GraphRetriever(graph, store, entity_extractor=lambda q: ["bruno-costa"])
-        assert [i.id for i in r.retrieve(QueryBundle(query_str="anything"), top_k=1)] == ["b1"]
+        # bruno is evidenced by b1 (linked) and p1 (the payments edge mentions him)
+        assert {i.id for i in r.retrieve(QueryBundle(query_str="anything"), top_k=2)} == {
+            "b1",
+            "p1",
+        }
 
     def test_no_seed_is_empty(self) -> None:
         graph, store = _world()
@@ -118,3 +122,28 @@ class TestGraphRetriever:
         )
         assert fused[0].id == "p1"  # found by both lists → top after fusion
         assert len({i.id for i in fused}) == len(fused) == 3
+
+
+class TestReviewRegressions:
+    def test_scores_normalize_against_the_best_resolved_item(self) -> None:
+        graph, store = _world()
+        graph.add_node("memory-only")
+        graph.link_item("memory-only", "mem-1")  # not in the ContextStore
+        graph.add_edge("memory-only", "links_to", "checkout-service", evidence=["mem-1"])
+        r = GraphRetriever(graph, store, entity_extractor=lambda q: ["memory-only"])
+        items = r.retrieve(QueryBundle(query_str="x"), top_k=5)
+        assert items[0].score == 1.0
+        assert "mem-1" not in {i.id for i in items}
+
+    def test_memory_only_graph_yields_nothing_quietly(self) -> None:
+        graph = KnowledgeGraph()
+        graph.add_node("m")
+        graph.link_item("m", "mem-1")
+        assert (
+            GraphRetriever(graph, InMemoryContextStore()).retrieve(QueryBundle(query_str="m")) == []
+        )
+
+    def test_bad_seed_from_extractor_is_ignored(self) -> None:
+        graph, store = _world()
+        r = GraphRetriever(graph, store, entity_extractor=lambda q: ["", "  ", "checkout-service"])
+        assert [i.id for i in r.retrieve(QueryBundle(query_str="x"), top_k=1)] == ["c1"]

@@ -13,10 +13,9 @@ import pytest
 
 from anchor.graph import KnowledgeGraph
 from anchor.models.scope import DEFAULT_VAULT, RetrievalScope
-from anchor.protocols.storage import AsyncGraphStore, GraphStore
+from anchor.protocols.storage import GraphStore
 from anchor.storage.memory_store import InMemoryGraphStore
 from anchor.storage.sqlite import (
-    AsyncSqliteGraphStore,
     SqliteConnectionManager,
     SqliteGraphStore,
     ensure_tables,
@@ -61,12 +60,12 @@ class TestContract:
             assert [e.relation for e in g.backlinks(name)] == [
                 e.relation for e in ref.backlinks(name)
             ]
-        assert g.path("villain", "ally") == ["villain", "city", "ally"]
+        assert g.path("villain", "ally") == ["villain", "hero", "ally"]
         assert [
             (e.source, e.relation, e.target, e.evidence) for e in g.explain("villain", "ally")
         ] == [
-            ("villain", "rules", "city", ("doc-2",)),
-            ("ally", "lives_in", "city", ("doc-3",)),
+            ("hero", "knows", "villain", ("doc-2",)),
+            ("hero", "allied_with", "ally", ("doc-3",)),
         ]
         assert g.hubs(k=2) == [("city", 3), ("hero", 3)]
         assert [i for i, _ in g.query(["villain"], top_k=3)] == [
@@ -89,14 +88,16 @@ class TestContract:
         assert g.path("hero", "city") == ["hero", "villain", "city"]
         assert g.path("hero", "city", scope=NO_SECRET) is None
         only_allies = RetrievalScope(include=("/public/allies",))
-        assert g.nodes(scope=only_allies) == ["ally", "city"]
+        assert g.nodes(scope=only_allies) == ["ally", "city", "hero"]
         assert g.items("city", scope=only_allies) == ["doc-3"]
 
-    def test_node_without_evidence_exists_only_unscoped(self, make_graph_store) -> None:
+    def test_node_without_evidence_lives_at_the_root(self, make_graph_store) -> None:
         g = _campaign(KnowledgeGraph(make_graph_store()))
         g.add_edge("hero", "seeks", "artifact")
         assert "artifact" in g.neighbors("hero")
-        assert "artifact" not in g.neighbors("hero", scope=RetrievalScope())
+        assert "artifact" in g.neighbors("hero", scope=RetrievalScope())
+        assert "artifact" not in g.nodes(scope=RetrievalScope(include=("/public",)))
+        assert "artifact" not in g.nodes(scope=RetrievalScope(exclude=("/",)))
 
     def test_temporal(self, make_graph_store) -> None:
         g = KnowledgeGraph(make_graph_store())
@@ -116,7 +117,11 @@ class TestContract:
         g = KnowledgeGraph(make_graph_store())
         g.add_node("a", metadata={"k": 1}, aliases=["A1"])
         node = g.add_node("A", metadata={"j": 2}, aliases=["A2"])
-        assert (node.label, node.aliases, node.metadata) == ("a", ("A1", "A2"), {"k": 1, "j": 2})
+        # "a" is the key itself (a placeholder label); the first spelling that
+        # differs from the key becomes the display label.
+        assert (node.label, node.aliases, node.metadata) == ("A", ("A1", "A2"), {"k": 1, "j": 2})
+        node = g.add_node("a project", label="A Project")
+        assert g.add_node("A PROJECT").label == "A Project"  # a real label is kept
         g.link_item("a", "i1", "/x")
         g.link_item("a", "i2", "/y")
         first = g.add_edge("a", "r", "b", evidence=["i1"], provenance="inferred", confidence=0.6)
@@ -134,8 +139,8 @@ class TestContract:
             g.add_edge("a", "s", "c", evidence=["unknown"])
         with pytest.raises(KeyError):
             g.link_item("nobody", "i1")
-        with pytest.raises(ValueError, match="namespace"):
-            g.link_item("b", "i1", "/other")
+        g.link_item("b", "i1", "/other")  # the latest link moves the item
+        assert g.items("a", scope=RetrievalScope(include=("/other",))) == ["i1"]
         with pytest.raises(ValueError, match="already exists"):
             g.store.add_edge(first.model_copy(update={"relation": "t"}))
 
@@ -197,31 +202,45 @@ class TestSqlitePersistence:
         mgr2 = SqliteConnectionManager(db)
         ensure_tables(mgr2.get_connection())  # idempotent on an existing graph
         g = KnowledgeGraph(SqliteGraphStore(mgr2))
-        assert g.path("villain", "ally") == ["villain", "city", "ally"]
-        assert g.items("city") == ["doc-1", "doc-3"]
+        assert g.path("villain", "ally") == ["villain", "hero", "ally"]
+        assert g.items("city") == ["doc-1", "doc-3", "doc-2"]
         assert "villain" not in g.nodes(scope=NO_SECRET)
 
 
-class TestAsyncTwin:
-    async def test_async_store(self, tmp_path) -> None:
-        mgr = SqliteConnectionManager(tmp_path / "g.db")
-        ensure_tables(mgr.get_connection())
-        store = AsyncSqliteGraphStore(mgr, vault="v")
-        assert isinstance(store, AsyncGraphStore)
-        assert store.vault == "v"
-        from anchor.models.graph import GraphEdge, GraphNode
+class TestReviewRegressions:
+    """Ritual xhigh (session 11): every backend answers alike on these."""
 
-        await store.upsert_node(GraphNode(id="a"))
-        await store.link_item("a", "i1", "/x")
-        edge = await store.add_edge(
-            GraphEdge(source="a", target="b", relation="r", evidence=("i1",))
-        )
-        assert (await store.get_edge(edge.id)) == edge
-        assert [e.id for e in await store.edges_of("b")] == [edge.id]
-        assert await store.node_items("a", scope=RetrievalScope(include=("/x",))) == ["i1"]
-        assert (await store.subgraph(scope=RetrievalScope(exclude=("/x",)))).nodes == {}
-        assert await store.unlink_item("i1") == 1
-        assert await store.invalidate_edge(edge.id) is False
-        assert await store.remove_node("a") is True
-        await store.clear()
-        assert store.version > 0
+    def test_upsert_keeps_insertion_order(self, make_graph_store) -> None:
+        g = KnowledgeGraph(make_graph_store())
+        g.add_node("a")
+        g.add_node("b")
+        g.add_node("a", metadata={"again": True})
+        assert list(g.store.subgraph().nodes) == ["a", "b"]
+
+    def test_unlink_strips_evidence_from_the_invalidated_edge(self, make_graph_store) -> None:
+        g = KnowledgeGraph(make_graph_store())
+        g.add_node("a")
+        g.link_item("a", "i1")
+        edge = g.add_edge("a", "r", "b", evidence=["i1"])
+        assert g.unlink_item("i1") == 1
+        stored = g.store.get_edge(edge.id)
+        assert stored is not None
+        assert stored.evidence == ()
+        assert stored.invalidated_at is not None
+
+    def test_latest_link_moves_the_item(self, make_graph_store) -> None:
+        g = KnowledgeGraph(make_graph_store())
+        g.add_node("a")
+        g.link_item("a", "doc", "/old")
+        g.link_item("a", "doc", "/new")
+        assert g.items("a", scope=RetrievalScope(include=("/old",))) == []
+        assert g.items("a", scope=RetrievalScope(include=("/new",))) == ["doc"]
+
+    def test_reinforce_merges_world_time(self, make_graph_store) -> None:
+        g = KnowledgeGraph(make_graph_store())
+        g.add_edge("a", "r", "b", valid_from=NOW - timedelta(days=1))
+        ended = g.add_edge("a", "r", "b", valid_to=NOW)
+        assert ended.valid_from == NOW - timedelta(days=1)
+        assert ended.valid_to == NOW
+        assert g.neighbors("a", as_of=NOW) == []
+        assert g.neighbors("a", as_of=NOW - timedelta(hours=1)) == ["b"]

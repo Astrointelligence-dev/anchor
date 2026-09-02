@@ -6,8 +6,10 @@
 
 ### `normalize_key(text) -> str`
 
-Canonical key for node ids and relation labels: NFKC + casefold + whitespace
-collapsed to `_`. Raises `ValueError` on empty input.
+Canonical key for node ids and relation labels: NFKC + casefold, then every run
+of whitespace, hyphens and underscores becomes one `_` (`auth-service`, `Auth Service`
+and `AUTH_SERVICE` are one node; `C++`/`C#`/`.NET` stay distinct). Raises `ValueError`
+on empty input.
 
 ### `GraphNode`
 
@@ -66,8 +68,8 @@ Every read takes `scope: RetrievalScope | None` and, where time matters,
 | `related_items(name, *, max_depth=2, scope, as_of)` | `list[str]` | Items of the node and its neighbourhood. |
 | `path(a, b, *, scope, as_of)` | `list[str] \| None` | Fewest hops; never through a hidden node. |
 | `explain(a, b, *, scope, as_of)` | `list[GraphEdge]` | The edges along `path`. |
-| `mentions(text, *, scope, max_words=4)` | `list[str]` | Nodes whose id/alias appears in the text. |
-| `query(seeds, *, item_seeds=(), top_k=10, scope, as_of, damping=0.5)` | `list[tuple[str, float]]` | Items ranked by personalized PageRank. |
+| `mentions(text, *, scope, max_words=4, subgraph=None)` | `list[str]` | Nodes whose id/alias appears in the text. |
+| `query(seeds, *, item_seeds=(), top_k=10, scope, as_of, damping=0.5, subgraph=None)` | `list[tuple[str, float]]` | Items ranked by personalized PageRank. |
 | `hubs(*, k=10, scope, as_of)` | `list[tuple[str, int]]` | Degree ranking. |
 | `communities(*, scope, as_of)` | `dict[str, int]` | Partition, cached on `store.version`; Leiden with `[graph]`, else Louvain. |
 
@@ -81,8 +83,8 @@ Pure Python: `adjacency(pairs)`, `bfs(adj, start, *, max_depth)`,
 ## Stores
 
 `GraphStore` / `AsyncGraphStore` protocols (see [Protocols](protocols.md))
-with `InMemoryGraphStore(vault=...)`, `SqliteGraphStore(conn_manager, vault=...)`,
-`AsyncSqliteGraphStore`, `PostgresGraphStore(conn_manager, vault=...)`. All
+with `InMemoryGraphStore(vault=...)`, `SqliteGraphStore(conn_manager, vault=...)`
+and the async `PostgresGraphStore(conn_manager, vault=...)`. All
 are vault-bound at construction; `version` increments on every write.
 
 ## Extraction (`anchor.ingestion`)
@@ -95,6 +97,7 @@ are vault-bound at construction; `version` increments on every write.
 | `WikilinkExtractor()` | `[[target]]` → `links_to`. Helpers: `wikilinks(text)`, `parse_wikilink(inner)`, `Wikilink`. |
 | `LLMGraphExtractor(llm, *, relations=DEFAULT_RELATIONS)` | Entities + typed relations in one model call; fail-soft. |
 | `GraphIndexer(graph, extractors=None)` | `index(items) -> IndexStats`, `index_entries(entries)`; default extractors = structure + wikilinks. |
+| `GraphIndexingEntryStore(inner, indexer)` | A `MemoryEntryStore` wrapper: `add` indexes (re-extracts on changed content), `delete`/`clear` unlink; everything else forwards. What `MemoryManager(graph=...)` wraps the store in. |
 
 ## Retrieval
 

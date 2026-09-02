@@ -138,18 +138,18 @@ Requires a CompactionStrategy.
       compaction_strategy=my_strategy,
   )
 
-### SimpleGraphMemory
-Entity-relation-entity triples extracted from conversation. Supports
-graph traversal queries.
+### KnowledgeGraph (see "Knowledge Graph" below)
+Entities, notes and typed evidenced relations over memory AND documents;
+memory facts enter it through MemoryManager(graph=GraphIndexer(...)).
 
-  graph = SimpleGraphMemory()
-  graph.add_triple("Alice", "works_at", "Acme Corp")
-  items = graph.query("Alice")
+  graph = KnowledgeGraph()
+  graph.add_edge("Alice", "works_at", "Acme Corp", evidence=["mem-1"])
+  graph.related_items("Alice")
 
 ### MemoryManager
 Orchestrates one or more memory backends. Implements MemoryProvider.
 
-  manager = MemoryManager(backends=[sliding, summary, graph])
+  manager = MemoryManager(persistent_store=store, graph=GraphIndexer(graph))
 
 ## Retrieval Types
 
@@ -330,9 +330,9 @@ Collectors: InMemoryMetricsCollector, LoggingMetricsCollector
   .hubs(k) / .communities()    -- degree ranking; Louvain (igraph Leiden with [graph])
   Every read takes scope=RetrievalScope and as_of=datetime; a node without
   visible evidence does not exist for the scope and is never crossed.
-  Stores: InMemoryGraphStore, SqliteGraphStore, AsyncSqliteGraphStore, PostgresGraphStore
+  Stores: InMemoryGraphStore, SqliteGraphStore (sync), PostgresGraphStore (async)
   Extractors: StructureExtractor, WikilinkExtractor (free), LLMGraphExtractor(llm) (opt-in)
   GraphIndexer(graph, extractors).index(items) / .index_entries(memory_entries)
   GraphRetriever(graph, context_store, vector_store=None)  -- first-class Retriever
-  MemoryManager(graph=GraphIndexer(...))                  -- memory kept in the graph
+  MemoryManager(graph=GraphIndexer(...))                  -- wraps the store in GraphIndexingEntryStore
   CLI: anchor index --graph; anchor graph query|path|explain|hubs|communities|backlinks

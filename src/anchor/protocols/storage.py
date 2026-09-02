@@ -420,17 +420,11 @@ class GraphStore(Protocol):
     """Protocol for the knowledge graph (roadmap #4).
 
     Bound to one vault at construction like every store. ``scope`` narrows
-    namespaces through the evidence items; ``as_of`` is world time.
-    Visibility rules every backend must implement identically:
-
-    - an item is visible when ``scope`` is ``None`` or matches its namespace;
-    - a node is visible when ``scope`` is ``None`` or at least one of its
-      linked items is visible — a node without evidence exists only unscoped;
-    - an edge is visible when it is live at ``as_of`` (``GraphEdge.is_live``),
-      both endpoints are visible and, if it carries evidence, at least one
-      evidence item is visible.
-
-    Edges are invalidated in place, never deleted.
+    namespaces through the evidence items; ``as_of`` is world time. The
+    visibility rule is the one stated in :mod:`anchor.models.graph` — every
+    backend applies the shared implementation in
+    :mod:`anchor.storage._graph_sql`. Edges are invalidated in place, never
+    deleted; an edge's evidence evidences both its endpoints.
     """
 
     @property
@@ -444,7 +438,9 @@ class GraphStore(Protocol):
         ...
 
     def upsert_node(self, node: GraphNode) -> GraphNode:
-        """Insert or merge a node (aliases and metadata merge, the first label wins).
+        """Insert or merge a node (aliases and metadata merge; the first label that
+        differs from the key wins — a node born as an edge endpoint carries its key
+        as a placeholder label until a real name arrives).
 
         Returns:
             The stored node.
@@ -483,9 +479,11 @@ class GraphStore(Protocol):
     def link_item(self, node_id: str, item_id: str, namespace: str = ROOT_NAMESPACE) -> None:
         """Record that an item evidences a node, under the item's namespace.
 
+        The latest link decides the item's namespace (a re-indexed, moved
+        document moves its evidence with it).
+
         Raises:
             KeyError: If the node does not exist.
-            ValueError: If the item was linked before under another namespace.
         """
         ...
 

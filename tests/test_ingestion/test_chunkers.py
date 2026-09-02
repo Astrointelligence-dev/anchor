@@ -81,9 +81,7 @@ class TestRecursiveCharacterChunker:
         assert recursive_chunker.chunk("") == []
         assert recursive_chunker.chunk("   ") == []
 
-    def test_short_text_single_chunk(
-        self, recursive_chunker: RecursiveCharacterChunker
-    ) -> None:
+    def test_short_text_single_chunk(self, recursive_chunker: RecursiveCharacterChunker) -> None:
         chunks = recursive_chunker.chunk("hello world")
         assert len(chunks) == 1
 
@@ -134,9 +132,7 @@ class TestSentenceChunker:
         # All sentences should fit in one chunk (under 20 words)
         assert len(chunks) == 1
 
-    def test_sentences_split_when_exceeding_budget(
-        self, fake_tokenizer: FakeTokenizer
-    ) -> None:
+    def test_sentences_split_when_exceeding_budget(self, fake_tokenizer: FakeTokenizer) -> None:
         chunker = SentenceChunker(chunk_size=5, overlap=0, tokenizer=fake_tokenizer)
         text = "One two three. Four five six. Seven eight nine."
         chunks = chunker.chunk(text)

@@ -124,6 +124,7 @@ def graph_retrieval_step(
                 continue
             new_items.append(
                 ContextItem(
+                    id=entry.id,  # the item id IS the memory id (one currency)
                     content=entry.content,
                     source=SourceType.MEMORY,
                     score=entry.relevance_score,

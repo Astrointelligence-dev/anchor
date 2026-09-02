@@ -55,6 +55,10 @@ _GRAPH_DDL = (
         seq     BIGSERIAL,
         PRIMARY KEY (vault, edge_id, item_id)
     )""",
+    """CREATE TABLE IF NOT EXISTS graph_meta (
+        vault   TEXT PRIMARY KEY,
+        version BIGINT NOT NULL DEFAULT 0
+    )""",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_live ON graph_edges "
     "(vault, source, relation, target) WHERE invalidated_at IS NULL",
     "CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges (vault, source)",
@@ -147,21 +151,13 @@ async def ensure_tables(
         await conn.execute(ddl)
 
     # Indexes
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_me_user_id ON memory_entries(user_id)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_me_session_id ON memory_entries(session_id)"
-    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_me_user_id ON memory_entries(user_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_me_session_id ON memory_entries(session_id)")
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_me_memory_type ON memory_entries(memory_type)"
     )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_me_created_at ON memory_entries(created_at)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_me_expires_at ON memory_entries(expires_at)"
-    )
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_me_created_at ON memory_entries(created_at)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_me_expires_at ON memory_entries(expires_at)")
 
     # pgvector HNSW index (pgvector >= 0.5). Unlike IVFFlat it needs no
     # training data, so it can be created on an empty table. Defaults
@@ -188,8 +184,7 @@ async def ensure_tables(
     # LIKE, never the >=/< ranges the compiler emits.
     for table in ("embeddings", "context_items"):
         await conn.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_{table}_scope ON {table} "
-            "(vault, namespace)"
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_scope ON {table} (vault, namespace)"
         )
 
 
@@ -208,13 +203,11 @@ async def _migrate_scoped_table(
     }
     if "vault" not in cols:
         await conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN vault TEXT NOT NULL "
-            "DEFAULT '__default__'"
+            f"ALTER TABLE {table} ADD COLUMN vault TEXT NOT NULL DEFAULT '__default__'"
         )
     if "namespace" not in cols:
         await conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN namespace TEXT COLLATE \"C\" "
-            "NOT NULL DEFAULT '/'"
+            f"ALTER TABLE {table} ADD COLUMN namespace TEXT COLLATE \"C\" NOT NULL DEFAULT '/'"
         )
     # The pre-fix index was built with text_pattern_ops: drop it before the
     # collation change rebuilds it for nothing (recreated plain by the caller).
@@ -231,9 +224,7 @@ async def _migrate_scoped_table(
         table,
     )
     if collation != "C":
-        await conn.execute(
-            f"ALTER TABLE {table} ALTER COLUMN namespace TYPE TEXT COLLATE \"C\""
-        )
+        await conn.execute(f'ALTER TABLE {table} ALTER COLUMN namespace TYPE TEXT COLLATE "C"')
     pk = await conn.fetchrow(
         "SELECT c.conname, array_agg(a.attname ORDER BY k.ord) AS cols "
         "FROM pg_constraint c "
@@ -246,6 +237,4 @@ async def _migrate_scoped_table(
     )
     if pk is None or "vault" not in pk["cols"]:
         drop = f"DROP CONSTRAINT {pk['conname']}, " if pk is not None else ""
-        await conn.execute(
-            f"ALTER TABLE {table} {drop}ADD PRIMARY KEY (vault, {id_col})"
-        )
+        await conn.execute(f"ALTER TABLE {table} {drop}ADD PRIMARY KEY (vault, {id_col})")

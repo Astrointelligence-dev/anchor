@@ -60,7 +60,7 @@ docs = [
     "mkdocs-minify-plugin>=0.8,<1",
     "mkdocstrings[python]>=0.25,<1",
 ]
-all = ["astro-anchor[bm25,cli,anthropic,claude-cli,gemini,grok,litellm,ollama,openai,tiktoken,agents,pdf,pricing,flashrank,otlp,sqlite,postgres,redis]"]
+all = ["astro-anchor[bm25,cli,anthropic,claude-cli,gemini,grok,litellm,ollama,openai,tiktoken,agents,pdf,pricing,flashrank,graph,otlp,sqlite,postgres,redis]"]
 
 [project.scripts]
 anchor = "anchor.cli:app"
@@ -85,6 +85,7 @@ dev = [
     "genai-prices>=0.1,<1",
     "mkdocs-material>=9.7.2",
     "fakeredis>=2.37.1",
+    "igraph>=0.11,<1",
 ]
 docs = [
     "mkdocs-minify-plugin>=0.8.0",
@@ -114,6 +115,10 @@ known-first-party = ["anchor"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+[[tool.mypy.overrides]]
+module = "igraph.*"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "rank_bm25.*"

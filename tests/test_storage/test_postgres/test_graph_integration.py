@@ -25,7 +25,14 @@ DSN = os.environ.get("ANCHOR_TEST_POSTGRES_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="ANCHOR_TEST_POSTGRES_DSN not set")
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
-_TABLES = ("graph_nodes", "graph_edges", "graph_items", "graph_node_items", "graph_edge_items")
+_TABLES = (
+    "graph_nodes",
+    "graph_edges",
+    "graph_items",
+    "graph_node_items",
+    "graph_edge_items",
+    "graph_meta",
+)
 SCOPES = (
     None,
     RetrievalScope(exclude=("/secret",)),
@@ -139,8 +146,12 @@ def test_matches_in_memory_reference():
             await pg.add_edge(GraphEdge(source="a", target="b", relation="r", evidence=("nope",)))
         with pytest.raises(KeyError):
             await pg.link_item("nobody", "x")
-        with pytest.raises(ValueError, match="namespace"):
-            await pg.link_item("hero", "doc-1", "/elsewhere")
+        await pg.link_item("hero", "doc-1", "/elsewhere")  # the latest link moves the item
+        assert await pg.node_items("hero", scope=RetrievalScope(include=("/elsewhere",))) == [
+            "doc-1"
+        ]
+        moved = await pg.node_items("city", scope=RetrievalScope(include=("/public",)))
+        assert "doc-1" not in moved  # it left /public with the relink
 
     asyncio.run(_with_store(run))
 

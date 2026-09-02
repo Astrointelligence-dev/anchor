@@ -269,8 +269,7 @@ Implements `MemoryEntryStore` and `GarbageCollectableStore`. Thread-safe.
 
 ## Graph stores
 
-`InMemoryGraphStore`, `SqliteGraphStore`, `AsyncSqliteGraphStore` and
-`PostgresGraphStore` implement the `GraphStore` / `AsyncGraphStore`
-protocols — vault-bound at construction like every store, edges invalidated
+`InMemoryGraphStore` and `SqliteGraphStore` implement `GraphStore`;
+`PostgresGraphStore` implements `AsyncGraphStore` — vault-bound at construction like every store, edges invalidated
 never deleted, one visibility rule shared by every backend. See
 [Knowledge Graph](graph.md).

@@ -1,39 +1,48 @@
 """KnowledgeGraph: the navigation API over a ``GraphStore`` (roadmap #4).
 
-``neighbors`` / ``backlinks`` / ``path`` / ``explain`` walk the store one
-node at a time; ``query`` (personalized PageRank over the entity-item
-bipartite graph, HippoRAG-2 style) and ``hubs`` load the visible subgraph
-once. Zero LLM calls on the read path.
+Every read loads the visible subgraph once (``store.subgraph(scope, as_of)``)
+and walks it with the pure-Python algorithms — one scoped load instead of
+one query per visited node, the shape ``query``/``hubs``/``communities``
+share. Zero LLM calls on the read path.
 
 Every read takes ``scope`` (namespace navigation, a ``RetrievalScope``)
 and ``as_of`` (world time). The graph never reads the agent's published
 scope itself — the caller (``GraphRetriever``, tools) resolves
 ``effective_scope`` and passes it, the same contract the stores have.
+The visibility rule is stated in :mod:`anchor.models.graph`.
 """
 
 from __future__ import annotations
 
+import inspect
 import re
 import unicodedata
-from collections import deque
 from collections.abc import Iterable
-from datetime import datetime
-from itertools import pairwise
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-from anchor.graph.algorithms import adjacency, degree, louvain, personalized_pagerank
-from anchor.models.graph import GraphEdge, GraphNode, Provenance, normalize_key
+from anchor.graph.algorithms import (
+    adjacency,
+    bfs,
+    degree,
+    louvain,
+    personalized_pagerank,
+    shortest_path,
+)
+from anchor.models.graph import GraphEdge, GraphNode, Provenance, Subgraph, normalize_key
 from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
 from anchor.protocols.storage import GraphStore
 from anchor.storage.memory_store import InMemoryGraphStore
 
 Direction = Literal["out", "in", "both"]
+# (cache key, partition, expiry when the key carries as_of=None)
+_CommunityCache = tuple[tuple[Any, ...], dict[str, int], datetime | None]
 
 
 def _leiden(adj: dict[str, list[str]]) -> dict[str, int] | None:
     """Leiden via igraph when installed (``pip install astro-anchor[graph]``), else ``None``."""
     try:
-        import igraph  # type: ignore[import-not-found]
+        import igraph
     except ImportError:
         return None
     nodes = sorted(adj)
@@ -45,10 +54,47 @@ def _leiden(adj: dict[str, list[str]]) -> dict[str, int] | None:
     return {n: renumber.setdefault(int(membership[index[n]]), len(renumber)) for n in nodes}
 
 
+def _key(name: str) -> str | None:
+    """``normalize_key`` for READ paths: an unusable name is an unknown node, not an error."""
+    try:
+        return normalize_key(name)
+    except ValueError:
+        return None
+
+
 def _match_key(text: str) -> str:
-    """Looser than ``normalize_key``: any non-word run collapses to ``_``, so
-    ``auth-service`` and ``Auth Service`` meet for mention matching."""
+    """Tokenizer for mention matching: any non-word run collapses to ``_``.
+
+    Looser than ``normalize_key`` on purpose — ``"Checkout?"`` in a question
+    must still meet the node ``checkout``.
+    """
     return "_".join(re.findall(r"\w+", unicodedata.normalize("NFKC", text).casefold()))
+
+
+def _alias_index(sub: Subgraph) -> dict[str, str]:
+    """match-key of every id and alias → node id (first wins, insertion order)."""
+    index: dict[str, str] = {}
+    for node_id, node in sub.nodes.items():
+        for spelling in (node_id, *node.aliases):
+            key = _match_key(spelling)
+            if key:  # a punctuation-only alias must never match the empty n-gram
+                index.setdefault(key, node_id)
+    return index
+
+
+def _resolve(name: str, sub: Subgraph) -> str | None:
+    """A visible node id for *name*: its key, else an alias of a visible node."""
+    key = _key(name)
+    if key is not None and key in sub.nodes:
+        return key
+    return _alias_index(sub).get(_match_key(name)) if name.strip() else None
+
+
+def _adjacency(sub: Subgraph) -> dict[str, list[str]]:
+    adj = adjacency((e.source, e.target) for e in sub.edges)
+    for node_id in sub.nodes:
+        adj.setdefault(node_id, [])
+    return adj
 
 
 class KnowledgeGraph:
@@ -69,10 +115,16 @@ class KnowledgeGraph:
     __slots__ = ("_communities_cache", "_store")
 
     def __init__(self, store: GraphStore | None = None) -> None:
+        if store is not None and inspect.iscoroutinefunction(getattr(store, "get_node", None)):
+            msg = (
+                f"{type(store).__name__} is an async store; KnowledgeGraph is synchronous "
+                "(use SqliteGraphStore/InMemoryGraphStore, or drive the async store directly)"
+            )
+            raise TypeError(msg)
         self._store: GraphStore = store if store is not None else InMemoryGraphStore()
         # (scope, as_of, store.version) → partition; derived data is never
         # persisted — recomputed lazily when the graph changes (roadmap #4).
-        self._communities_cache: tuple[tuple[Any, ...], dict[str, int]] | None = None
+        self._communities_cache: _CommunityCache | None = None
 
     @property
     def store(self) -> GraphStore:
@@ -94,7 +146,7 @@ class KnowledgeGraph:
         aliases: Iterable[str] = (),
         metadata: dict[str, Any] | None = None,
     ) -> GraphNode:
-        """Upsert a node; metadata and aliases merge, the first label wins."""
+        """Upsert a node; metadata and aliases merge, the first real label wins."""
         node = GraphNode(
             id=name,
             label=label or name.strip(),
@@ -121,6 +173,7 @@ class KnowledgeGraph:
 
         Evidence items must already be linked with :meth:`link_item` — an
         edge cannot cite an item the graph does not know the namespace of.
+        The evidence then evidences both endpoints too.
         """
         self.add_node(source)
         self.add_node(target)
@@ -161,15 +214,22 @@ class KnowledgeGraph:
     # ------------------------------------------------------------------
 
     def node(self, name: str) -> GraphNode | None:
-        return self._store.get_node(normalize_key(name))
+        """The node under *name* — its key, or an alias of it."""
+        key = _key(name)
+        found = None if key is None else self._store.get_node(key)
+        if found is not None:
+            return found
+        resolved = _resolve(name, self._store.subgraph())
+        return None if resolved is None else self._store.get_node(resolved)
 
     def nodes(self, *, scope: RetrievalScope | None = None) -> list[str]:
         """Visible node ids, sorted."""
         return sorted(self._store.subgraph(scope=scope).nodes)
 
     def items(self, name: str, *, scope: RetrievalScope | None = None) -> list[str]:
-        """Visible evidence item ids of a node."""
-        return self._store.node_items(normalize_key(name), scope=scope)
+        """Visible evidence item ids of a node (name or alias)."""
+        node_id = _resolve(name, self._store.subgraph(scope=scope))
+        return [] if node_id is None else self._store.node_items(node_id, scope=scope)
 
     def edges(
         self,
@@ -179,10 +239,11 @@ class KnowledgeGraph:
         scope: RetrievalScope | None = None,
         as_of: datetime | None = None,
     ) -> list[GraphEdge]:
-        """Visible live edges touching a node."""
-        return self._store.edges_of(
-            normalize_key(name), direction=direction, scope=scope, as_of=as_of
-        )
+        """Visible live edges touching a node: outgoing first, then incoming."""
+        node_id = _resolve(name, self._store.subgraph(scope=scope, as_of=as_of))
+        if node_id is None:
+            return []
+        return self._store.edges_of(node_id, direction=direction, scope=scope, as_of=as_of)
 
     def backlinks(
         self,
@@ -204,26 +265,14 @@ class KnowledgeGraph:
     ) -> list[str]:
         """Node ids within *max_depth* hops (both directions), BFS order, start excluded.
 
-        Walks only visible edges, so an excluded node is never reached and
-        never crossed.
+        Walks only the visible subgraph, so an excluded node is never reached
+        and never crossed.
         """
-        start = normalize_key(name)
-        if not self._exists(start, scope):
+        sub = self._store.subgraph(scope=scope, as_of=as_of)
+        start = _resolve(name, sub)
+        if start is None:
             return []
-        visited = {start}
-        queue: deque[tuple[str, int]] = deque([(start, 0)])
-        out: list[str] = []
-        while queue:
-            current, depth = queue.popleft()
-            if depth >= max_depth:
-                continue
-            for edge in self._store.edges_of(current, scope=scope, as_of=as_of):
-                nxt = edge.target if edge.source == current else edge.source
-                if nxt not in visited:
-                    visited.add(nxt)
-                    out.append(nxt)
-                    queue.append((nxt, depth + 1))
-        return out
+        return bfs(_adjacency(sub), start, max_depth=max_depth)
 
     def related_items(
         self,
@@ -234,13 +283,13 @@ class KnowledgeGraph:
         as_of: datetime | None = None,
     ) -> list[str]:
         """Evidence items of the node and of its neighborhood, deduplicated, node order."""
-        start = normalize_key(name)
+        sub = self._store.subgraph(scope=scope, as_of=as_of)
+        start = _resolve(name, sub)
+        if start is None:
+            return []
         seen: dict[str, None] = {}
-        for node_id in (
-            start,
-            *self.neighbors(start, max_depth=max_depth, scope=scope, as_of=as_of),
-        ):
-            for item_id in self._store.node_items(node_id, scope=scope):
+        for node_id in (start, *bfs(_adjacency(sub), start, max_depth=max_depth)):
+            for item_id in sub.items.get(node_id, ()):
                 seen[item_id] = None
         return list(seen)
 
@@ -256,27 +305,11 @@ class KnowledgeGraph:
 
         Never crosses a node hidden by *scope* — a wall, not a bridge.
         """
-        start, goal = normalize_key(a), normalize_key(b)
-        if not (self._exists(start, scope) and self._exists(goal, scope)):
+        sub = self._store.subgraph(scope=scope, as_of=as_of)
+        start, goal = _resolve(a, sub), _resolve(b, sub)
+        if start is None or goal is None:
             return None
-        if start == goal:
-            return [start]
-        parent: dict[str, str] = {start: start}
-        queue: deque[str] = deque([start])
-        while queue:
-            current = queue.popleft()
-            for edge in self._store.edges_of(current, scope=scope, as_of=as_of):
-                nxt = edge.target if edge.source == current else edge.source
-                if nxt in parent:
-                    continue
-                parent[nxt] = current
-                if nxt == goal:
-                    trail = [goal]
-                    while trail[-1] != start:
-                        trail.append(parent[trail[-1]])
-                    return trail[::-1]
-                queue.append(nxt)
-        return None
+        return shortest_path(_adjacency(sub), start, goal)
 
     def explain(
         self,
@@ -287,16 +320,42 @@ class KnowledgeGraph:
         as_of: datetime | None = None,
     ) -> list[GraphEdge]:
         """The edges along :meth:`path` — relation, fact, provenance and evidence per hop."""
-        trail = self.path(a, b, scope=scope, as_of=as_of)
-        if not trail:
+        sub = self._store.subgraph(scope=scope, as_of=as_of)
+        start, goal = _resolve(a, sub), _resolve(b, sub)
+        if start is None or goal is None:
             return []
-        out: list[GraphEdge] = []
-        for u, v in pairwise(trail):
-            for edge in self._store.edges_of(u, scope=scope, as_of=as_of):
-                if {edge.source, edge.target} == {u, v}:
-                    out.append(edge)
-                    break
-        return out
+        trail = shortest_path(_adjacency(sub), start, goal)
+        if not trail or len(trail) < 2:
+            return []
+        by_pair: dict[frozenset[str], GraphEdge] = {}
+        for edge in sub.edges:
+            by_pair.setdefault(frozenset((edge.source, edge.target)), edge)
+        return [by_pair[frozenset(pair)] for pair in zip(trail, trail[1:], strict=False)]
+
+    def mentions(
+        self,
+        text: str,
+        *,
+        scope: RetrievalScope | None = None,
+        max_words: int = 4,
+        subgraph: Subgraph | None = None,
+    ) -> list[str]:
+        """Visible nodes whose id or alias appears in *text* (word n-grams, longest first).
+
+        The zero-cost seeder: no model, just the vocabulary the graph already
+        has. ``"Who is on call for Checkout?"`` → ``["checkout_service"]`` when
+        ``Checkout`` is an alias of that note. Pass *subgraph* to reuse a load.
+        """
+        sub = subgraph if subgraph is not None else self._store.subgraph(scope=scope)
+        index = _alias_index(sub)
+        words = [w for w in _match_key(text).split("_") if w]
+        found: dict[str, None] = {}
+        for n in range(max_words, 0, -1):
+            for i in range(len(words) - n + 1):
+                hit = index.get("_".join(words[i : i + n]))
+                if hit is not None:
+                    found[hit] = None
+        return list(found)
 
     def query(
         self,
@@ -307,6 +366,7 @@ class KnowledgeGraph:
         scope: RetrievalScope | None = None,
         as_of: datetime | None = None,
         damping: float = 0.5,
+        subgraph: Subgraph | None = None,
     ) -> list[tuple[str, float]]:
         """Items ranked by personalized PageRank from the seed nodes (and items).
 
@@ -314,11 +374,12 @@ class KnowledgeGraph:
         node it evidences), so the score lands directly on items — the
         ``TokenBudget`` cuts the tail. *item_seeds* lets a dense search seed
         the walk with passages (HippoRAG-2). Seeds that are unknown or
-        hidden by *scope* are ignored; no visible seed → ``[]``.
+        hidden by *scope* are ignored; no visible seed → ``[]``. Pass
+        *subgraph* to reuse a load.
         """
-        sub = self._store.subgraph(scope=scope, as_of=as_of)
+        sub = subgraph if subgraph is not None else self._store.subgraph(scope=scope, as_of=as_of)
         visible_items = {item_id for ids in sub.items.values() for item_id in ids}
-        seed_keys = {("n", k) for k in (normalize_key(s) for s in seeds) if k in sub.nodes}
+        seed_keys = {("n", k) for k in map(_key, seeds) if k is not None and k in sub.nodes}
         seed_keys |= {("i", i) for i in item_seeds if i in visible_items}
         if not seed_keys:
             return []
@@ -340,34 +401,6 @@ class KnowledgeGraph:
         )
         return ranked[:top_k]
 
-    def mentions(
-        self,
-        text: str,
-        *,
-        scope: RetrievalScope | None = None,
-        max_words: int = 4,
-    ) -> list[str]:
-        """Visible nodes whose id or alias appears in *text* (word n-grams, longest first).
-
-        The zero-cost seeder: no model, just the vocabulary the graph already
-        has. ``"Who is on call for Checkout?"`` → ``["checkout-service"]`` when
-        ``Checkout`` is an alias of that note.
-        """
-        sub = self._store.subgraph(scope=scope)
-        index: dict[str, str] = {}
-        for node_id, node in sub.nodes.items():
-            index.setdefault(_match_key(node_id), node_id)
-            for alias in node.aliases:
-                index.setdefault(_match_key(alias), node_id)
-        words = _match_key(text).split("_")
-        found: dict[str, None] = {}
-        for n in range(max_words, 0, -1):
-            for i in range(len(words) - n + 1):
-                hit = index.get("_".join(words[i : i + n]))
-                if hit is not None:
-                    found[hit] = None
-        return list(found)
-
     def hubs(
         self,
         *,
@@ -377,8 +410,7 @@ class KnowledgeGraph:
     ) -> list[tuple[str, int]]:
         """The *k* best-connected visible nodes as ``(node_id, degree)``."""
         sub = self._store.subgraph(scope=scope, as_of=as_of)
-        adj = adjacency((e.source, e.target) for e in sub.edges)
-        deg = degree(adj)
+        deg = degree(adjacency((e.source, e.target) for e in sub.edges))
         ranked = sorted(((n, deg.get(n, 0)) for n in sub.nodes), key=lambda kv: (-kv[1], kv[0]))
         return ranked[:k]
 
@@ -391,24 +423,27 @@ class KnowledgeGraph:
         """``{node_id: community_id}`` over the visible subgraph, cached by graph version.
 
         Engine: igraph's Leiden when the ``[graph]`` extra is installed,
-        else the built-in deterministic Louvain. Isolated nodes
-        get their own community.
+        else the built-in deterministic Louvain. Isolated nodes get their own
+        community.
         """
+        now = datetime.now(UTC) if as_of is None else as_of
         key = (scope, as_of, self._store.version)
-        if self._communities_cache is not None and self._communities_cache[0] == key:
-            return dict(self._communities_cache[1])
+        cached = self._communities_cache
+        if cached is not None and cached[0] == key and (cached[2] is None or now < cached[2]):
+            return dict(cached[1])
         sub = self._store.subgraph(scope=scope, as_of=as_of)
-        adj = adjacency((e.source, e.target) for e in sub.edges)
-        for node_id in sub.nodes:
-            adj.setdefault(node_id, [])
+        adj = _adjacency(sub)
         partition = _leiden(adj) or louvain(adj)
-        self._communities_cache = (key, partition)
+        # With as_of=None the partition depends on the wall clock: it expires
+        # when the first live edge reaches its valid_to. (An edge whose
+        # valid_from lies ahead is not in the live subgraph — ponytail: the
+        # cache misses that birth until the next write.)
+        expires = None
+        if as_of is None:
+            ends = [e.valid_to for e in sub.edges if e.valid_to is not None and e.valid_to > now]
+            expires = min(ends) if ends else None
+        self._communities_cache = (key, partition, expires)
         return dict(partition)
-
-    def _exists(self, node_id: str, scope: RetrievalScope | None) -> bool:
-        if self._store.get_node(node_id) is None:
-            return False
-        return scope is None or bool(self._store.node_items(node_id, scope=scope))
 
     def __len__(self) -> int:
         return len(self._store.subgraph().nodes)

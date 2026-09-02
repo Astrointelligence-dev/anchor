@@ -15,13 +15,20 @@ from typing import Any, Literal
 
 from anchor._math import cosine_similarity
 from anchor.models.context import ContextItem
-from anchor.models.graph import GraphEdge, GraphNode, Subgraph, best_provenance
+from anchor.models.graph import GraphEdge, GraphNode, Subgraph, require_aware
 from anchor.models.scope import (
     DEFAULT_VAULT,
     ROOT_NAMESPACE,
     RetrievalScope,
     normalize_namespace,
     validate_vault,
+)
+from anchor.storage._graph_sql import (
+    check_new_edge,
+    merge_edge,
+    merge_node,
+    visible_edges,
+    visible_nodes,
 )
 from anchor.storage._where import matches_where
 
@@ -207,10 +214,11 @@ class InMemoryDocumentStore:
 class InMemoryGraphStore:
     """Dict-backed knowledge graph. Implements GraphStore protocol.
 
-    The reference semantics for the SQL backends (roadmap #4): visibility
-    is decided by evidence, edges are invalidated in place and never
-    deleted, and a live ``(source, relation, target)`` is unique — adding
-    it again reinforces the existing edge.
+    The reference the SQL backends are tested against: the visibility and
+    merge rules come from :mod:`anchor.storage._graph_sql`, so every backend
+    applies literally the same code to its rows. Edges are invalidated in
+    place and never deleted; a live ``(source, relation, target)`` is unique
+    — adding it again reinforces the existing edge.
     """
 
     __slots__ = (
@@ -256,14 +264,7 @@ class InMemoryGraphStore:
     def upsert_node(self, node: GraphNode) -> GraphNode:
         with self._lock:
             current = self._nodes.get(node.id)
-            stored = node
-            if current is not None:
-                stored = current.model_copy(
-                    update={
-                        "aliases": tuple(dict.fromkeys(current.aliases + node.aliases)),
-                        "metadata": {**current.metadata, **node.metadata},
-                    }
-                )
+            stored = node if current is None else merge_node(current, node)
             self._nodes[node.id] = stored
             self._version += 1
             return stored
@@ -271,8 +272,13 @@ class InMemoryGraphStore:
     def get_node(self, node_id: str) -> GraphNode | None:
         return self._nodes.get(node_id)
 
+    def _link(self, node_id: str, item_id: str) -> None:
+        self._node_items.setdefault(node_id, {})[item_id] = None
+        self._item_nodes.setdefault(item_id, {})[node_id] = None
+
     def add_edge(self, edge: GraphEdge) -> GraphEdge:
         with self._lock:
+            check_new_edge(edge)
             missing = [i for i in edge.evidence if i not in self._item_ns]
             if missing:
                 msg = (
@@ -282,19 +288,12 @@ class InMemoryGraphStore:
             for node_id in (edge.source, edge.target):
                 if node_id not in self._nodes:
                     self._nodes[node_id] = GraphNode(id=node_id)
+                for item_id in edge.evidence:  # the item mentions both endpoints
+                    self._link(node_id, item_id)
             key = (edge.source, edge.relation, edge.target)
             live_id = self._live.get(key)
             if live_id is not None:
-                current = self._edges[live_id]
-                stored = current.model_copy(
-                    update={
-                        "evidence": tuple(dict.fromkeys(current.evidence + edge.evidence)),
-                        "confidence": max(current.confidence, edge.confidence),
-                        "provenance": best_provenance(current.provenance, edge.provenance),
-                        "fact": current.fact if current.fact is not None else edge.fact,
-                        "metadata": {**current.metadata, **edge.metadata},
-                    }
-                )
+                stored = merge_edge(self._edges[live_id], edge)
                 self._edges[live_id] = stored
             else:
                 if edge.id in self._edges:
@@ -302,8 +301,7 @@ class InMemoryGraphStore:
                     raise ValueError(msg)
                 stored = edge
                 self._edges[edge.id] = edge
-                if edge.invalidated_at is None:
-                    self._live[key] = edge.id
+                self._live[key] = edge.id
                 self._out.setdefault(edge.source, {})[edge.id] = None
                 self._in.setdefault(edge.target, {})[edge.id] = None
             for item_id in stored.evidence:
@@ -316,7 +314,9 @@ class InMemoryGraphStore:
 
     def invalidate_edge(self, edge_id: str, *, at: datetime | None = None) -> bool:
         with self._lock:
-            return self._invalidate(edge_id, at if at is not None else datetime.now(UTC))
+            stamp = require_aware(at, "at") if at is not None else datetime.now(UTC)
+            assert stamp is not None  # noqa: S101 -- narrowed above
+            return self._invalidate(edge_id, stamp)
 
     def _invalidate(self, edge_id: str, at: datetime) -> bool:
         edge = self._edges.get(edge_id)
@@ -345,14 +345,10 @@ class InMemoryGraphStore:
             if node_id not in self._nodes:
                 msg = f"node '{node_id}' does not exist in the graph"
                 raise KeyError(msg)
-            ns = normalize_namespace(namespace)
-            known = self._item_ns.get(item_id)
-            if known is not None and known != ns:
-                msg = f"item '{item_id}' is already linked under namespace '{known}', not '{ns}'"
-                raise ValueError(msg)
-            self._item_ns[item_id] = ns
-            self._node_items.setdefault(node_id, {})[item_id] = None
-            self._item_nodes.setdefault(item_id, {})[node_id] = None
+            # The latest link decides the item's namespace — re-indexing a
+            # moved document must move its evidence, as the ContextStore does.
+            self._item_ns[item_id] = normalize_namespace(namespace)
+            self._link(node_id, item_id)
             self._version += 1
 
     def unlink_item(self, item_id: str) -> int:
@@ -366,9 +362,8 @@ class InMemoryGraphStore:
             for edge_id in self._item_edges.pop(item_id, {}):
                 edge = self._edges[edge_id]
                 remaining = tuple(i for i in edge.evidence if i != item_id)
-                if remaining:
-                    self._edges[edge_id] = edge.model_copy(update={"evidence": remaining})
-                elif self._invalidate(edge_id, now):
+                self._edges[edge_id] = edge.model_copy(update={"evidence": remaining})
+                if not remaining and self._invalidate(edge_id, now):
                     invalidated += 1
             self._version += 1
             return invalidated
@@ -389,32 +384,21 @@ class InMemoryGraphStore:
                 table.clear()
             self._version += 1
 
-    # -- visibility -----------------------------------------------------
-
-    def _item_visible(self, item_id: str, scope: RetrievalScope | None) -> bool:
-        return scope is None or scope.matches(self._item_ns[item_id])
-
-    def _node_visible(self, node_id: str, scope: RetrievalScope | None) -> bool:
-        if node_id not in self._nodes:
-            return False
-        if scope is None:
-            return True
-        return any(self._item_visible(i, scope) for i in self._node_items.get(node_id, ()))
-
-    def _edge_visible(
-        self, edge: GraphEdge, scope: RetrievalScope | None, as_of: datetime | None
-    ) -> bool:
-        if not edge.is_live(as_of):
-            return False
-        if not (self._node_visible(edge.source, scope) and self._node_visible(edge.target, scope)):
-            return False
-        return not edge.evidence or any(self._item_visible(i, scope) for i in edge.evidence)
-
     # -- reads ----------------------------------------------------------
+
+    def _visible(self, scope: RetrievalScope | None) -> tuple[set[str] | None, bool]:
+        """(visible item ids or None when unscoped, whether the root namespace is visible)."""
+        if scope is None:
+            return None, True
+        return {i for i, ns in self._item_ns.items() if scope.matches(ns)}, scope.matches(
+            ROOT_NAMESPACE
+        )
 
     def node_items(self, node_id: str, *, scope: RetrievalScope | None = None) -> list[str]:
         with self._lock:
-            return [i for i in self._node_items.get(node_id, ()) if self._item_visible(i, scope)]
+            visible, _ = self._visible(scope)
+            items = self._node_items.get(node_id, ())
+            return [i for i in items if visible is None or i in visible]
 
     def edges_of(
         self,
@@ -430,8 +414,9 @@ class InMemoryGraphStore:
                 ids.update(self._out.get(node_id, {}))
             if direction in ("in", "both"):
                 ids.update(self._in.get(node_id, {}))
+            visible, root = self._visible(scope)
             edges = (self._edges[i] for i in ids)
-            return [e for e in edges if self._edge_visible(e, scope, as_of)]
+            return visible_edges(edges, self._node_items, visible, as_of, root)
 
     def subgraph(
         self,
@@ -440,10 +425,19 @@ class InMemoryGraphStore:
         as_of: datetime | None = None,
     ) -> Subgraph:
         with self._lock:
-            nodes = {nid: n for nid, n in self._nodes.items() if self._node_visible(nid, scope)}
-            edges = [e for e in self._edges.values() if self._edge_visible(e, scope, as_of)]
-            items = {nid: tuple(self.node_items(nid, scope=scope)) for nid in nodes}
-            return Subgraph(nodes=nodes, edges=edges, items=items)
+            visible, root = self._visible(scope)
+            kept = visible_nodes(self._nodes, self._node_items, visible, root)
+            nodes = {n: self._nodes[n] for n in kept}
+            edges = [e for e in self._edges.values() if e.source in nodes and e.target in nodes]
+            items = {
+                n: tuple(i for i in self._node_items.get(n, ()) if visible is None or i in visible)
+                for n in nodes
+            }
+            return Subgraph(
+                nodes=nodes,
+                edges=visible_edges(edges, self._node_items, visible, as_of, root),
+                items=items,
+            )
 
     def __len__(self) -> int:
         return len(self._nodes)

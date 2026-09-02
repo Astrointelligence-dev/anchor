@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
-from anchor.models.graph import GraphEdge, GraphNode, Subgraph
+from anchor.models.graph import GraphEdge, GraphNode, Subgraph, require_aware
 from anchor.models.scope import (
     DEFAULT_VAULT,
     ROOT_NAMESPACE,
@@ -21,6 +21,7 @@ from anchor.models.scope import (
     validate_vault,
 )
 from anchor.storage._graph_sql import (
+    check_new_edge,
     merge_edge,
     merge_node,
     row_to_edge,
@@ -48,8 +49,9 @@ _EDGE_SELECT = (
 class PostgresGraphStore:
     """Async PostgreSQL-backed knowledge graph. Implements AsyncGraphStore."""
 
-    # ponytail: `version` is an in-process write counter (derived caches
-    # live in-process); a graph_meta row when another process must see it.
+    # `version` is the in-process write counter the protocol's sync property
+    # needs; every write also bumps the graph_meta row (parity with SQLite)
+    # so an async reader in another process can see the graph changed.
     __slots__ = ("_conn_manager", "_vault", "_version")
 
     def __init__(
@@ -70,10 +72,23 @@ class PostgresGraphStore:
     def __repr__(self) -> str:
         return f"{type(self).__name__}(vault={self._vault!r})"
 
+    async def _bump(self, conn: asyncpg.Connection) -> None:
+        await conn.execute(
+            "INSERT INTO graph_meta (vault, version) VALUES ($1, 1) "
+            "ON CONFLICT (vault) DO UPDATE SET version = graph_meta.version + 1",
+            self._vault,
+        )
+        self._version += 1
+
     # -- writes ---------------------------------------------------------
 
     async def upsert_node(self, node: GraphNode) -> GraphNode:
-        async with self._conn_manager.acquire() as conn:
+        async with self._conn_manager.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "SELECT 1 FROM graph_nodes WHERE vault = $1 AND id = $2 FOR UPDATE",
+                self._vault,
+                node.id,
+            )
             current = await self._get_node(conn, node.id)
             stored = node if current is None else merge_node(current, node)
             await conn.execute(
@@ -87,7 +102,7 @@ class PostgresGraphStore:
                 json.dumps(list(stored.aliases)),
                 json.dumps(stored.metadata, default=str),
             )
-        self._version += 1
+            await self._bump(conn)
         return stored
 
     async def _get_node(self, conn: asyncpg.Connection, node_id: str) -> GraphNode | None:
@@ -101,6 +116,7 @@ class PostgresGraphStore:
             return await self._get_node(conn, node_id)
 
     async def add_edge(self, edge: GraphEdge) -> GraphEdge:
+        check_new_edge(edge)
         async with self._conn_manager.acquire() as conn, conn.transaction():
             if edge.evidence:
                 known = {
@@ -125,6 +141,14 @@ class PostgresGraphStore:
                     self._vault,
                     node_id,
                 )
+                for item_id in edge.evidence:  # the item mentions both endpoints
+                    await conn.execute(
+                        "INSERT INTO graph_node_items (vault, node_id, item_id) "
+                        "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                        self._vault,
+                        node_id,
+                        item_id,
+                    )
             live = await conn.fetchrow(
                 _EDGE_SELECT + " WHERE vault = $1 AND source = $2 AND relation = $3 "
                 "AND target = $4 AND invalidated_at IS NULL",
@@ -138,10 +162,13 @@ class PostgresGraphStore:
                 stored = merge_edge(row_to_edge(live, evidence), edge)
                 await conn.execute(
                     "UPDATE graph_edges SET confidence = $1, provenance = $2, fact = $3, "
-                    "metadata = $4::jsonb WHERE vault = $5 AND id = $6",
+                    "valid_from = $4, valid_to = $5, metadata = $6::jsonb "
+                    "WHERE vault = $7 AND id = $8",
                     stored.confidence,
                     stored.provenance,
                     stored.fact,
+                    stored.valid_from,
+                    stored.valid_to,
                     json.dumps(stored.metadata, default=str),
                     self._vault,
                     stored.id,
@@ -181,7 +208,7 @@ class PostgresGraphStore:
                     stored.id,
                     item_id,
                 )
-        self._version += 1
+            await self._bump(conn)
         return stored
 
     async def get_edge(self, edge_id: str) -> GraphEdge | None:
@@ -195,17 +222,17 @@ class PostgresGraphStore:
             return row_to_edge(row, evidence)
 
     async def invalidate_edge(self, edge_id: str, *, at: datetime | None = None) -> bool:
-        async with self._conn_manager.acquire() as conn:
+        async with self._conn_manager.acquire() as conn, conn.transaction():
             result = await conn.execute(
                 "UPDATE graph_edges SET invalidated_at = $1 "
                 "WHERE vault = $2 AND id = $3 AND invalidated_at IS NULL",
-                at if at is not None else datetime.now(UTC),
+                require_aware(at, "at") if at is not None else datetime.now(UTC),
                 self._vault,
                 edge_id,
             )
-        done = int(result.split()[-1]) > 0
-        if done:
-            self._version += 1
+            done = int(result.split()[-1]) > 0
+            if done:
+                await self._bump(conn)
         return done
 
     async def remove_node(self, node_id: str) -> bool:
@@ -227,7 +254,7 @@ class PostgresGraphStore:
             await conn.execute(
                 "DELETE FROM graph_nodes WHERE vault = $1 AND id = $2", self._vault, node_id
             )
-        self._version += 1
+            await self._bump(conn)
         return True
 
     async def link_item(self, node_id: str, item_id: str, namespace: str = ROOT_NAMESPACE) -> None:
@@ -236,17 +263,11 @@ class PostgresGraphStore:
                 msg = f"node '{node_id}' does not exist in the graph"
                 raise KeyError(msg)
             ns = normalize_namespace(namespace)
-            known = await conn.fetchval(
-                "SELECT namespace FROM graph_items WHERE vault = $1 AND item_id = $2",
-                self._vault,
-                item_id,
-            )
-            if known is not None and known != ns:
-                msg = f"item '{item_id}' is already linked under namespace '{known}', not '{ns}'"
-                raise ValueError(msg)
+            # The latest link decides the item's namespace (a re-indexed,
+            # moved document moves its evidence, as the ContextStore does).
             await conn.execute(
                 "INSERT INTO graph_items (vault, item_id, namespace) VALUES ($1, $2, $3) "
-                "ON CONFLICT DO NOTHING",
+                "ON CONFLICT (vault, item_id) DO UPDATE SET namespace = EXCLUDED.namespace",
                 self._vault,
                 item_id,
                 ns,
@@ -258,7 +279,7 @@ class PostgresGraphStore:
                 node_id,
                 item_id,
             )
-        self._version += 1
+            await self._bump(conn)
 
     async def unlink_item(self, item_id: str) -> int:
         async with self._conn_manager.acquire() as conn, conn.transaction():
@@ -286,23 +307,18 @@ class PostgresGraphStore:
                 item_id,
             )
             invalidated = 0
-            now = datetime.now(UTC)
-            for edge_id in edge_ids:
-                left = await conn.fetchval(
-                    "SELECT 1 FROM graph_edge_items WHERE vault = $1 AND edge_id = $2 LIMIT 1",
+            if edge_ids:
+                done = await conn.execute(
+                    "UPDATE graph_edges SET invalidated_at = $1 WHERE vault = $2 "
+                    "AND id = ANY($3) AND invalidated_at IS NULL AND NOT EXISTS ("
+                    "SELECT 1 FROM graph_edge_items ei WHERE ei.vault = graph_edges.vault "
+                    "AND ei.edge_id = graph_edges.id)",
+                    datetime.now(UTC),
                     self._vault,
-                    edge_id,
+                    edge_ids,
                 )
-                if left is None:
-                    done = await conn.execute(
-                        "UPDATE graph_edges SET invalidated_at = $1 "
-                        "WHERE vault = $2 AND id = $3 AND invalidated_at IS NULL",
-                        now,
-                        self._vault,
-                        edge_id,
-                    )
-                    invalidated += int(done.split()[-1])
-        self._version += 1
+                invalidated = int(done.split()[-1])
+            await self._bump(conn)
         return invalidated
 
     async def clear(self) -> None:
@@ -315,21 +331,24 @@ class PostgresGraphStore:
                 "graph_edge_items",
             ):
                 await conn.execute(f"DELETE FROM {table} WHERE vault = $1", self._vault)  # noqa: S608 -- fixed table names
-        self._version += 1
+            await self._bump(conn)
 
     # -- reads ----------------------------------------------------------
 
     async def _visible(
         self, conn: asyncpg.Connection, scope: RetrievalScope | None
-    ) -> set[str] | None:
+    ) -> tuple[set[str] | None, bool]:
+        """(visible item ids or None when unscoped, whether the root namespace is visible)."""
         if scope is None:
-            return None
+            return None, True
         p = _Params(self._vault)
         clauses, params = scope_sql_clauses(scope, "namespace")
         sql = "SELECT item_id FROM graph_items WHERE vault = $1" + "".join(  # noqa: S608 -- compiled clauses
             f" AND {c}" for c in _numbered(clauses, params, p)
         )
-        return {r["item_id"] for r in await conn.fetch(sql, *p.values)}
+        return {r["item_id"] for r in await conn.fetch(sql, *p.values)}, scope.matches(
+            ROOT_NAMESPACE
+        )
 
     async def _node_items_of(
         self, conn: asyncpg.Connection, node_ids: Iterable[str] | None
@@ -379,7 +398,7 @@ class PostgresGraphStore:
 
     async def node_items(self, node_id: str, *, scope: RetrievalScope | None = None) -> list[str]:
         async with self._conn_manager.acquire() as conn:
-            visible = await self._visible(conn, scope)
+            visible, _ = await self._visible(conn, scope)
             items = (await self._node_items_of(conn, [node_id])).get(node_id, [])
             return [i for i in items if visible is None or i in visible]
 
@@ -406,12 +425,12 @@ class PostgresGraphStore:
             )
             evidence = await self._evidence_of(conn, [r["id"] for r in rows])
             edges = [row_to_edge(r, evidence.get(r["id"], [])) for r in rows]
-            visible = await self._visible(conn, scope)
+            visible, root = await self._visible(conn, scope)
             node_items: dict[str, list[str]] = {}
             if visible is not None:
                 ends = [e.source for e in edges] + [e.target for e in edges]
                 node_items = await self._node_items_of(conn, ends)
-            return visible_edges(edges, node_items, visible, as_of)
+            return visible_edges(edges, node_items, visible, as_of, root)
 
     async def subgraph(
         self,
@@ -420,7 +439,7 @@ class PostgresGraphStore:
         as_of: datetime | None = None,
     ) -> Subgraph:
         async with self._conn_manager.acquire() as conn:
-            visible = await self._visible(conn, scope)
+            visible, root = await self._visible(conn, scope)
             node_items = await self._node_items_of(conn, None)
             all_nodes = [
                 row_to_node(r)
@@ -428,7 +447,7 @@ class PostgresGraphStore:
                     _NODE_SELECT + " WHERE vault = $1 ORDER BY seq", self._vault
                 )
             ]
-            kept = set(visible_nodes([n.id for n in all_nodes], node_items, visible))
+            kept = set(visible_nodes([n.id for n in all_nodes], node_items, visible, root))
             nodes = {n.id: n for n in all_nodes if n.id in kept}
             rows = await conn.fetch(
                 _EDGE_SELECT + " WHERE vault = $1 AND invalidated_at IS NULL ORDER BY seq",
@@ -442,5 +461,7 @@ class PostgresGraphStore:
                 for n in nodes
             }
             return Subgraph(
-                nodes=nodes, edges=visible_edges(edges, node_items, visible, as_of), items=items
+                nodes=nodes,
+                edges=visible_edges(edges, node_items, visible, as_of, root),
+                items=items,
             )

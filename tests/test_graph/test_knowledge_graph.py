@@ -79,8 +79,6 @@ class TestModels:
     def test_edge_evidence_deduplicated_and_weight(self) -> None:
         edge = GraphEdge(source="a", target="b", relation="r", evidence=("i1", "i1", "i2"))
         assert edge.evidence == ("i1", "i2")
-        assert edge.weight == 2
-        assert GraphEdge(source="a", target="b", relation="r").weight == 1
 
     def test_edge_confidence_bounded(self) -> None:
         with pytest.raises(ValueError):
@@ -132,12 +130,13 @@ class TestStore:
         with pytest.raises(KeyError):
             g.link_item("nobody", "mem-1")
 
-    def test_link_item_namespace_is_sticky(self) -> None:
+    def test_latest_link_decides_the_items_namespace(self) -> None:
+        # A re-indexed (moved) document moves its evidence, as the ContextStore does.
         g = _basic()
         g.link_item("alice", "mem-1", "/a")
-        g.link_item("project x", "mem-1", "/a")  # same namespace: fine
-        with pytest.raises(ValueError, match="namespace"):
-            g.link_item("project x", "mem-1", "/b")
+        g.link_item("project x", "mem-1", "/b")
+        assert g.items("alice", scope=RetrievalScope(include=("/a",))) == []
+        assert g.items("alice", scope=RetrievalScope(include=("/b",))) == ["mem-1"]
 
     def test_duplicate_edge_id_raises(self) -> None:
         g = _basic()
@@ -240,7 +239,8 @@ class TestNodesAndEdges:
 class TestItems:
     def test_items_and_related_items_order_and_dedupe(self) -> None:
         g = _campaign()
-        assert g.items("city") == ["doc-1", "doc-3"]
+        # city is evidenced by its own links AND by the edges that mention it
+        assert g.items("city") == ["doc-1", "doc-3", "doc-2"]
         assert g.related_items("hero", max_depth=1) == ["doc-1", "doc-2", "doc-3"]
         assert g.related_items("villain", max_depth=0) == ["doc-2"]
 
@@ -280,18 +280,18 @@ class TestItems:
 class TestNavigation:
     def test_neighbors_depth_and_direction(self) -> None:
         g = _campaign()
-        assert g.neighbors("villain", max_depth=1) == ["city", "hero"]
+        assert g.neighbors("villain", max_depth=1) == ["hero", "city"]  # edge insertion order
         assert set(g.neighbors("ally", max_depth=1)) == {"hero", "city"}
         assert set(g.neighbors("ally", max_depth=2)) == {"hero", "city", "villain"}
         assert g.neighbors("nobody") == []
 
     def test_path_and_explain(self) -> None:
         g = _campaign()
-        assert g.path("villain", "ally") == ["villain", "city", "ally"]
+        assert g.path("villain", "ally") == ["villain", "hero", "ally"]
         hops = g.explain("villain", "ally")
         assert [(e.source, e.relation, e.target) for e in hops] == [
-            ("villain", "rules", "city"),
-            ("ally", "lives_in", "city"),
+            ("hero", "knows", "villain"),
+            ("hero", "allied_with", "ally"),
         ]
         assert g.path("hero", "hero") == ["hero"]
         assert g.explain("hero", "hero") == []
@@ -389,7 +389,7 @@ class TestScope:
                 g.invalidate_edge(edge.id)
         assert g.path("hero", "city") == ["hero", "villain", "city"]
         assert g.path("hero", "city", scope=NO_SECRET) is None
-        assert g.related_items("hero", max_depth=3, scope=NO_SECRET) == ["doc-1"]
+        assert g.related_items("hero", max_depth=3, scope=NO_SECRET) == ["doc-1", "doc-3"]
 
     def test_query_never_returns_hidden_items(self) -> None:
         g = _campaign()
@@ -401,26 +401,42 @@ class TestScope:
     def test_include_scope_and_edge_with_hidden_evidence(self) -> None:
         g = _campaign()
         only_allies = RetrievalScope(include=("/public/allies",))
-        # city is evidenced by doc-1 (/public) AND doc-3 (/public/allies): it survives,
-        # but the hero→city edge (evidence doc-1 only) is hidden with it.
-        assert g.nodes(scope=only_allies) == ["ally", "city"]
+        # city and hero are evidenced by doc-3 (/public/allies) through the ally
+        # edges: they survive, but the hero→city edge (evidence doc-1 only) does not.
+        assert g.nodes(scope=only_allies) == ["ally", "city", "hero"]
         assert {e.relation for e in g.edges("city", scope=only_allies)} == {"lives_in"}
         assert g.items("city", scope=only_allies) == ["doc-3"]
-        assert g.hubs(k=1, scope=only_allies) == [("ally", 1)]
+        assert g.path("hero", "city", scope=only_allies) == ["hero", "ally", "city"]
+        assert g.hubs(k=1, scope=only_allies) == [("ally", 2)]
 
-    def test_node_without_evidence_exists_only_unscoped(self) -> None:
+    def test_node_without_evidence_lives_at_the_root(self) -> None:
         g = _campaign()
         g.add_edge("hero", "seeks", "artifact")  # manual edge, no evidence
         assert "artifact" in g.neighbors("hero")
-        assert "artifact" not in g.neighbors("hero", scope=RetrievalScope())
-        assert "artifact" not in g.nodes(scope=NO_SECRET)
+        assert "artifact" in g.neighbors("hero", scope=RetrievalScope())  # identity
+        assert "artifact" in g.nodes(scope=NO_SECRET)
+        assert "artifact" in g.nodes(scope=RetrievalScope(include=("/",)))
+        assert "artifact" not in g.nodes(scope=RetrievalScope(include=("/public",)))
+        assert "artifact" not in g.nodes(scope=RetrievalScope(exclude=("/",)))
+
+    def test_empty_scope_is_the_identity(self) -> None:
+        g = _campaign()
+        g.add_edge("hero", "seeks", "artifact")
+        empty = RetrievalScope()
+        assert g.nodes(scope=empty) == g.nodes()
+        for name in g.nodes():
+            assert g.neighbors(name, max_depth=2, scope=empty) == g.neighbors(name, max_depth=2)
+            assert g.items(name, scope=empty) == g.items(name)
+        assert g.path("villain", "artifact", scope=empty) == g.path("villain", "artifact")
+        assert g.query(["hero"], scope=empty) == g.query(["hero"])
+        assert g.hubs(scope=empty) == g.hubs()
 
     def test_subagent_scope_only_narrows(self) -> None:
         g = _campaign()
         parent = RetrievalScope(include=("/public",))
         child = RetrievalScope(include=("/public/allies",), exclude=("/secret",))
         widen = RetrievalScope(include=("/",))
-        assert g.nodes(scope=parent.intersect(child)) == ["ally", "city"]
+        assert g.nodes(scope=parent.intersect(child)) == ["ally", "city", "hero"]
         # a child asking for "/" cannot see more than the parent
         assert g.nodes(scope=parent.intersect(widen)) == g.nodes(scope=parent)
         assert "villain" not in g.nodes(scope=parent.intersect(widen))
@@ -429,22 +445,22 @@ class TestScope:
 class TestCommunities:
     def test_communities_follow_scope_and_cache_by_version(self) -> None:
         g = _campaign()
-        g.add_edge("far-a", "r", "far-b")
+        g.add_edge("far_a", "r", "far_b")
         part = g.communities()
         assert part["hero"] == part["city"]
-        assert part["far-a"] == part["far-b"] != part["hero"]
+        assert part["far_a"] == part["far_b"] != part["hero"]
         assert g.communities() is not part  # a copy each call...
         assert g.communities() == part  # ...but served from the cache
         assert "villain" not in g.communities(scope=NO_SECRET)
         # the graph changed → recomputed from the current subgraph, not the cache
         from anchor.graph.algorithms import adjacency, louvain
 
-        for a, b in (("far-a", "hero"), ("far-a", "city"), ("far-b", "hero"), ("far-b", "city")):
+        for a, b in (("far_a", "hero"), ("far_a", "city"), ("far_b", "hero"), ("far_b", "city")):
             g.add_edge(a, "r", b)
         sub = g.store.subgraph()
         fresh = louvain(adjacency((e.source, e.target) for e in sub.edges))
         assert g.communities() == fresh
-        assert len(g.edges("far-a")) == 3
+        assert len(g.edges("far_a")) == 3
 
     def test_igraph_engine_when_installed(self) -> None:
         pytest.importorskip("igraph")
@@ -458,3 +474,128 @@ class TestCommunities:
         part = _leiden(adj)
         assert part is not None
         assert set(part) == set(adj)
+
+
+# ===========================================================================
+# Ritual xhigh (session 11) — regressions pinned by the review
+# ===========================================================================
+
+
+class TestReviewRegressions:
+    def test_unusable_names_are_unknown_nodes_not_errors(self) -> None:
+        g = _campaign()
+        assert g.node("   ") is None
+        assert g.items("") == []
+        assert g.edges(" ") == []
+        assert g.neighbors("") == []
+        assert g.related_items("  ") == []
+        assert g.path("", "hero") is None
+        assert g.explain("hero", "") == []
+        # one bad seed never costs the good ones
+        assert [i for i, _ in g.query(["", "villain"], top_k=1)] == ["doc-2"]
+
+    def test_async_store_is_refused_at_construction(self) -> None:
+        pytest.importorskip("asyncpg")
+        from anchor.storage.postgres import PostgresGraphStore
+
+        with pytest.raises(TypeError, match="async store"):
+            KnowledgeGraph(PostgresGraphStore(object(), vault="v"))  # type: ignore[arg-type]
+
+    def test_punctuation_only_alias_never_matches(self) -> None:
+        g = KnowledgeGraph()
+        g.add_node("weird", aliases=["—"])
+        g.add_node("checkout-service", aliases=["Checkout"])
+        assert g.mentions("???") == []
+        assert g.mentions("") == []
+        assert g.mentions("who owns Checkout?") == ["checkout_service"]
+
+    def test_reinforcing_with_valid_to_ends_the_fact(self) -> None:
+        g = KnowledgeGraph()
+        first = g.add_edge("alice", "lives_in", "sp", valid_from=NOW - timedelta(days=9))
+        ended = g.add_edge(
+            "alice", "lives_in", "sp", valid_to=NOW, valid_from=NOW - timedelta(days=30)
+        )
+        assert ended.id == first.id
+        assert ended.valid_from == NOW - timedelta(days=30)  # earliest known
+        assert ended.valid_to == NOW
+        assert g.neighbors("alice", as_of=NOW - timedelta(days=1)) == ["sp"]
+        assert g.neighbors("alice", as_of=NOW) == []
+
+    def test_communities_cache_expires_with_the_wall_clock(self) -> None:
+        import time
+
+        g = KnowledgeGraph()
+        soon = datetime.now(UTC) + timedelta(seconds=0.2)
+        g.add_edge("a", "r", "b", valid_to=soon)
+        g.add_edge("c", "r", "d")
+        before = g.communities()
+        assert before["a"] == before["b"]
+        time.sleep(0.3)
+        after = g.communities()  # no write happened: the cache must still expire
+        assert after["a"] != after["b"]
+        assert g.hubs(k=4)[0][1] == 1  # c-d is the only live edge now
+
+    def test_placeholder_label_is_replaced_by_the_first_real_name(self) -> None:
+        g = KnowledgeGraph()
+        g.add_edge("project x", "r", "y")  # via KnowledgeGraph the raw name is the label
+        assert g.node("project x").label == "project x"  # type: ignore[union-attr]
+        g.store.add_edge(GraphEdge(source="bare", target="y", relation="r"))
+        assert g.node("bare").label == "bare"  # store-level auto-create: key as placeholder
+        g.add_node("BARE", label="Bare Thing")
+        assert g.node("bare").label == "Bare Thing"  # type: ignore[union-attr]
+
+
+class TestReviewRegressionsBatchTwo:
+    def test_naive_datetimes_are_rejected_at_the_boundary(self) -> None:
+        g = _campaign()
+        naive = datetime(2030, 1, 1)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            g.add_edge("a", "r", "b", valid_to=naive)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            GraphEdge(source="a", target="b", relation="r", created_at=naive)
+        edge = g.edges("hero")[0]
+        with pytest.raises(ValueError, match="timezone-aware"):
+            g.invalidate_edge(edge.id, at=naive)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            g.neighbors("hero", as_of=naive)
+        assert g.neighbors("hero", as_of=NOW)  # aware is fine
+
+    def test_add_edge_refuses_a_dead_edge(self) -> None:
+        g = _campaign()
+        with pytest.raises(ValueError, match="invalidate_edge"):
+            g.store.add_edge(GraphEdge(source="a", target="b", relation="r", invalidated_at=NOW))
+
+    def test_incoming_valid_from_corrects_the_start(self) -> None:
+        g = KnowledgeGraph()
+        g.add_edge("a", "r", "b", valid_from=NOW - timedelta(days=10))
+        later = g.add_edge("a", "r", "b", valid_from=NOW - timedelta(days=2))
+        assert later.valid_from == NOW - timedelta(days=2)
+        assert g.add_edge("a", "r", "b").valid_from == NOW - timedelta(days=2)  # None keeps current
+
+    def test_aliases_resolve_in_every_read(self) -> None:
+        g = _campaign()
+        g.add_node("checkout-service", aliases=["Checkout"])
+        g.link_item("checkout-service", "doc-9", "/public")
+        g.add_edge("checkout-service", "links_to", "hero", evidence=["doc-9"])
+        assert g.node("Checkout") is not None
+        assert g.node("Checkout").id == "checkout_service"  # type: ignore[union-attr]
+        assert g.path("Checkout", "city") == ["checkout_service", "hero", "city"]
+        assert g.explain("Checkout", "hero")[0].relation == "links_to"
+        assert [e.source for e in g.backlinks("hero")][-1] == "checkout_service"
+        assert g.items("Checkout") == ["doc-9"]
+        assert "hero" in g.neighbors("Checkout")
+        # an alias of a node hidden by the scope resolves to nothing
+        assert g.node("Villain") is not None
+        assert g.path("hero", "villain", scope=NO_SECRET) is None
+
+    def test_separators_are_one_identity(self) -> None:
+        assert normalize_key("auth-service") == normalize_key("Auth Service") == "auth_service"
+        assert normalize_key("AUTH_SERVICE") == "auth_service"
+        assert normalize_key("C++") == "c++"
+        assert normalize_key(".NET") == ".net"
+        assert normalize_key("--x--") == "x"
+        g = KnowledgeGraph()
+        g.add_node("auth-service")
+        g.add_node("Auth Service", aliases=["auth"])
+        assert g.nodes() == ["auth_service"]
+        assert g.node("auth_service").aliases == ("auth",)  # type: ignore[union-attr]

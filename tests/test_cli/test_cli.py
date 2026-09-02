@@ -269,7 +269,7 @@ class TestGraphCLI:
         result = runner.invoke(
             app, ["graph", "path", "checkout", "vendor", "--db", str(db), "--exclude", "/secret"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 0  # "nothing found" is an answer, like `anchor query`
         assert "No path" in result.output
         result = runner.invoke(
             app, ["graph", "query", "fraud", "--db", str(db), "--exclude", "/secret"]
@@ -287,3 +287,43 @@ class TestGraphCLI:
         result = runner.invoke(app, ["graph", "hubs", "--db", str(db)])
         assert result.exit_code == 1
         assert "empty" in result.output
+
+
+class TestGraphCLIRegressions:
+    def test_index_graph_into_a_named_vault(self, wiki: Path, tmp_path: Path) -> None:
+        db = tmp_path / "idx.db"
+        result = runner.invoke(
+            app, ["index", str(wiki), "--db", str(db), "--graph", "--vault", "v1"]
+        )
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(
+            app, ["graph", "path", "checkout", "bruno", "--db", str(db), "--vault", "v1"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "checkout -> payments -> bruno" in result.output
+        result = runner.invoke(app, ["graph", "hubs", "--db", str(db)])  # default vault is empty
+        assert result.exit_code == 1
+
+    def test_reindex_under_another_namespace_moves_the_graph(
+        self, wiki: Path, tmp_path: Path
+    ) -> None:
+        db = tmp_path / "idx.db"
+        for ns in ("/a", "/b"):
+            result = runner.invoke(app, ["index", str(wiki), "--db", str(db), "--graph", "-n", ns])
+            assert result.exit_code == 0, result.output
+        result = runner.invoke(app, ["graph", "hubs", "--db", str(db), "--include", "/a"])
+        assert result.exit_code == 0
+        assert "checkout" not in result.output
+        result = runner.invoke(app, ["graph", "hubs", "--db", str(db), "--include", "/b"])
+        assert "checkout" in result.output
+
+    def test_bare_hash_tag_does_not_abort_indexing(self, tmp_path: Path) -> None:
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "note.md").write_text(
+            "---\ntags: ['#', '#todo']\n---\n# Note\n\nA [[target]] link."
+        )
+        db = tmp_path / "idx.db"
+        result = runner.invoke(app, ["index", str(docs), "--db", str(db), "--graph"])
+        assert result.exit_code == 0, result.output
+        assert "Graph nodes" in result.output

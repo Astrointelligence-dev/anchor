@@ -23,9 +23,7 @@ from tests.conftest import FakeTokenizer
 
 def _ingester(**kwargs: Any) -> DocumentIngester:
     return DocumentIngester(
-        chunker=kwargs.pop(
-            "chunker", RecursiveCharacterChunker(tokenizer=FakeTokenizer())
-        ),
+        chunker=kwargs.pop("chunker", RecursiveCharacterChunker(tokenizer=FakeTokenizer())),
         tokenizer=FakeTokenizer(),
         **kwargs,
     )
@@ -67,9 +65,7 @@ class TestMarkdownHeaderChunker:
         assert "install the thing" in setup
 
     def test_content_prepend_can_be_disabled(self) -> None:
-        chunker = MarkdownHeaderChunker(
-            include_headers_in_content=False, tokenizer=FakeTokenizer()
-        )
+        chunker = MarkdownHeaderChunker(include_headers_in_content=False, tokenizer=FakeTokenizer())
         pairs = chunker.chunk_with_metadata(self._DOC)
         setup = next(c for c, m in pairs if m.get("headers") == "Guide > Setup")
         assert not setup.startswith("Guide > Setup")
@@ -107,9 +103,7 @@ class TestPageProvenance:
 class TestNewParsers:
     def test_markdown_frontmatter_parsed_not_discarded(self, tmp_path: Path) -> None:
         doc = tmp_path / "post.md"
-        doc.write_text(
-            "---\nauthor: Arthur\ntags: [a, b]\n---\n# Title\nbody text"
-        )
+        doc.write_text("---\nauthor: Arthur\ntags: [a, b]\n---\n# Title\nbody text")
         text, metadata = MarkdownParser().parse(doc)
         assert metadata["author"] == "Arthur"
         assert metadata["tags"] == ["a", "b"]
@@ -134,10 +128,10 @@ class TestNewParsers:
     @staticmethod
     def _make_docx(paragraphs: list[str], extra_xml: str = "") -> bytes:
         ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
-        body = "".join(
-            f"<w:p><w:r><w:t>{p}</w:t></w:r></w:p>" for p in paragraphs
+        body = "".join(f"<w:p><w:r><w:t>{p}</w:t></w:r></w:p>" for p in paragraphs)
+        xml = (
+            f'<?xml version="1.0"?>{extra_xml}<w:document {ns}><w:body>{body}</w:body></w:document>'
         )
-        xml = f'<?xml version="1.0"?>{extra_xml}<w:document {ns}><w:body>{body}</w:body></w:document>'
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as zf:
             zf.writestr("word/document.xml", xml)

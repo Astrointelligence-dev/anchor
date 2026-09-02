@@ -31,6 +31,7 @@ from anchor.models.context import ContextItem, SourceType
 from anchor.models.graph import GraphEdge, GraphNode, normalize_key
 from anchor.models.memory import MemoryEntry
 from anchor.models.scope import ROOT_NAMESPACE
+from anchor.protocols.storage import MemoryEntryStore
 
 if TYPE_CHECKING:
     from anchor.llm.base import LLMProvider
@@ -93,10 +94,13 @@ def note_name(item: ContextItem) -> str | None:
 def _as_list(value: Any) -> list[str]:
     """Frontmatter ``tags``/``aliases`` come as a list or a comma/space string."""
     if isinstance(value, str):
-        return [v.strip().lstrip("#") for v in re.split(r"[,\s]+", value) if v.strip()]
-    if isinstance(value, list | tuple):
-        return [str(v).strip().lstrip("#") for v in value if str(v).strip()]
-    return []
+        raw: list[str] = re.split(r"[,\s]+", value)
+    elif isinstance(value, list | tuple):
+        raw = [str(v) for v in value]
+    else:
+        return []
+    cleaned = (v.strip().lstrip("#").strip() for v in raw)
+    return [v for v in cleaned if v]
 
 
 @dataclass(slots=True)
@@ -259,13 +263,16 @@ class LLMGraphExtractor:
         try:
             response = self._llm.invoke([Message(role=Role.USER, content=prompt)])
             data = json.loads(strip_markdown_fences(response.content or ""))
+            if not isinstance(data, dict):
+                msg = "response is not a JSON object"
+                raise TypeError(msg)
+            return self._parse(data)
         except Exception as exc:
+            # Fail-soft (the TierCompactor contract): a malformed answer costs
+            # this chunk its graph, never the index run. _parse is inside the
+            # try because the model can return any shape (`"entities": true`).
             logger.warning("LLM graph extraction failed for item %s: %s", item.id, exc)
             return Extraction()
-        if not isinstance(data, dict):
-            logger.warning("LLM graph extraction returned non-object JSON for item %s", item.id)
-            return Extraction()
-        return self._parse(data)
 
     def _parse(self, data: dict[str, Any]) -> Extraction:
         result = Extraction()
@@ -365,8 +372,68 @@ def entry_to_item(entry: MemoryEntry, *, vault: str) -> ContextItem:
     )
 
 
+class GraphIndexingEntryStore:
+    """A ``MemoryEntryStore`` that keeps a knowledge graph in step with itself.
+
+    Wrap the persistent store once and every writer — ``MemoryManager``,
+    the pipeline's consolidation step, ``MemoryGarbageCollector`` — keeps
+    the graph honest without knowing it exists: ``add`` re-extracts the
+    entry (unless its content is unchanged), ``delete`` and ``clear`` take
+    the evidence with them. Everything else forwards to the wrapped store.
+    """
+
+    __slots__ = ("_indexer", "_inner")
+
+    def __init__(self, inner: MemoryEntryStore, indexer: GraphIndexer) -> None:
+        self._inner = inner
+        self._indexer = indexer
+
+    @property
+    def inner(self) -> MemoryEntryStore:
+        return self._inner
+
+    @property
+    def graph(self) -> KnowledgeGraph:
+        return self._indexer.graph
+
+    def add(self, entry: MemoryEntry) -> None:
+        current = getattr(self._inner, "get", lambda _id: None)(entry.id)
+        self._inner.add(entry)
+        if current is not None and current.content == entry.content:
+            return  # same text: the graph already has this evidence, no re-extraction
+        self._indexer.graph.unlink_item(entry.id)
+        self._indexer.index_entries([entry])
+
+    def delete(self, entry_id: str) -> bool:
+        deleted = self._inner.delete(entry_id)
+        if deleted:
+            self._indexer.graph.unlink_item(entry_id)
+        return deleted
+
+    def clear(self) -> None:
+        # Expired entries are hidden from list_all but still evidence the graph.
+        everything = getattr(self._inner, "list_all_unfiltered", self._inner.list_all)()
+        for entry in everything:
+            self._indexer.graph.unlink_item(entry.id)
+        self._inner.clear()
+
+    def search(self, query: str, top_k: int = 5) -> list[MemoryEntry]:
+        return self._inner.search(query, top_k=top_k)
+
+    def list_all(self) -> list[MemoryEntry]:
+        return self._inner.list_all()
+
+    def __getattr__(self, name: str) -> Any:  # get, list_all_unfiltered, search_filtered, ...
+        return getattr(self._inner, name)
+
+    def __repr__(self) -> str:
+        return f"GraphIndexingEntryStore({self._inner!r})"
+
+
 @dataclass(frozen=True, slots=True)
 class IndexStats:
+    """Items indexed, distinct nodes touched, distinct edges touched."""
+
     items: int
     nodes: int
     edges: int
@@ -409,9 +476,16 @@ class GraphIndexer:
         return self.index(entry_to_item(e, vault=vault) for e in entries)
 
     def index(self, items: Iterable[ContextItem]) -> IndexStats:
-        """Extract and write every item. Items from another vault are refused."""
+        """Extract and write every item. Items from another vault are refused.
+
+        Every node an extractor returns, and both endpoints of every edge it
+        returns, are linked to the item as evidence: the chunk mentions them.
+        ``IndexStats`` counts distinct nodes and edges touched, not emissions.
+        """
         store = self._graph.store
-        n_items = n_nodes = n_edges = 0
+        n_items = 0
+        nodes_seen: set[str] = set()
+        edges_seen: set[tuple[str, str, str]] = set()
         for item in items:
             if item.vault != store.vault:
                 msg = (
@@ -425,13 +499,18 @@ class GraphIndexer:
                 for node in found.nodes:
                     store.upsert_node(node)
                     store.link_item(node.id, item.id, item.namespace)
-                    n_nodes += 1
+                    nodes_seen.add(node.id)
                 for edge in found.edges:
+                    for endpoint in (edge.source, edge.target):
+                        if endpoint not in nodes_seen and store.get_node(endpoint) is None:
+                            store.upsert_node(GraphNode(id=endpoint))
+                        store.link_item(endpoint, item.id, item.namespace)
+                        nodes_seen.add(endpoint)
                     if not edge.evidence:
                         edge = edge.model_copy(update={"evidence": (item.id,)})
                     store.add_edge(edge)
-                    n_edges += 1
-        return IndexStats(items=n_items, nodes=n_nodes, edges=n_edges)
+                    edges_seen.add((edge.source, edge.relation, edge.target))
+        return IndexStats(items=n_items, nodes=len(nodes_seen), edges=len(edges_seen))
 
     def __repr__(self) -> str:
         return f"GraphIndexer(extractors={list(self._extractors)!r})"

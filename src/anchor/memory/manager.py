@@ -41,14 +41,18 @@ class MemoryManager:
     created from those parameters (backwards-compatible default).
 
     *graph* (opt-in, roadmap #4) keeps a knowledge graph in step with the
-    persistent store: every fact added is indexed (the item id is the
-    entry id), an updated fact is re-extracted, a deleted fact takes its
-    evidence with it. Pass a ``GraphIndexer`` whose extractors suit
-    memory — typically ``[LLMGraphExtractor(llm)]``, since facts carry no
-    wikilinks.
+    persistent store by wrapping it in a ``GraphIndexingEntryStore``: every
+    entry written is indexed (the item id is the entry id), a rewritten
+    entry is re-extracted, a deleted or cleared entry takes its evidence
+    with it — whoever the writer is (this manager, the pipeline's
+    consolidation step, the garbage collector). Pass a ``GraphIndexer``
+    whose extractors suit memory — typically ``[LLMGraphExtractor(llm)]``,
+    since facts carry no wikilinks. Entries that already exist when the
+    graph is attached are not backfilled: run
+    ``indexer.index_entries(store.list_all())`` once.
     """
 
-    __slots__ = ("_conversation", "_graph", "_persistent_store", "_tokenizer")
+    __slots__ = ("_conversation", "_persistent_store", "_tokenizer")
 
     def __init__(
         self,
@@ -60,7 +64,10 @@ class MemoryManager:
         graph: GraphIndexer | None = None,
     ) -> None:
         self._tokenizer = tokenizer or get_default_counter()
-        self._graph = graph
+        if graph is not None and persistent_store is not None:
+            from anchor.ingestion.graph_extractors import GraphIndexingEntryStore
+
+            persistent_store = GraphIndexingEntryStore(persistent_store, graph)
         if conversation_memory is not None:
             self._conversation: ConversationMemory = conversation_memory
         else:
@@ -111,9 +118,9 @@ class MemoryManager:
 
     def _add_message(self, role: Role, content: str) -> None:
         """Add a message to the conversation backend (works with both types)."""
-        if isinstance(self._conversation, ProgressiveSummarizationMemory):
-            self._conversation.add_message(role, content)
-        elif isinstance(self._conversation, SummaryBufferMemory):
+        if isinstance(self._conversation, ProgressiveSummarizationMemory) or isinstance(
+            self._conversation, SummaryBufferMemory
+        ):
             self._conversation.add_message(role, content)
         elif isinstance(self._conversation, SlidingWindowMemory):
             self._conversation.add_turn(role, content)
@@ -185,8 +192,6 @@ class MemoryManager:
             metadata=metadata or {},
         )
         self._persistent_store.add(entry)
-        if self._graph is not None:
-            self._graph.index_entries([entry])
         return entry
 
     def get_relevant_facts(self, query: str, top_k: int = 5) -> list[MemoryEntry]:
@@ -215,10 +220,7 @@ class MemoryManager:
         """
         if self._persistent_store is None:
             return False
-        deleted = self._persistent_store.delete(entry_id)
-        if deleted and self._graph is not None:
-            self._graph.graph.unlink_item(entry_id)
-        return deleted
+        return self._persistent_store.delete(entry_id)
 
     def update_fact(self, entry_id: str, content: str) -> MemoryEntry | None:
         """Update the content of an existing persistent memory entry.
@@ -248,11 +250,6 @@ class MemoryManager:
             }
         )
         self._persistent_store.add(updated)
-        if self._graph is not None:
-            # Re-extraction: the old evidence goes (edges it alone supported
-            # are invalidated), the new content is indexed under the same id.
-            self._graph.graph.unlink_item(entry_id)
-            self._graph.index_entries([updated])
         return updated
 
     # ---- Context assembly ----
@@ -295,7 +292,4 @@ class MemoryManager:
         """Clear conversation history and persistent store (if present)."""
         self._conversation.clear()
         if self._persistent_store is not None:
-            if self._graph is not None:
-                for entry in self._persistent_store.list_all():
-                    self._graph.graph.unlink_item(entry.id)
             self._persistent_store.clear()

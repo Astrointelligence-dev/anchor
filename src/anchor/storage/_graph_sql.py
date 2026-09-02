@@ -1,19 +1,14 @@
-"""What the SQL-backed GraphStores share: row shapes and the visibility filter.
+"""What every GraphStore shares: row shapes, merge rules and the visibility filter.
 
-The rules live once, in Python, and every backend applies them to rows it
-fetched with cheap indexed queries — the same semantics as
-``InMemoryGraphStore``, which is the reference:
-
-- an item is visible when ``scope`` is ``None`` or matches its namespace;
-- a node is visible when ``scope`` is ``None`` or one of its items is;
-- an edge is visible when live at ``as_of``, both endpoints visible and,
-  if it carries evidence, at least one evidence item is visible.
+The rules live once, in Python, and every backend (in-memory included)
+applies them to rows it fetched with cheap indexed queries. The visibility
+rule itself is stated in :mod:`anchor.models.graph`.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -107,44 +102,83 @@ def _loads(value: Any, default: Any) -> Any:
 
 
 def merge_node(current: GraphNode, incoming: GraphNode) -> GraphNode:
-    """Upsert semantics: aliases and metadata merge, the first label wins."""
+    """Upsert semantics: aliases and metadata merge, the first REAL label wins.
+
+    A node born as an edge endpoint carries its key as a placeholder label;
+    the first upsert that brings a display name replaces it.
+    """
+    label = current.label
+    if label == current.id and incoming.label != incoming.id:
+        label = incoming.label
     return current.model_copy(
         update={
+            "label": label,
             "aliases": tuple(dict.fromkeys(current.aliases + incoming.aliases)),
             "metadata": {**current.metadata, **incoming.metadata},
         }
     )
 
 
+def check_new_edge(edge: GraphEdge) -> None:
+    """Edges are born live: closing one is ``invalidate_edge``, never ``add_edge``."""
+    if edge.invalidated_at is not None:
+        msg = f"edge {edge.id!r} carries invalidated_at; use invalidate_edge to close a live edge"
+        raise ValueError(msg)
+
+
 def merge_edge(current: GraphEdge, incoming: GraphEdge) -> GraphEdge:
-    """Reinforce a live edge: evidence union, max confidence, best provenance, first fact."""
+    """Reinforce a live edge: evidence union, max confidence, best provenance, first fact.
+
+    World time follows one rule for both bounds — the incoming value when it
+    brings one, else the current (re-asserting a fact with ``valid_to`` is how
+    the bi-temporal model ends it; a later ``valid_from`` is a correction).
+    """
     return current.model_copy(
         update={
             "evidence": tuple(dict.fromkeys(current.evidence + incoming.evidence)),
             "confidence": max(current.confidence, incoming.confidence),
             "provenance": best_provenance(current.provenance, incoming.provenance),
             "fact": current.fact if current.fact is not None else incoming.fact,
+            "valid_from": incoming.valid_from
+            if incoming.valid_from is not None
+            else current.valid_from,
+            "valid_to": incoming.valid_to if incoming.valid_to is not None else current.valid_to,
             "metadata": {**current.metadata, **incoming.metadata},
         }
     )
 
 
+def node_visible(
+    node_id: str,
+    node_items: Mapping[str, Collection[str]],
+    visible: set[str] | None,
+    root_visible: bool,
+) -> bool:
+    """The rule from :mod:`anchor.models.graph`: one visible item, or no items and root visible."""
+    if visible is None:
+        return True
+    items = node_items.get(node_id, ())
+    if not items:
+        return root_visible
+    return any(i in visible for i in items)
+
+
 def visible_nodes(
     node_ids: Iterable[str],
-    node_items: Mapping[str, Sequence[str]],
+    node_items: Mapping[str, Collection[str]],
     visible: set[str] | None,
+    root_visible: bool = True,
 ) -> list[str]:
     """Node ids that exist for the scope (``visible`` is ``None`` when unscoped)."""
-    if visible is None:
-        return list(node_ids)
-    return [n for n in node_ids if any(i in visible for i in node_items.get(n, ()))]
+    return [n for n in node_ids if node_visible(n, node_items, visible, root_visible)]
 
 
 def visible_edges(
     edges: Iterable[GraphEdge],
-    node_items: Mapping[str, Sequence[str]],
+    node_items: Mapping[str, Collection[str]],
     visible: set[str] | None,
     as_of: datetime | None,
+    root_visible: bool = True,
 ) -> list[GraphEdge]:
     """Edges live at *as_of* whose endpoints and evidence survive the scope."""
     out: list[GraphEdge] = []
@@ -153,7 +187,7 @@ def visible_edges(
             continue
         if visible is not None:
             ends = (edge.source, edge.target)
-            if not all(any(i in visible for i in node_items.get(n, ())) for n in ends):
+            if not all(node_visible(n, node_items, visible, root_visible) for n in ends):
                 continue
             if edge.evidence and not any(i in visible for i in edge.evidence):
                 continue
