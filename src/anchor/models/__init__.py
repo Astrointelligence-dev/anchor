@@ -10,6 +10,7 @@ from .context import (
     SourceType,
     StepDiagnostic,
 )
+from .graph import GraphEdge, GraphNode, Provenance, Subgraph, normalize_key
 from .memory import ConversationTurn, MemoryEntry, MemoryType, Role
 from .query import QueryBundle
 from .scope import DEFAULT_VAULT, ROOT_NAMESPACE, RetrievalScope
@@ -22,17 +23,22 @@ __all__ = [
     "ContextResult",
     "ContextWindow",
     "ConversationTurn",
+    "GraphEdge",
+    "GraphNode",
     "MemoryEntry",
     "MemoryType",
     "OverflowStrategy",
     "PipelineDiagnostics",
+    "Provenance",
     "QueryBundle",
     "RetrievalScope",
     "Role",
     "SourceType",
     "StepDiagnostic",
+    "Subgraph",
     "TokenBudget",
     "default_agent_budget",
     "default_chat_budget",
     "default_rag_budget",
+    "normalize_key",
 ]

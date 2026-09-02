@@ -2,6 +2,7 @@
 
 from .cache import CacheBackend
 from .classifier import QueryClassifier
+from .embeddings import EmbeddingProvider
 from .evaluation import HumanEvaluator, RAGEvaluator, RetrievalEvaluator
 from .ingestion import Chunker, DocumentParser
 from .memory import (
@@ -23,7 +24,6 @@ from .multimodal import ModalityEncoder, TableExtractor
 from .observability import MetricsCollector, SpanExporter
 from .postprocessor import AsyncPostProcessor, PostProcessor
 from .query_transform import AsyncQueryTransformer, QueryTransformer
-from .embeddings import EmbeddingProvider
 from .reranker import AsyncReranker, Reranker
 from .retriever import AsyncRetriever, Retriever
 from .router import QueryRouter
@@ -31,6 +31,7 @@ from .storage import (
     ContextStore,
     DocumentStore,
     GarbageCollectableStore,
+    GraphStore,
     MemoryEntryStore,
     VectorStore,
 )
@@ -50,8 +51,10 @@ __all__ = [
     "ConversationMemory",
     "DocumentParser",
     "DocumentStore",
+    "EmbeddingProvider",
     "EvictionPolicy",
     "GarbageCollectableStore",
+    "GraphStore",
     "HumanEvaluator",
     "MemoryConsolidator",
     "MemoryDecay",
@@ -69,7 +72,6 @@ __all__ = [
     "QueryTransformer",
     "RAGEvaluator",
     "RecencyScorer",
-    "EmbeddingProvider",
     "Reranker",
     "RetrievalEvaluator",
     "Retriever",

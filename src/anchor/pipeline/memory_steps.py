@@ -11,11 +11,12 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
 from anchor.models.context import ContextItem, SourceType
+from anchor.models.scope import RetrievalScope, effective_scope
 from anchor.pipeline.step import PipelineStep
 from anchor.protocols.memory import MemoryOperation
 
 if TYPE_CHECKING:
-    from anchor.memory.graph_memory import SimpleGraphMemory
+    from anchor.graph.knowledge_graph import KnowledgeGraph
     from anchor.models.memory import ConversationTurn, MemoryEntry
     from anchor.models.query import QueryBundle
     from anchor.protocols.memory import MemoryConsolidator, MemoryExtractor
@@ -49,34 +50,43 @@ def _store_with_consolidation(
 
 
 def graph_retrieval_step(
-    graph: SimpleGraphMemory,
+    graph: KnowledgeGraph,
     store: MemoryEntryStore,
     entity_extractor: Callable[[str], list[str]],
     max_depth: int = 2,
     max_items: int = 5,
     name: str = "graph_retrieval",
     on_error: Literal["raise", "skip"] = "skip",
+    *,
+    scope: RetrievalScope | None = None,
 ) -> PipelineStep:
     """Create a pipeline step that retrieves memory entries linked to graph entities.
 
     Flow:
-        1. Extract entity IDs from the query using *entity_extractor*.
-        2. For each entity, traverse the graph via BFS up to *max_depth* hops.
-        3. Collect memory IDs linked to those entities.
+        1. Extract entity names from the query using *entity_extractor*.
+        2. For each entity, walk the graph up to *max_depth* hops.
+        3. Collect the item ids evidencing those nodes — for memory, the
+           item id **is** ``MemoryEntry.id`` (link entries with
+           ``graph.link_item(entity, entry.id)``).
         4. Fetch the corresponding ``MemoryEntry`` objects from the *store*.
         5. Convert to ``ContextItem`` objects with ``source_type=MEMORY``,
            ``priority=6``.
 
+    The walk honors the scope published by the running agent turn
+    intersected with the static *scope* (the ``retriever_step`` doctrine:
+    pipeline retrieval can only narrow).
+
     Parameters:
-        graph: The ``SimpleGraphMemory`` instance to traverse.
+        graph: The ``KnowledgeGraph`` to walk.
         store: A ``MemoryEntryStore`` implementation that holds persistent
             ``MemoryEntry`` objects.
         entity_extractor: User-provided callable that maps a query string
-            to a list of entity IDs.
-        max_depth: Maximum BFS traversal depth (default 2).
+            to a list of entity names.
+        max_depth: Maximum traversal depth (default 2).
         max_items: Maximum number of ``ContextItem`` objects to return.
         name: Step name for diagnostics.
         on_error: Error policy -- ``"skip"`` (default) or ``"raise"``.
+        scope: Static namespace scope for the walk.
 
     Returns:
         A ``PipelineStep`` suitable for ``pipeline.add_step()``.
@@ -87,11 +97,12 @@ def graph_retrieval_step(
         if not entity_ids:
             return items
 
+        active = effective_scope(scope)
         # Collect memory IDs from all extracted entities and their neighbors
         seen_memory_ids: set[str] = set()
         ordered_memory_ids: list[str] = []
         for entity_id in entity_ids:
-            related_ids = graph.get_related_memory_ids(entity_id, max_depth=max_depth)
+            related_ids = graph.related_items(entity_id, max_depth=max_depth, scope=active)
             for mid in related_ids:
                 if mid not in seen_memory_ids:
                     seen_memory_ids.add(mid)

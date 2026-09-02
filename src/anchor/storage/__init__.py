@@ -10,12 +10,18 @@ Persistent backends (SQLite, PostgreSQL, Redis) are available as optional extras
 
 from .json_file_store import JsonFileMemoryStore
 from .json_memory_store import InMemoryEntryStore
-from .memory_store import InMemoryContextStore, InMemoryDocumentStore, InMemoryVectorStore
+from .memory_store import (
+    InMemoryContextStore,
+    InMemoryDocumentStore,
+    InMemoryGraphStore,
+    InMemoryVectorStore,
+)
 
 __all__ = [
     "InMemoryContextStore",
     "InMemoryDocumentStore",
     "InMemoryEntryStore",
+    "InMemoryGraphStore",
     "InMemoryVectorStore",
     "JsonFileMemoryStore",
 ]

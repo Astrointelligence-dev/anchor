@@ -6,9 +6,11 @@ Users can provide any object that matches the interface -- no inheritance requir
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from datetime import datetime
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from anchor.models.context import ContextItem
+from anchor.models.graph import GraphEdge, GraphNode, Subgraph
 from anchor.models.memory import MemoryEntry
 from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
 
@@ -411,3 +413,114 @@ class AsyncGarbageCollectableStore(Protocol):
 
     async def list_all_unfiltered(self) -> list[MemoryEntry]: ...
     async def delete(self, entry_id: str) -> bool: ...
+
+
+@runtime_checkable
+class GraphStore(Protocol):
+    """Protocol for the knowledge graph (roadmap #4).
+
+    Bound to one vault at construction like every store. ``scope`` narrows
+    namespaces through the evidence items; ``as_of`` is world time.
+    Visibility rules every backend must implement identically:
+
+    - an item is visible when ``scope`` is ``None`` or matches its namespace;
+    - a node is visible when ``scope`` is ``None`` or at least one of its
+      linked items is visible — a node without evidence exists only unscoped;
+    - an edge is visible when it is live at ``as_of`` (``GraphEdge.is_live``),
+      both endpoints are visible and, if it carries evidence, at least one
+      evidence item is visible.
+
+    Edges are invalidated in place, never deleted.
+    """
+
+    @property
+    def vault(self) -> str:
+        """The mount this graph lives in."""
+        ...
+
+    @property
+    def version(self) -> int:
+        """Increments on every write; derived data (hubs, communities) caches on it."""
+        ...
+
+    def upsert_node(self, node: GraphNode) -> GraphNode:
+        """Insert or merge a node (aliases and metadata merge, the first label wins).
+
+        Returns:
+            The stored node.
+        """
+        ...
+
+    def get_node(self, node_id: str) -> GraphNode | None:
+        """The node under a canonical id, or ``None``."""
+        ...
+
+    def add_edge(self, edge: GraphEdge) -> GraphEdge:
+        """Insert an edge, creating missing endpoint nodes.
+
+        When a live edge with the same ``(source, relation, target)`` exists
+        the new one is merged into it (evidence union, max confidence, best
+        provenance, first fact). Evidence items must already be linked
+        (``ValueError`` otherwise — the graph needs their namespace).
+
+        Returns:
+            The stored (possibly merged) edge.
+        """
+        ...
+
+    def get_edge(self, edge_id: str) -> GraphEdge | None:
+        """An edge by id, invalidated ones included (history is kept)."""
+        ...
+
+    def invalidate_edge(self, edge_id: str, *, at: datetime | None = None) -> bool:
+        """Mark an edge obsolete at *at* (default now). ``False`` if unknown or already."""
+        ...
+
+    def remove_node(self, node_id: str) -> bool:
+        """Drop a node, invalidate its edges, forget its item links."""
+        ...
+
+    def link_item(self, node_id: str, item_id: str, namespace: str = ROOT_NAMESPACE) -> None:
+        """Record that an item evidences a node, under the item's namespace.
+
+        Raises:
+            KeyError: If the node does not exist.
+            ValueError: If the item was linked before under another namespace.
+        """
+        ...
+
+    def unlink_item(self, item_id: str) -> int:
+        """Forget an item everywhere; edges left with no evidence are invalidated.
+
+        Returns:
+            The number of edges invalidated.
+        """
+        ...
+
+    def node_items(self, node_id: str, *, scope: RetrievalScope | None = None) -> list[str]:
+        """Evidence item ids of a node visible under *scope*, link order."""
+        ...
+
+    def edges_of(
+        self,
+        node_id: str,
+        *,
+        direction: Literal["out", "in", "both"] = "both",
+        scope: RetrievalScope | None = None,
+        as_of: datetime | None = None,
+    ) -> list[GraphEdge]:
+        """Visible live edges touching a node, insertion order."""
+        ...
+
+    def subgraph(
+        self,
+        *,
+        scope: RetrievalScope | None = None,
+        as_of: datetime | None = None,
+    ) -> Subgraph:
+        """Everything visible under *scope* at *as_of* — nodes, edges, node→items."""
+        ...
+
+    def clear(self) -> None:
+        """Remove every node, edge and link."""
+        ...

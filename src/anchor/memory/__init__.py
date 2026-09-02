@@ -7,7 +7,6 @@ from .decay import EbbinghausDecay, ExponentialRecencyScorer, LinearDecay, Linea
 from .eviction import FIFOEviction, ImportanceEviction, PairedEviction
 from .extractor import CallbackExtractor
 from .gc import GCStats, MemoryGarbageCollector
-from .graph_memory import SimpleGraphMemory
 from .manager import MemoryManager
 from .progressive import ProgressiveSummarizationMemory
 from .sliding_window import SlidingWindowMemory
@@ -28,7 +27,6 @@ __all__ = [
     "PairedEviction",
     "ProgressiveSummarizationMemory",
     "SimilarityConsolidator",
-    "SimpleGraphMemory",
     "SlidingWindowMemory",
     "SummaryBufferMemory",
     "TierCompactor",

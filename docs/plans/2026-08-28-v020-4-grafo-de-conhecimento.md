@@ -208,13 +208,13 @@ seguem de qualquer jeito.
 
 ### A. Modelo + store in-memory + navegação (sem persistência, sem LLM)
 
-- [ ] `models/graph.py`: `GraphNode(id, label, aliases, metadata)` com chave
+- [x] `models/graph.py`: `GraphNode(id, label, aliases, metadata)` com chave
       canônica (NFKC + casefold + strip; `normalize_node_id`), `GraphEdge`
       (schema mínimo do doc de pesquisa: `relation`, `fact`, `provenance`,
       `confidence`, `evidence ≥1`, `valid_from/valid_to/created_at/
       invalidated_at`, `metadata`), `Provenance` Literal, `is_visible(edge,
       as_of)` — um predicado, um lugar.
-- [ ] `protocols/storage.py`: `GraphStore` / `AsyncGraphStore`, vault na
+- [x] `protocols/storage.py`: `GraphStore` / `AsyncGraphStore`, vault na
       montagem (`validate_vault`, padrão `SqliteContextStore:20`).
       Superfície: `upsert_node`, `get_node`, `add_edge` (merge de evidência
       se a aresta viva já existe), `invalidate_edge`, `link_item(node_id,
@@ -222,21 +222,31 @@ seguem de qualquer jeito.
       evidência restante), `neighbors(node_id, *, scope, as_of, relation)`,
       `subgraph(scope, as_of)` (nós + arestas visíveis — o que PPR/comunidade
       consomem), `graph_version`, `clear`.
-- [ ] `storage/memory_store.py`: `InMemoryGraphStore`. Visibilidade por
+- [x] `storage/memory_store.py`: `InMemoryGraphStore`. Visibilidade por
       escopo = evidência ∩ itens visíveis ≠ ∅ (`RetrievalScope.matches`),
       aplicada ao nó **antes** de qualquer travessia (parede, não ponte).
-- [ ] `graph/algorithms.py` (Python puro): `personalized_pagerank` (power
+- [x] `graph/algorithms.py` (Python puro): `personalized_pagerank` (power
       iteration), `bfs_budgeted` (o pruning do PathRAG: recurso decai por
       salto, poda abaixo de θ), `shortest_path`, `degree`. Sem lib.
-- [ ] `graph/knowledge_graph.py`: `KnowledgeGraph(store, context_store)` —
+- [x] `graph/knowledge_graph.py`: `KnowledgeGraph(store, context_store)` —
       `query(seeds, *, scope, as_of, top_k)` → itens ranqueados, `path(a,
       b)`, `explain(a, b)` (arestas + `fact` + `provenance` + evidência),
       `backlinks(node)`, `hubs(k)` (grau). `SimpleGraphMemory` vira fachada
       fina sobre `InMemoryGraphStore` com `link_item` (breaking:
       `link_memory` sai; CHANGELOG).
-- [ ] Testes com decoy: nó excluído invisível por travessia, `backlinks`,
+- [x] Testes com decoy: nó excluído invisível por travessia, `backlinks`,
       `path` (não atravessa por cima) e `explain`; `as_of` esconde aresta
       invalidada; subagente com escopo ∩ não alarga.
+
+**Fase A entregue** (sessão 11). Desvios: `AsyncGraphStore` fica para a
+fase C, com o primeiro backend async (protocolo com uma implementação é
+YAGNI); `bfs_budgeted` (pruning do PathRAG) descartado — o PPR é a versão
+iterada do mesmo espalhamento e um único spreader basta; `SimpleGraphMemory`
+**deletado**, não fachada — `KnowledgeGraph()` sem store já é o in-memory,
+duas classes para um conceito seria o "misrouted" da arquitetura de memória;
+`evidence` é opcional no modelo (aresta manual sem item existe só sem escopo;
+o indexador da fase B sempre cita ≥1). Suíte 2986 verdes; ruff 151 (baseline
+154), mypy 140 = baseline.
 
 ### B. Golden set + extração determinística + `GraphRetriever` + A/B (o gate)
 
