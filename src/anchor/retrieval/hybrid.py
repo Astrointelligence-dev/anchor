@@ -7,6 +7,7 @@ import logging
 from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem
 from anchor.models.query import QueryBundle
+from anchor.models.scope import RetrievalScope, scope_kwargs
 from anchor.protocols.retriever import Retriever
 from anchor.retrieval._rrf import rrf_fuse
 
@@ -53,13 +54,21 @@ class HybridRetriever:
             f"rrf_k={self._rrf_k}, weights={self._weights})"
         )
 
-    def retrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]:
-        """Retrieve from all sub-retrievers and fuse results with RRF."""
+    def retrieve(
+        self,
+        query: QueryBundle,
+        top_k: int = 10,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
+        """Retrieve from all sub-retrievers (scope forwarded) and fuse with RRF."""
         all_rankings: list[list[ContextItem]] = []
         successful_weights: list[float] = []
         for retriever, weight in zip(self._retrievers, self._weights, strict=True):
             try:
-                results = retriever.retrieve(query, top_k=top_k)
+                results = retriever.retrieve(
+                    query, top_k=top_k, **scope_kwargs(scope),
+                )
                 all_rankings.append(results)
                 successful_weights.append(weight)
             except Exception as exc:

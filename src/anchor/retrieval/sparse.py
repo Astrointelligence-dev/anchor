@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
+from anchor.models.scope import RetrievalScope
 from anchor.protocols.tokenizer import Tokenizer
 from anchor.tokens.counter import get_default_counter
 
@@ -172,16 +173,36 @@ class SparseRetriever:
         self._bm25s = None
         return len(self._items)
 
-    def retrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]:
-        """Retrieve items using BM25 scoring."""
+    def retrieve(
+        self,
+        query: QueryBundle,
+        top_k: int = 10,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
+        """Retrieve items using BM25 scoring.
+
+        ``scope`` is a pre-filter: out-of-scope documents are masked before
+        the top-k cut, so a selective scope never costs recall.
+        """
+        allowed: list[int] | None = None
+        if scope is not None:
+            allowed = [
+                i for i, item in enumerate(self._items)
+                if scope.matches(item.namespace)
+            ]
+            if not allowed:
+                return []
         if self._bm25s is not None:
-            return self._retrieve_bm25s(query, top_k)
+            return self._retrieve_bm25s(query, top_k, allowed)
         if self._bm25 is not None:
-            return self._retrieve_legacy(query, top_k)
+            return self._retrieve_legacy(query, top_k, allowed)
         msg = "Must call index() before retrieve()"
         raise RetrieverError(msg)
 
-    def _retrieve_bm25s(self, query: QueryBundle, top_k: int) -> list[ContextItem]:
+    def _retrieve_bm25s(
+        self, query: QueryBundle, top_k: int, allowed: list[int] | None,
+    ) -> list[ContextItem]:
         import bm25s
 
         query_tokens = bm25s.tokenize(
@@ -190,12 +211,18 @@ class SparseRetriever:
             stemmer=self._get_stemmer(),
             show_progress=False,
         )
-        k = min(top_k, len(self._items))
+        k = min(top_k, len(self._items) if allowed is None else len(allowed))
         if k == 0:
             return []
+        weight_mask = None
+        if allowed is not None:
+            import numpy as np
+
+            weight_mask = np.zeros(len(self._items), dtype=np.float32)
+            weight_mask[allowed] = 1.0
         try:
             doc_indices, scores = self._bm25s.retrieve(
-                query_tokens, k=k, show_progress=False
+                query_tokens, k=k, show_progress=False, weight_mask=weight_mask,
             )
         except (ValueError, IndexError):
             # e.g. query reduced to zero tokens after stopword removal
@@ -207,7 +234,9 @@ class SparseRetriever:
         ]
         return self._build_items(pairs)
 
-    def _retrieve_legacy(self, query: QueryBundle, top_k: int) -> list[ContextItem]:
+    def _retrieve_legacy(
+        self, query: QueryBundle, top_k: int, allowed: list[int] | None,
+    ) -> list[ContextItem]:
         if self._bm25 is None:  # pragma: no cover
             msg = "Must call index() before retrieve()"
             raise RetrieverError(msg)
@@ -217,7 +246,8 @@ class SparseRetriever:
         if len(scores) == 0:
             return []
 
-        scored_indices = [(float(s), i) for i, s in enumerate(scores)]
+        indices = range(len(scores)) if allowed is None else allowed
+        scored_indices = [(float(scores[i]), i) for i in indices]
         top_entries = heapq.nlargest(top_k, scored_indices)
         return self._build_items(top_entries)
 

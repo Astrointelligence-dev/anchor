@@ -284,9 +284,8 @@ def query(
         raise typer.Exit(code=1)
 
     from anchor.models.query import QueryBundle
-    from anchor.models.scope import RetrievalScope
-    from anchor.retrieval import SparseRetriever
-    from anchor.retrieval._rrf import rrf_fuse
+    from anchor.models.scope import RetrievalScope, scope_kwargs
+    from anchor.retrieval import HybridRetriever, SparseRetriever
 
     scope = (
         RetrievalScope(include=tuple(include), exclude=tuple(exclude))
@@ -296,29 +295,28 @@ def query(
 
     context_store = _open_context_store(db, vault)
     items = context_store.get_all()
-    if scope is not None:
-        # BM25 is in-memory over the loaded items: scoping = indexing
-        # only what the scope allows (exclude wins inside matches()).
-        items = [item for item in items if scope.matches(item.namespace)]
     if not items:
-        console.print("[yellow]Index is empty (for this vault/scope).[/yellow]")
+        console.print("[yellow]Index is empty (for this vault).[/yellow]")
         raise typer.Exit(code=1)
 
     sparse = SparseRetriever(language=language)
     sparse.index(items)
-    bundle = QueryBundle(query_str=query_text)
-    ranked: list[list[Any]] = [sparse.retrieve(bundle, top_k=top_k)]
+    retrievers: list[Any] = [sparse]
 
     provider = _make_embeddings(embeddings)
     if provider is not None:
         from anchor.retrieval import DenseRetriever
 
         vector_store = _open_vector_store(db, provider.dimensions, vault)
-        dense = DenseRetriever(vector_store, context_store, embeddings=provider)
-        ranked.append(dense.retrieve(bundle, top_k=top_k, scope=scope))
+        retrievers.append(
+            DenseRetriever(vector_store, context_store, embeddings=provider)
+        )
 
-    results = (
-        rrf_fuse(ranked, top_k=top_k) if len(ranked) > 1 else ranked[0][:top_k]
+    retriever: Any = (
+        HybridRetriever(retrievers) if len(retrievers) > 1 else retrievers[0]
+    )
+    results = retriever.retrieve(
+        QueryBundle(query_str=query_text), top_k=top_k, **scope_kwargs(scope),
     )
 
     if not results:

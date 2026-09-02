@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.memory import MemoryEntry
 from anchor.models.query import QueryBundle
+from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
 
 _DEFAULT_HALF_LIFE_SECONDS = 7 * 86400.0
 
@@ -261,17 +262,29 @@ class MemoryRetrieverAdapter:
     def __init__(self, retriever: ScoredMemoryRetriever) -> None:
         self._retriever = retriever
 
-    def retrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]:
+    def retrieve(
+        self,
+        query: QueryBundle,
+        top_k: int = 10,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
         """Retrieve memory entries and convert them to ``ContextItem`` objects.
+
+        Memory has no namespaces: entries live at the root, so a scope
+        under which ``/`` is not visible hides all of them.
 
         Parameters:
             query: The pipeline query bundle.
             top_k: Maximum number of items to return.
+            scope: Namespace scope; applied to the root namespace.
 
         Returns:
             A list of ``ContextItem`` objects with ``source=MEMORY`` and
             ``priority=7``.
         """
+        if scope is not None and not scope.matches(ROOT_NAMESPACE):
+            return []
         entries = self._retriever.retrieve(query.query_str, top_k=top_k)
         return [
             ContextItem(

@@ -9,7 +9,7 @@ from anchor.embeddings._base import as_embedding_provider
 from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
-from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
+from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope, same_vault
 from anchor.protocols.embeddings import EmbeddingProvider
 from anchor.protocols.storage import ContextStore, VectorStore
 from anchor.protocols.tokenizer import Tokenizer
@@ -44,6 +44,7 @@ class DenseRetriever:
         *,
         embeddings: EmbeddingProvider | None = None,
     ) -> None:
+        same_vault(vector_store, context_store)
         self._vector_store = vector_store
         self._context_store = context_store
         self._embeddings = embeddings or as_embedding_provider(embed_fn)

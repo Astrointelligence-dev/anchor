@@ -14,6 +14,7 @@ from typing import Any
 from anchor._math import cosine_similarity as _cosine_sim
 from anchor.models.context import ContextItem
 from anchor.models.query import QueryBundle
+from anchor.models.scope import RetrievalScope
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,13 @@ class SharedSpaceRetriever:
             embedding = self._encoder.encode(item.content, item_modality)
             self._items.append((item, embedding))
 
-    def retrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]:
+    def retrieve(
+        self,
+        query: QueryBundle,
+        top_k: int = 10,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
         """Retrieve items most similar to the query across modalities.
 
         Parameters:
@@ -126,6 +133,8 @@ class SharedSpaceRetriever:
 
         scored: list[tuple[float, ContextItem]] = []
         for item, embedding in self._items:
+            if scope is not None and not scope.matches(item.namespace):
+                continue
             sim = self._similarity_fn(query_embedding, embedding)
             scored.append((sim, item))
 

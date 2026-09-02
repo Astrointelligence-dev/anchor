@@ -8,6 +8,7 @@ from collections.abc import Callable
 from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem
 from anchor.models.query import QueryBundle
+from anchor.models.scope import RetrievalScope, scope_kwargs
 from anchor.protocols.retriever import Retriever
 
 logger = logging.getLogger(__name__)
@@ -182,8 +183,14 @@ class RoutedRetriever:
         self._retrievers = retrievers
         self._default_retriever = default_retriever
 
-    def retrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]:
-        """Route the query and delegate to the selected retriever.
+    def retrieve(
+        self,
+        query: QueryBundle,
+        top_k: int = 10,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
+        """Route the query and delegate to the selected retriever (scope forwarded).
 
         Parameters:
             query: The query to route and retrieve for.
@@ -215,7 +222,7 @@ class RoutedRetriever:
             raise RetrieverError(msg)
 
         logger.debug("RoutedRetriever using route %r", route_name)
-        return retriever.retrieve(query, top_k=top_k)
+        return retriever.retrieve(query, top_k=top_k, **scope_kwargs(scope))
 
     def __repr__(self) -> str:
         return (

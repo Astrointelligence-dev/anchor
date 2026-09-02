@@ -14,8 +14,11 @@ from anchor.agent.agent import Agent
 from anchor.agent.skills.rag import current_scope, rag_tools
 from anchor.agent.subagent import SubagentDefinition
 from anchor.models.context import ContextItem, SourceType
-from anchor.models.scope import RetrievalScope
+from anchor.models.scope import ACTIVE_SCOPE, RetrievalScope
+from anchor.pipeline import retriever_step
 from anchor.retrieval.dense import DenseRetriever
+from anchor.retrieval.hybrid import HybridRetriever
+from anchor.retrieval.sparse import SparseRetriever
 from anchor.storage.memory_store import InMemoryContextStore, InMemoryVectorStore
 from tests.conftest import make_embedding
 from tests.test_agent.test_agent import (
@@ -24,9 +27,10 @@ from tests.test_agent.test_agent import (
     _Tok,
     _tool_use_response,
 )
+from tests.test_agent.test_phase4_loop import _tool_results_of
 
 
-def _mk_retriever(entries: list[tuple[str, str, str]]) -> DenseRetriever:
+def _mk_retriever(entries, embed_fn=None) -> DenseRetriever:
     """entries: (item_id, content, namespace)."""
     vs = InMemoryVectorStore()
     cs = InMemoryContextStore()
@@ -36,7 +40,9 @@ def _mk_retriever(entries: list[tuple[str, str, str]]) -> DenseRetriever:
             id=item_id, content=content, source=SourceType.RETRIEVAL,
             namespace=ns,
         ))
-    return DenseRetriever(vector_store=vs, context_store=cs)
+    return DenseRetriever(
+        vector_store=vs, context_store=cs, tokenizer=_Tok(), embed_fn=embed_fn,
+    )
 
 
 _EMBED = lambda q: make_embedding(1)  # noqa: E731
@@ -73,7 +79,6 @@ class TestAgentScopeReachesRagTools:
             retr, scope=RetrievalScope(exclude=("/campanha/spoilers",)),
         )
         assert "".join(agent.chat("Go")) == "done"
-        from tests.test_agent.test_phase4_loop import _tool_results_of
         (result,) = _tool_results_of(provider, 1)
         assert "conteudo aberto" in result.content
         assert "SEGREDO" not in result.content
@@ -85,7 +90,6 @@ class TestAgentScopeReachesRagTools:
         ])
         agent, provider = self._agent(retr)
         assert "".join(agent.chat("Go")) == "done"
-        from tests.test_agent.test_phase4_loop import _tool_results_of
         (result,) = _tool_results_of(provider, 1)
         assert "SEGREDO" in result.content
 
@@ -101,7 +105,6 @@ class TestAgentScopeReachesRagTools:
             tool_scope=RetrievalScope(include=("/docs",)),
         )
         assert "".join(agent.chat("Go")) == "done"
-        from tests.test_agent.test_phase4_loop import _tool_results_of
         (result,) = _tool_results_of(provider, 1)
         assert "dentro do include" in result.content
         assert "fora do include" not in result.content
@@ -131,7 +134,6 @@ class TestSubagentCannotWiden:
         orch.with_tools([sub.as_tool("researcher", "d")])
 
         assert "".join(orch.chat("Go")) == "done"
-        from tests.test_agent.test_phase4_loop import _tool_results_of
         (child_search,) = _tool_results_of(sub_provider, 1)
         assert "material permitido" in child_search.content
         assert "material proibido" not in child_search.content
@@ -168,7 +170,6 @@ class TestSubagentCannotWiden:
         sub._llm = sub_provider
 
         assert "".join(orch.chat("Go")) == "done"
-        from tests.test_agent.test_phase4_loop import _tool_results_of
         (child_search,) = _tool_results_of(sub_provider, 1)
         assert "fundo permitido" in child_search.content
         assert "raso permitido" not in child_search.content
@@ -195,7 +196,6 @@ class TestMounts:
             _text_response("done"),
         ])
         assert "".join(agent.chat("Go")) == "done"
-        from tests.test_agent.test_phase4_loop import _tool_results_of
         (result,) = _tool_results_of(provider, 1)
         assert "nota de reuniao" in result.content
         assert "clausula" not in result.content
@@ -206,7 +206,6 @@ class TestMounts:
             _text_response("done"),
         ])
         assert "".join(agent.chat("Go")) == "done"
-        from tests.test_agent.test_phase4_loop import _tool_results_of
         (result,) = _tool_results_of(provider, 1)
         assert "not mounted" in result.content
         assert "juridico" in result.content  # lista os montados
@@ -217,7 +216,6 @@ class TestMounts:
             _text_response("done"),
         ])
         assert "".join(agent.chat("Go")) == "done"
-        from tests.test_agent.test_phase4_loop import _tool_results_of
         (result,) = _tool_results_of(provider, 1)
         assert "choose a vault" in result.content
 
@@ -230,6 +228,103 @@ class TestMounts:
         agent = Agent(llm=provider, tokenizer=_Tok())
         agent.with_tools(rag_tools({"juridico": juridico}, _EMBED))
         assert "".join(agent.chat("Go")) == "done"
-        from tests.test_agent.test_phase4_loop import _tool_results_of
         (result,) = _tool_results_of(provider, 1)
         assert "clausula contratual" in result.content
+
+
+def _model_saw(provider: FakeLLMProvider, text: str) -> bool:
+    return any(text in str(m) for call in provider.seen_messages for m in call)
+
+
+class TestScopeCoversPipelineRetrieval:
+    """Ritual xhigh #4: the turn's own pipeline build runs under the
+    published scope — an excluded namespace cannot reach the model
+    through retriever_step either, sync, async, or in a subagent."""
+
+    _ENTRIES = (
+        ("a", "conteudo aberto", "/campanha/sessoes"),
+        ("s", "SEGREDO DO VILAO", "/campanha/spoilers"),
+    )
+    _EXCLUDE = RetrievalScope(exclude=("/campanha/spoilers",))
+
+    def _agent(self, provider):
+        agent = Agent(llm=provider, tokenizer=_Tok())
+        retr = _mk_retriever(self._ENTRIES, embed_fn=_EMBED)
+        agent.pipeline.add_step(retriever_step("docs", retr))
+        return agent
+
+    def test_sync_pipeline_respects_with_scope(self):
+        provider = FakeLLMProvider([_text_response("done")])
+        agent = self._agent(provider).with_scope(self._EXCLUDE)
+        assert "".join(agent.chat("Go")) == "done"
+        assert _model_saw(provider, "conteudo aberto")
+        assert not _model_saw(provider, "SEGREDO")
+
+    def test_async_pipeline_respects_with_scope(self):
+        import asyncio
+
+        provider = FakeLLMProvider([_text_response("done")])
+        agent = self._agent(provider).with_scope(self._EXCLUDE)
+
+        async def run():
+            return "".join([c async for c in agent.achat("Go")])
+
+        assert asyncio.run(run()) == "done"
+        assert _model_saw(provider, "conteudo aberto")
+        assert not _model_saw(provider, "SEGREDO")
+
+    def test_unscoped_pipeline_sees_all(self):
+        provider = FakeLLMProvider([_text_response("done")])
+        agent = self._agent(provider)
+        assert "".join(agent.chat("Go")) == "done"
+        assert _model_saw(provider, "SEGREDO")
+
+    def test_subagent_pipeline_inherits_parent_scope(self):
+        sub_provider = FakeLLMProvider([_text_response("child done")])
+        sub = self._agent(sub_provider)  # no scope of its own
+        orch_provider = FakeLLMProvider([
+            _tool_use_response("tu_1", "researcher", {"task": "pesquise"}),
+            _text_response("done"),
+        ])
+        orch = Agent(llm=orch_provider, tokenizer=_Tok()).with_scope(self._EXCLUDE)
+        orch.with_tools([sub.as_tool("researcher", "d")])
+
+        assert "".join(orch.chat("Go")) == "done"
+        assert _model_saw(sub_provider, "conteudo aberto")
+        assert not _model_saw(sub_provider, "SEGREDO")
+
+    def test_scope_is_not_left_published_after_the_turn(self):
+        provider = FakeLLMProvider([_text_response("done")])
+        agent = self._agent(provider).with_scope(self._EXCLUDE)
+        assert "".join(agent.chat("Go")) == "done"
+        assert ACTIVE_SCOPE.get() is None
+
+
+class TestScopeReachesEveryBuiltInRetriever:
+    """Ritual xhigh #10: a scoped agent with a hybrid/BM25 retriever must
+    search, not return a TypeError to the model."""
+
+    def _hybrid(self):
+        entries = [
+            ("a", "documento aberto sobre regras", "/campanha/sessoes"),
+            ("s", "SEGREDO DO VILAO regras", "/campanha/spoilers"),
+        ]
+        sparse = SparseRetriever(tokenizer=_Tok())
+        sparse.index([
+            ContextItem(id=i, content=c, source=SourceType.RETRIEVAL, namespace=ns)
+            for i, c, ns in entries
+        ])
+        return HybridRetriever([sparse, _mk_retriever(entries)])
+
+    def test_hybrid_under_with_scope(self):
+        provider = FakeLLMProvider([_search_call("regras"), _text_response("done")])
+        agent = Agent(llm=provider, tokenizer=_Tok())
+        agent.with_tools(rag_tools(self._hybrid(), _EMBED))
+        agent.with_scope(RetrievalScope(exclude=("/campanha/spoilers",)))
+
+        assert "".join(agent.chat("Go")) == "done"
+        (result,) = _tool_results_of(provider, 1)
+        assert not result.is_error, result.content
+        assert "documento aberto" in result.content
+        assert "SEGREDO" not in result.content
+

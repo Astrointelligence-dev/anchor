@@ -30,7 +30,7 @@ from anchor.llm.registry import create_provider
 from anchor.memory.manager import MemoryManager
 from anchor.models.budget import TokenBudget
 from anchor.models.context import ContextResult
-from anchor.models.scope import RetrievalScope
+from anchor.models.scope import ACTIVE_SCOPE, RetrievalScope
 from anchor.pipeline.pipeline import ContextPipeline
 from anchor.protocols.tokenizer import Tokenizer
 
@@ -58,7 +58,6 @@ from .hooks import (
 )
 from .memory_tool import MEMORY_INSTRUCTIONS, FileMemoryBackend, memory_tool
 from .models import (
-    _ACTIVE_SCOPE,
     _USAGE_POOL,
     AgentTool,
     ChildTurn,
@@ -1468,11 +1467,11 @@ class Agent:
             # and reset in this same frame, so it can never leak into
             # the consumer's context (unlike a turn-long ambient set).
             pool_token = _USAGE_POOL.set(self._active_pool)
-            scope_token = _ACTIVE_SCOPE.set(self._active_scope)
+            scope_token = ACTIVE_SCOPE.set(self._active_scope)
             try:
                 result = self._execute_call(tc)
             finally:
-                _ACTIVE_SCOPE.reset(scope_token)
+                ACTIVE_SCOPE.reset(scope_token)
                 _USAGE_POOL.reset(pool_token)
                 _EVENT_SINK.reset(token)
             results.append(result)
@@ -1535,7 +1534,7 @@ class Agent:
             # hand-off are per-call and die with the task.
             _EVENT_SINK.set((self._child_sink(tc, queue.put_nowait), tc.id))
             _USAGE_POOL.set(self._active_pool)
-            _ACTIVE_SCOPE.set(self._active_scope)
+            ACTIVE_SCOPE.set(self._active_scope)
             try:
                 return index, await self._aexecute_call(tc, semaphore)
             except Exception as exc:
@@ -2142,7 +2141,7 @@ class Agent:
         wrap-up round.
         """
         # Scope entry rides the same hook: effective = inherited ∩ own.
-        inherited_scope = _ACTIVE_SCOPE.get()
+        inherited_scope = ACTIVE_SCOPE.get()
         if inherited_scope is not None and self._scope is not None:
             self._active_scope = inherited_scope.intersect(self._scope)
         else:
@@ -2274,13 +2273,20 @@ class Agent:
             self._memory.add_user_message(message)
 
         self._reset_turn_state()
-        messages, full_system = self._prepare_turn(
-            self._pipeline.build(message), message,
-        )
+        wrap_up = self._pool_entry()
+        # The turn's own retrieval (pipeline steps) runs under the same
+        # published scope as its tool calls: a scoped agent, or a subagent
+        # under a scoped parent, cannot pull excluded namespaces into its
+        # context through the pipeline either.
+        scope_token = ACTIVE_SCOPE.set(self._active_scope)
+        try:
+            built = self._pipeline.build(message)
+        finally:
+            ACTIVE_SCOPE.reset(scope_token)
+        messages, full_system = self._prepare_turn(built, message)
         final_text = ""
         rounds: list[RoundUsage] = []
         round_open: int | None = None
-        wrap_up = self._pool_entry()
         stopped_by = "usage_limit" if wrap_up else "max_rounds"
         try:
             yield TurnStarted()
@@ -2361,13 +2367,16 @@ class Agent:
             self._memory.add_user_message(message)
 
         self._reset_turn_state()
-        messages, full_system = self._prepare_turn(
-            await self._pipeline.abuild(message), message,
-        )
+        wrap_up = self._pool_entry()
+        scope_token = ACTIVE_SCOPE.set(self._active_scope)
+        try:
+            built = await self._pipeline.abuild(message)
+        finally:
+            ACTIVE_SCOPE.reset(scope_token)
+        messages, full_system = self._prepare_turn(built, message)
         final_text = ""
         rounds: list[RoundUsage] = []
         round_open: int | None = None
-        wrap_up = self._pool_entry()
         stopped_by = "usage_limit" if wrap_up else "max_rounds"
         try:
             yield TurnStarted()

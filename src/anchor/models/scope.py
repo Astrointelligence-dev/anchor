@@ -21,6 +21,9 @@ Semantics, fixed in docs/plans/2026-08-28-v020-3-vault-namespace.md:
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, field_validator
 
 DEFAULT_VAULT = "__default__"
@@ -108,3 +111,46 @@ class RetrievalScope(BaseModel, frozen=True):
                 return RetrievalScope(exclude=(ROOT_NAMESPACE,))
             include = tuple(dict.fromkeys(narrowed))
         return RetrievalScope(include=include, exclude=exclude)
+
+
+# The scope published by the running agent turn — for the duration of a
+# tool call and of the turn's own pipeline build (Agent.with_scope, and a
+# parent's scope seen by a subagent). Read through active_scope() /
+# effective_scope(); a child's effective scope is published ∩ own, so it
+# can only narrow.
+ACTIVE_SCOPE: ContextVar[RetrievalScope | None] = ContextVar(
+    "anchor_active_scope", default=None,
+)
+
+
+def active_scope() -> RetrievalScope | None:
+    """The scope published for the current agent turn, ``None`` outside one."""
+    return ACTIVE_SCOPE.get()
+
+
+def effective_scope(local: RetrievalScope | None) -> RetrievalScope | None:
+    """*local* narrowed by the published scope (either side may be ``None``)."""
+    active = ACTIVE_SCOPE.get()
+    if active is None:
+        return local
+    if local is None:
+        return active
+    return active.intersect(local)
+
+
+def scope_kwargs(scope: RetrievalScope | None) -> dict[str, Any]:
+    """``{"scope": scope}`` when set, else ``{}``.
+
+    Retrievers and stores written before front #3 keep working while no
+    scope is active; a live scope reaches them loudly (TypeError), never
+    silently dropped — a scope that cannot be enforced is a leak.
+    """
+    return {} if scope is None else {"scope": scope}
+
+
+def same_vault(*stores: Any) -> None:
+    """Raise when stores that must share a mount sit on different vaults."""
+    vaults = {str(v) for v in (getattr(s, "vault", None) for s in stores) if v}
+    if len(vaults) > 1:
+        msg = f"stores are mounted on different vaults: {sorted(vaults)}"
+        raise ValueError(msg)

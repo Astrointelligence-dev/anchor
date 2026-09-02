@@ -130,3 +130,16 @@ class TestDenseRetrieverRetrieve:
         results = retriever.retrieve(query, top_k=5)
         for item in results:
             assert 0.0 <= item.score <= 1.0
+
+
+class TestDenseRetrieverVaultGuard:
+    def test_stores_on_different_vaults_are_refused(self) -> None:
+        with pytest.raises(ValueError, match="different vaults"):
+            make_dense_retriever(
+                InMemoryVectorStore(vault="dnd"), InMemoryContextStore(vault="work"),
+            )
+
+    def test_same_vault_and_custom_stores_pass(self) -> None:
+        make_dense_retriever(InMemoryVectorStore(vault="dnd"), InMemoryContextStore(vault="dnd"))
+        make_dense_retriever(object.__new__(InMemoryVectorStore), InMemoryContextStore())
+

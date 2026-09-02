@@ -10,7 +10,7 @@ from typing import Any, Literal, cast
 from anchor.exceptions import AstroContextError, RetrieverError
 from anchor.models.context import ContextItem
 from anchor.models.query import QueryBundle
-from anchor.models.scope import RetrievalScope
+from anchor.models.scope import RetrievalScope, effective_scope, scope_kwargs
 from anchor.protocols.postprocessor import AsyncPostProcessor, PostProcessor
 from anchor.protocols.query_transform import QueryTransformer
 from anchor.protocols.reranker import AsyncReranker, Reranker
@@ -91,15 +91,15 @@ def retriever_step(
 ) -> PipelineStep:
     """Create a pipeline step from a Retriever protocol implementation.
 
-    ``scope`` is forwarded to scope-aware retrievers only when set, so
-    retrievers written before front #3 keep working unchanged.
+    ``scope`` is intersected with the scope published by the running agent
+    turn (``Agent.with_scope``, a parent's scope seen by a subagent), so
+    pipeline retrieval can only narrow — the same doctrine as the tools.
     """
 
     def _retrieve(items: list[ContextItem], query: QueryBundle) -> list[ContextItem]:
-        if scope is not None:
-            retrieved = retriever.retrieve(query, top_k=top_k, scope=scope)  # type: ignore[call-arg]
-        else:
-            retrieved = retriever.retrieve(query, top_k=top_k)
+        retrieved = retriever.retrieve(
+            query, top_k=top_k, **scope_kwargs(effective_scope(scope)),
+        )
         return items + retrieved
 
     return PipelineStep(name=name, fn=_retrieve)
@@ -115,10 +115,9 @@ def async_retriever_step(
     """Create an async pipeline step from an AsyncRetriever implementation."""
 
     async def _aretrieve(items: list[ContextItem], query: QueryBundle) -> list[ContextItem]:
-        if scope is not None:
-            retrieved = await retriever.aretrieve(query, top_k=top_k, scope=scope)  # type: ignore[call-arg]
-        else:
-            retrieved = await retriever.aretrieve(query, top_k=top_k)
+        retrieved = await retriever.aretrieve(
+            query, top_k=top_k, **scope_kwargs(effective_scope(scope)),
+        )
         return items + retrieved
 
     return PipelineStep(name=name, fn=_aretrieve, is_async=True)

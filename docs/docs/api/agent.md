@@ -164,10 +164,11 @@ def with_scope(self, scope: RetrievalScope) -> Agent
 
 Set the agent's retrieval scope — **namespaces only** (the vault is a
 store mount, bound at construction, never part of a query-time object).
-The scope is published for the duration of each tool call, so
-scope-aware tools (`rag_tools`, custom tools via `current_scope()`) and
-subagent turns see it; a subagent's effective scope is the intersection
-with its own — a child can only narrow, never widen. Returns `self`.
+The scope is published for the duration of each tool call and of the
+turn's own pipeline build, so scope-aware tools (`rag_tools`, custom tools
+via `current_scope()`), `retriever_step` steps and subagent turns see it;
+a subagent's effective scope is the intersection with its own — a child
+can only narrow, never widen. Returns `self`.
 
 #### with_hooks
 

@@ -11,7 +11,7 @@ from anchor._math import cosine_similarity
 from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
-from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
+from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope, same_vault, scope_kwargs
 from anchor.protocols.embeddings import EmbeddingProvider
 from anchor.protocols.storage import AsyncContextStore, AsyncVectorStore
 from anchor.retrieval._rrf import rrf_fuse
@@ -73,6 +73,7 @@ class AsyncDenseRetriever:
         self._embeddings = embeddings
         self._items: list[ContextItem] = []
         self._similarity_fn = similarity_fn or cosine_similarity
+        same_vault(vector_store, context_store)
         self._vector_store = vector_store
         self._context_store = context_store
         self._min_score = min_score
@@ -290,8 +291,14 @@ class AsyncHybridRetriever:
             f"k={self._k}, weights={self._weights})"
         )
 
-    async def aretrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]:
-        """Fan out to all retrievers concurrently and fuse with RRF.
+    async def aretrieve(
+        self,
+        query: QueryBundle,
+        top_k: int = 10,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
+        """Fan out to all retrievers concurrently (scope forwarded) and fuse with RRF.
 
         Parameters:
             query: The query bundle containing the user's query text.
@@ -300,7 +307,10 @@ class AsyncHybridRetriever:
         Returns:
             A fused list of ``ContextItem`` objects ranked by RRF score.
         """
-        tasks = [r.aretrieve(query, top_k=top_k) for r in self._retrievers]
+        tasks = [
+            r.aretrieve(query, top_k=top_k, **scope_kwargs(scope))
+            for r in self._retrievers
+        ]
         all_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_rankings: list[list[ContextItem]] = []

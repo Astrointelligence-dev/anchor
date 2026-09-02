@@ -6,9 +6,12 @@ import pytest
 
 pytest.importorskip("rank_bm25", reason="rank-bm25 required for SparseRetriever tests")
 
-from anchor.exceptions import RetrieverError  # noqa: E402
+from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
+from anchor.models.scope import RetrievalScope
+from anchor.retrieval.sparse import SparseRetriever
+from tests.conftest import FakeTokenizer
 from tests.test_retrieval.conftest import make_sparse_retriever
 
 
@@ -136,3 +139,27 @@ class TestSparseRetrieverRetrieve:
         query = QueryBundle(query_str="programming language python java machine")
         results = retriever.retrieve(query, top_k=2)
         assert len(results) <= 2
+
+
+class TestSparseRetrieverScope:
+    """Scope masks documents BEFORE the top-k cut (a pre-filter): the best
+    BM25 match sitting outside the scope must not eat the only slot."""
+
+    @pytest.mark.parametrize("tokenize_fn", [None, str.split], ids=["bm25s", "legacy"])
+    def test_scope_is_a_prefilter(self, tokenize_fn) -> None:
+        retriever = SparseRetriever(tokenize_fn=tokenize_fn, tokenizer=FakeTokenizer())
+        docs = (
+            ("decoy", "python python python", "/out"),
+            ("wanted", "python language", "/in"),
+            ("noise", "pasta and noodles", "/in"),
+        )
+        retriever.index([
+            ContextItem(id=i, content=c, source=SourceType.RETRIEVAL, namespace=ns)
+            for i, c, ns in docs
+        ])
+        query = QueryBundle(query_str="python")
+        assert [i.id for i in retriever.retrieve(query, top_k=1)] == ["decoy"]
+        scoped = retriever.retrieve(query, top_k=1, scope=RetrievalScope(include=("/in",)))
+        assert [i.id for i in scoped] == ["wanted"]
+        assert retriever.retrieve(query, top_k=5, scope=RetrievalScope(exclude=("/",))) == []
+

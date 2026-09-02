@@ -5,10 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from anchor.agent.models import _ACTIVE_SCOPE, AgentTool
+from anchor.agent.models import AgentTool
 from anchor.agent.tool_decorator import tool
 from anchor.models.query import QueryBundle
-from anchor.models.scope import RetrievalScope
+from anchor.models.scope import (
+    RetrievalScope,
+    active_scope,
+    effective_scope,
+    scope_kwargs,
+)
 
 
 def current_scope() -> RetrievalScope | None:
@@ -18,16 +23,7 @@ def current_scope() -> RetrievalScope | None:
     this with their own scope — the published scope already carries the
     parent∩child narrowing for subagent turns.
     """
-    return _ACTIVE_SCOPE.get()
-
-
-def _combined_scope(tool_scope: RetrievalScope | None) -> RetrievalScope | None:
-    active = current_scope()
-    if active is None:
-        return tool_scope
-    if tool_scope is None:
-        return active
-    return active.intersect(tool_scope)
+    return active_scope()
 
 
 def _retrieve(
@@ -35,11 +31,7 @@ def _retrieve(
     q: QueryBundle,
     scope: RetrievalScope | None,
 ) -> list[Any]:
-    # Pass scope only when set, so retrievers written before front #3
-    # keep working unchanged (the where= compatibility pattern).
-    if scope is not None:
-        return list(retriever.retrieve(q, top_k=5, scope=scope))
-    return list(retriever.retrieve(q, top_k=5))
+    return list(retriever.retrieve(q, top_k=5, **scope_kwargs(scope)))
 
 
 def _format_results(results: list[Any]) -> str:
@@ -100,7 +92,7 @@ def rag_tools(
         q = QueryBundle(query_str=query)
         if embed_fn is not None:
             q = q.model_copy(update={"embedding": embed_fn(query)})
-        results = _retrieve(retriever, q, _combined_scope(scope))
+        results = _retrieve(retriever, q, effective_scope(scope))
         return _format_results(results)
 
     return [search_docs]
@@ -146,7 +138,7 @@ def _mounted_rag_tools(
         q = QueryBundle(query_str=query)
         if embed_fn is not None:
             q = q.model_copy(update={"embedding": embed_fn(query)})
-        results = _retrieve(target, q, _combined_scope(scope))
+        results = _retrieve(target, q, effective_scope(scope))
         return _format_results(results)
 
     return [search_docs]
