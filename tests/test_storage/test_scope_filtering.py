@@ -213,3 +213,35 @@ class TestContextStoreScopePersistence:
         a.add(ContextItem(id="i1", content="x", source=SourceType.RETRIEVAL))
         assert a.get("i1") is not None
         assert b.get("i1") is None
+
+
+class TestWhereSemanticsAgreeAcrossBackends:
+    """Ritual xhigh #12/#13: the same where dict, the same answer on every
+    backend — absent keys pass $ne/$nin, ranges ignore values of another type."""
+
+    def _seed(self, store):
+        store.add_embedding("tagged", make_embedding(1), {"status": "active", "year": 2024})
+        store.add_embedding("later", make_embedding(2), {"year": 2025})
+        store.add_embedding("untagged", make_embedding(3), {})
+        store.add_embedding("odd", make_embedding(4), {"year": "unknown"})
+
+    def _ids(self, store, where):
+        return {i for i, _ in store.search(make_embedding(1), top_k=10, where=where)}
+
+    def test_absent_key_passes_ne_and_nin(self, make_vector_store):
+        store = make_vector_store()
+        self._seed(store)
+        assert self._ids(store, {"status": {"$ne": "archived"}}) == {
+            "tagged", "later", "untagged", "odd",
+        }
+        assert self._ids(store, {"year": {"$nin": [2025]}}) == {
+            "tagged", "untagged", "odd",
+        }
+
+    def test_ranges_ignore_values_of_another_type(self, make_vector_store):
+        store = make_vector_store()
+        self._seed(store)
+        assert self._ids(store, {"year": {"$gt": 2024}}) == {"later"}
+        assert self._ids(store, {"year": {"$lt": 2025}}) == {"tagged"}
+        assert self._ids(store, {"year": {"$gte": "unknown"}}) == {"odd"}
+

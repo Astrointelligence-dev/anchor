@@ -176,3 +176,49 @@ class TestLegacyUpgrade:
         included, excluded = asyncio.run(_with_manager(scenario))
         assert included == {"root", "child", "deep"}
         assert excluded == {"sibling", "other"}
+
+
+class TestSearchSemantics:
+    """Ritual xhigh #6/#12/#13 on the real backend."""
+
+    def test_where_semantics_match_the_reference(self) -> None:
+        from anchor.storage.postgres import PostgresVectorStore
+
+        async def scenario(manager, _conn):
+            store = PostgresVectorStore(manager)
+            rows = {
+                "tagged": {"status": "active", "year": 2024},
+                "later": {"year": 2025},
+                "untagged": {},
+                "odd": {"year": "unknown"},
+            }
+            for item_id, meta in rows.items():
+                await store.add_embedding(item_id, _embed(item_id), meta)
+            q = _embed("tagged")
+
+            async def ids(where):
+                return {i for i, _ in await store.search(q, top_k=10, where=where)}
+
+            return (
+                await ids({"status": {"$ne": "archived"}}),
+                await ids({"year": {"$nin": [2025]}}),
+                await ids({"year": {"$gt": 2024}}),
+                await ids({"year": {"$gte": "unknown"}}),
+            )
+
+        ne, nin, gt, gte_str = asyncio.run(_with_manager(scenario))
+        assert ne == {"tagged", "later", "untagged", "odd"}
+        assert nin == {"tagged", "untagged", "odd"}
+        assert gt == {"later"}
+        assert gte_str == {"odd"}
+
+    def test_iterative_scan_is_a_session_default_that_survives_release(self) -> None:
+        async def scenario(manager, _conn):
+            seen = []
+            for _ in range(2):
+                async with manager.acquire() as conn:
+                    seen.append(await conn.fetchval("SHOW hnsw.iterative_scan"))
+            return seen
+
+        assert asyncio.run(_with_manager(scenario)) == ["relaxed_order"] * 2
+

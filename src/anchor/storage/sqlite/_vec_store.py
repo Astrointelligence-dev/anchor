@@ -241,20 +241,18 @@ class SqliteVecVectorStore:
 
         rowid_filter = ""
         params: list[Any] = [blob, self._vault, top_k]
-        if where or scope is not None:
+        w_clauses, w_params = sql_where_clauses(where, _meta_expr)
+        s_clauses, s_params = scope_sql_clauses(scope, "namespace")
+        if w_clauses or s_clauses:
             # Everything beyond the vault goes through a rowid subquery on
             # the companion table: the subquery pushes down as a true
             # pre-filter, and OR (multi-include scopes) is safe inside it —
             # an OR written directly into the vec0 KNN WHERE silently
-            # degrades to a post-filter (verified 2026-09-01).
-            sub_clauses = ["vault = ?"]
-            sub_params: list[Any] = [self._vault]
-            w_clauses, w_params = sql_where_clauses(where, _meta_expr)
-            sub_clauses += w_clauses
-            sub_params += w_params
-            s_clauses, s_params = scope_sql_clauses(scope, "namespace")
-            sub_clauses += s_clauses
-            sub_params += s_params
+            # degrades to a post-filter (verified 2026-09-01). A scope that
+            # compiles to nothing (whole vault) skips it: the partition key
+            # already pre-filters, and the subquery costs O(vault) per query.
+            sub_clauses = ["vault = ?", *w_clauses, *s_clauses]
+            sub_params: list[Any] = [self._vault, *w_params, *s_params]
             rowid_filter = (
                 " AND rowid IN (SELECT rowid FROM vec_items WHERE "  # noqa: S608 -- fixed templates, values parameterized
                 + " AND ".join(sub_clauses)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from anchor.models.scope import (
@@ -12,7 +13,13 @@ from anchor.models.scope import (
     RetrievalScope,
     normalize_namespace,
 )
-from anchor.storage._where import SET_OPS, SQL_OPS, check_operator, is_op_dict
+from anchor.storage._where import (
+    SET_OPS,
+    SQL_OPS,
+    check_operator,
+    is_op_dict,
+    scope_sql_clauses,
+)
 
 if TYPE_CHECKING:
     from anchor.storage.postgres._connection import PostgresConnectionManager
@@ -68,38 +75,34 @@ def _pg_where_clauses(where: dict[str, Any] | None, p: _Params) -> list[str]:
                         f"OR metadata->{kp} <> ALL({arr}::jsonb[]))"
                     )
             else:
+                # Ranges compare only like with like; a CASE guard is the
+                # documented way to keep the cast from ever seeing a
+                # non-number (evaluation order is otherwise undefined).
                 sym = SQL_OPS[op]
                 kp = p.add(key)
                 if isinstance(operand, bool) or not isinstance(
                     operand, (int, float)
                 ):
-                    clauses.append(f"metadata->>{kp} {sym} {p.add(str(operand))}")
+                    clauses.append(
+                        f"(CASE WHEN jsonb_typeof(metadata->{kp}) = 'string' "
+                        f"THEN metadata->>{kp} END) {sym} {p.add(str(operand))}"
+                    )
                 else:
                     clauses.append(
-                        f"(metadata->>{kp})::numeric {sym} {p.add(operand)}"
+                        f"(CASE WHEN jsonb_typeof(metadata->{kp}) = 'number' "
+                        f"THEN (metadata->>{kp})::numeric END) {sym} {p.add(operand)}"
                     )
     return clauses
 
 
-def _pg_scope_clauses(scope: RetrievalScope | None, p: _Params) -> list[str]:
-    if scope is None:
-        return []
+def _numbered(clauses: list[str], params: list[Any], p: _Params) -> list[str]:
+    """Renumber the shared compiler's ``?`` placeholders as ``$n``.
 
-    def prefix_range(prefix: str) -> str:
-        if prefix == ROOT_NAMESPACE:
-            return "1=1"
-        a = p.add(prefix)
-        b = p.add(prefix + "/")
-        c = p.add(prefix + "0")  # '0' = char after '/'
-        return f"(namespace = {a} OR (namespace >= {b} AND namespace < {c}))"
-
-    clauses: list[str] = []
-    if scope.include:
-        clauses.append(
-            "(" + " OR ".join(prefix_range(x) for x in scope.include) + ")"
-        )
-    clauses.extend(f"NOT {prefix_range(x)}" for x in scope.exclude)
-    return clauses
+    Scope clauses only: the JSONB where-compiler above uses ``?`` as the
+    key-exists operator, so it keeps its own numbering.
+    """
+    values = iter(params)
+    return [re.sub(r"\?", lambda _m: p.add(next(values)), c) for c in clauses]
 
 
 class PostgresVectorStore:
@@ -111,7 +114,7 @@ class PostgresVectorStore:
     Implements the AsyncVectorStore protocol.
     """
 
-    __slots__ = ("_conn_manager", "_iterative_scan", "_vault")
+    __slots__ = ("_conn_manager", "_vault")
 
     def __init__(
         self,
@@ -121,8 +124,6 @@ class PostgresVectorStore:
     ) -> None:
         self._conn_manager = conn_manager
         self._vault = vault
-        # None = capability not probed yet; set on first filtered search.
-        self._iterative_scan: bool | None = None
 
     @property
     def vault(self) -> str:
@@ -153,28 +154,6 @@ class PostgresVectorStore:
                 normalize_namespace(namespace),
             )
 
-    async def _enable_iterative_scan(self, conn: Any) -> None:
-        """Best-effort pgvector >= 0.8 iterative scan for filtered recall.
-
-        Filtering over HNSW is a post-filter; iterative scans keep
-        scanning until LIMIT is satisfied. On older pgvector the SET
-        fails and we degrade to the classic behavior (recall bounded by
-        ef_search). The pool RESETs settings on release, so this never
-        leaks across acquirers.
-        """
-        if self._iterative_scan is False:
-            return
-        try:
-            await conn.execute("SET hnsw.iterative_scan = relaxed_order")
-            self._iterative_scan = True
-        except Exception:
-            if self._iterative_scan is None:
-                logger.info(
-                    "pgvector iterative scans unavailable (needs >= 0.8.0); "
-                    "filtered-search recall is bounded by hnsw.ef_search",
-                )
-            self._iterative_scan = False
-
     async def search(
         self,
         query_embedding: list[float],
@@ -185,9 +164,13 @@ class PostgresVectorStore:
     ) -> list[tuple[str, float]]:
         vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
         p = _Params(vec_str, top_k)
+        # Every search is a filtered HNSW search (the vault bind), so the
+        # pool sets hnsw.iterative_scan once per session (pgvector >= 0.8;
+        # see PostgresConnectionManager) — recall is not bounded by
+        # ef_search for a small vault sharing the table with a big one.
         clauses = [f"vault = {p.add(self._vault)}"]
         clauses += _pg_where_clauses(where, p)
-        clauses += _pg_scope_clauses(scope, p)
+        clauses += _numbered(*scope_sql_clauses(scope, "namespace"), p)
         # relaxed_order returns slightly out-of-order rows: re-sort in an
         # outer query so callers keep exact descending-score ordering.
         sql = (
@@ -198,8 +181,6 @@ class PostgresVectorStore:
             ") sub ORDER BY score DESC"
         )
         async with self._conn_manager.acquire() as conn:
-            if where or scope is not None:
-                await self._enable_iterative_scan(conn)
             rows = await conn.fetch(sql, *p.values)
             return [(row["item_id"], row["score"]) for row in rows]
 

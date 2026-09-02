@@ -51,10 +51,20 @@ class PostgresConnectionManager:
             )
             raise ImportError(msg) from e
 
+        # Session default, not a per-query SET: the pool's RESET ALL on
+        # release restores exactly the startup-packet settings. Filtered
+        # HNSW searches (every vault-bound search) keep scanning until
+        # LIMIT is met instead of stopping at ef_search candidates
+        # (pgvector >= 0.8; older versions leave the placeholder unused).
+        server_settings = {
+            "hnsw.iterative_scan": "relaxed_order",
+            **(kwargs.pop("server_settings", None) or {}),
+        }
         self._pool = await _asyncpg.create_pool(
             self._dsn,
             min_size=self._min_size,
             max_size=self._max_size,
+            server_settings=server_settings,
             **kwargs,
         )
         logger.info(

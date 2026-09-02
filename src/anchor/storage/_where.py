@@ -7,9 +7,10 @@ a data leak, not a convenience.
 
 Namespace scoping compiles to boundary-aware prefix RANGES
 (``ns = p OR (ns >= p||'/' AND ns < p||'0')`` — ``'0'`` is the character
-after ``'/'``), never ``LIKE``: the range form is collation-proof in
-SQLite and index-friendly everywhere, and it is the shape sqlite-vec's
-vec0 can push down (LIKE it cannot).
+after ``'/'``), never ``LIKE``: it is the shape sqlite-vec's vec0 can push
+down (LIKE it cannot) and a plain btree serves it. The ranges assume
+byte-wise ordering — SQLite's default BINARY collation, and on Postgres
+the ``COLLATE "C"`` the schema puts on the namespace column.
 """
 
 from __future__ import annotations
@@ -109,19 +110,37 @@ def sql_where_clauses(
             continue
         for op, operand in cond.items():
             check_operator(op)
-            if op in SET_OPS:
-                values = list(operand)
-                if not values:
-                    # IN () matches nothing; NOT IN () matches everything.
-                    clauses.append("1=0" if op == "$in" else "1=1")
-                    continue
-                placeholders = ",".join("?" for _ in values)
-                neg = "NOT " if op == "$nin" else ""
-                clauses.append(f"{expr} {neg}IN ({placeholders})")
-                params.extend([*expr_params, *values])
-            else:
-                clauses.append(f"{expr} {SQL_OPS[op]} ?")
+            if op == "$nin" and not list(operand):
+                clauses.append("1=1")  # NOT IN () matches everything
+            elif op == "$nin":
+                # An absent key (NULL) passes $ne/$nin, as in matches_where.
+                placeholders = ",".join("?" for _ in operand)
+                clauses.append(
+                    f"({expr} IS NULL OR {expr} NOT IN ({placeholders}))"
+                )
+                params.extend([*expr_params, *expr_params, *operand])
+            elif op == "$in" and not list(operand):
+                clauses.append("1=0")  # IN () matches nothing
+            elif op == "$in":
+                placeholders = ",".join("?" for _ in operand)
+                clauses.append(f"{expr} IN ({placeholders})")
+                params.extend([*expr_params, *operand])
+            elif op == "$ne":
+                clauses.append(f"({expr} IS NULL OR {expr} != ?)")
+                params.extend([*expr_params, *expr_params, operand])
+            elif op == "$eq":
+                clauses.append(f"{expr} = ?")
                 params.extend([*expr_params, operand])
+            else:
+                # Ranges compare only like with like: SQLite orders TEXT
+                # above every number, so an unguarded `year > 2024` would
+                # match "unknown". matches_where returns False there.
+                kinds = "'text'" if isinstance(operand, str) else "'integer', 'real'"
+                clauses.append(
+                    f"(CASE WHEN typeof({expr}) IN ({kinds}) THEN {expr} END) "
+                    f"{SQL_OPS[op]} ?"
+                )
+                params.extend([*expr_params, *expr_params, operand])
     return clauses, params
 
 
