@@ -10,21 +10,9 @@ import pytest
 from anchor.models.context import ContextItem
 
 
-@pytest.fixture(params=["memory", "sqlite"])
-def context_store_impl(request, tmp_path):
-    if request.param == "memory":
-        from anchor.storage.memory_store import InMemoryContextStore
-
-        return InMemoryContextStore()
-    from anchor.storage.sqlite import (
-        SqliteConnectionManager,
-        SqliteContextStore,
-        ensure_tables,
-    )
-
-    mgr = SqliteConnectionManager(tmp_path / "test.db")
-    ensure_tables(mgr.get_connection())
-    return SqliteContextStore(mgr)
+@pytest.fixture
+def context_store_impl(make_context_store):
+    return make_context_store()
 
 
 class TestContextStoreCRUD:

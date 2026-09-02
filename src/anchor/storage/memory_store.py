@@ -53,10 +53,7 @@ class InMemoryContextStore:
 
     def get(self, item_id: str) -> ContextItem | None:
         with self._lock:
-            item = self._items.get(item_id)
-        if item is None or item.vault != self._vault:
-            return None
-        return item
+            return self._items.get(item_id)
 
     def get_all(self) -> list[ContextItem]:
         with self._lock:

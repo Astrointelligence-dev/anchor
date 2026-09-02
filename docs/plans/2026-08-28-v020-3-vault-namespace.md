@@ -1,6 +1,6 @@
 # v0.2 · #3 — Vault, namespace e filtragem
 
-**Status:** implementado (sessão 9, 2026-09-01; fases 1-5 em `8f5937b..968eae3`) — pendente: ritual xhigh + benchmark de recall · **Tamanho:** médio ·
+**Status:** fechada (sessão 9 implementou, `8f5937b..968eae3`; sessão 10 fez o ritual xhigh + benchmark + 6 commits de correção, `4587758..`) · **Tamanho:** médio ·
 **Depende de:** nada · **Bloqueia:** #4 (grafo de conhecimento)
 
 ## Pesquisa (2026-09-01) — resultados
@@ -320,7 +320,7 @@ quando um escopo está ativo — fail-closed, nunca alargamento silencioso.
 
 ### Plano de correção (um commit por grupo)
 
-- [ ] **A. Migração de storage** — rebuild de tabela no SQLite (PK composta),
+- [x] **A. Migração de storage** — rebuild de tabela no SQLite (PK composta),
       PK composta no PG (DROP/ADD CONSTRAINT), `vec_items` rebuild com
       UNIQUE(vault,item_id) preservando rowid, rebuild do vec0 transacional
       com checagem de dimensão antes de qualquer DDL, `dimensions` opcional
@@ -328,13 +328,13 @@ quando um escopo está ativo — fail-closed, nunca alargamento silencioso.
       `add_scope_columns`, probe `pg_attribute` antes do ALTER. Testes:
       dois vaults em DB legado (ctx/emb/vec), dimensão errada levanta sem
       destruir, staging órfão, PG legado → escreve.
-- [ ] **B. Semântica SQL** — NULL em `$ne`/`$nin`; guard de tipo em ranges
+- [x] **B. Semântica SQL** — NULL em `$ne`/`$nin`; guard de tipo em ranges
       (PG `jsonb_typeof`, SQLite `json_type`); `COLLATE "C"` + btree simples
       no PG (idempotente em tabela migrada); `server_settings` iterative_scan
       no pool e remoção do SET/guard; subquery só com cláusulas; adaptador
       `?`→`$n` no lugar de `_pg_scope_clauses`. Testes: linha sem chave,
       string sob range, escopo no PG integração.
-- [ ] **C. Escopo em retrievers e pipeline** — `scope` nos protocolos e em
+- [x] **C. Escopo em retrievers e pipeline** — `scope` nos protocolos e em
       todo retriever built-in (compostos encaminham; Sparse pré-filtra por
       `weight_mask`/índices; SharedSpace/MemoryAdapter filtram); `_pool_entry`
       antes do build e escopo publicado em volta do build; `retriever_step`
@@ -342,12 +342,36 @@ quando um escopo está ativo — fail-closed, nunca alargamento silencioso.
       vault no DenseRetriever; HybridRetriever de volta na CLI. Testes:
       hybrid/sparse sob `with_scope`, pipeline exclui spoilers (sync/async/
       subagente), async twins.
-- [ ] **D. Vault validado + Redis** — `validate_vault` (vazio, `/`, `:`) em
+- [x] **D. Vault validado + Redis** — `validate_vault` (vazio, `/`, `:`) em
       `models/scope.py`, usado pelo validador e por todo construtor de store;
       Redis: namespace de chave `ctxv:` + migração one-shot idempotente das
       chaves legadas, sem fallback. Testes fakeredis (legado, `:`, zumbi).
-- [ ] **E. Limpeza + docs** — `_get`/fallbacks, restamp helper, branch morto,
+- [x] **E. Limpeza + docs** — `_get`/fallbacks, restamp helper, branch morto,
       literais `DEFAULT_VAULT`, fixture (dict morto, close), dedupe de testes,
       CLI `migrate` (ImportError, mensagem, inputs vazios), CHANGELOG (`-l`,
       fixes), docs de API, `__all__`.
-- [ ] **F. Benchmark de recall** — commit do teste + números acima.
+- [x] **F. Benchmark de recall** — commit do teste + números acima.
+
+### O que moveu na execução (sessão 10)
+
+- **A** `bf04b57`, **B** `8aff869` (+ `3f2c8d9`), **C** `e863427`, **D** `ef80238`,
+  **E/F** neste commit e em `4587758`. Suíte: 2984 verdes fora `tests/live`;
+  ruff 154 (baseline 155), mypy 140 (baseline 145).
+- Integração Postgres rodada contra `supabase/postgres:17.6` + pgvector 0.8
+  via docker (`ANCHOR_TEST_POSTGRES_DSN`): upgrade legado, escopo
+  boundary-aware, semântica de `where`, default de sessão do iterative scan.
+  Redis coberto pela primeira vez (fakeredis, dev-dep nova).
+- **Fora do diff, achado ao verificar:** `get_async_connection` vazava a
+  conexão perdedora quando o setup dela falhava com "database is locked"
+  (o vencedor trocando para WAL) — a thread não-daemon travava o shutdown
+  do interpretador, ou seja, a suíte inteira "pendurava" de forma
+  intermitente. Corrigido (fecha e tenta de novo). Os "travamentos" desta
+  sessão foram isso e o teste live do `claude_cli`
+  (`test_claude_cli_builtin_tools_run_inside_the_cli`), que pendura o
+  subprocesso `claude` quando roda dentro de uma sessão do Claude Code —
+  follow-up: gate por env ou timeout no teste.
+- Decidido manter as 11 `@property vault` (o guard `same_vault` é o leitor),
+  não dedupar o restamp de 2 linhas, e deixar `_matches_cond` como está.
+- `retriever_step(scope=)` ficou e ganhou teste; a alternativa "reverter"
+  do verificador perderia o item 4.
+

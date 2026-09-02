@@ -23,6 +23,8 @@ class ContextItem(BaseModel):
     token_count: int = Field(default=0, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    vault: str = "__default__"      # mount the item lives in (stamped by the store)
+    namespace: str = "/"            # hierarchical path inside the vault
 ```
 
 **Fields:**

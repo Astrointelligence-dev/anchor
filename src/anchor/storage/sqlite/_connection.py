@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 import threading
@@ -65,7 +66,7 @@ class SqliteConnectionManager:
             )
         return conn
 
-    async def get_async_connection(self) -> aiosqlite.Connection:
+    async def get_async_connection(self, _attempts: int = 3) -> aiosqlite.Connection:
         """Return a cached aiosqlite connection, creating one on first call.
 
         The connection is reused across calls.  Call :meth:`aclose` to
@@ -87,12 +88,22 @@ class SqliteConnectionManager:
 
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = await _aiosqlite.connect(str(self._db_path))
-        conn.row_factory = _aiosqlite.Row
-        await conn.execute("PRAGMA busy_timeout=5000")
-        await conn.execute("PRAGMA foreign_keys=ON")
-        if self._wal_mode:
-            await conn.execute("PRAGMA journal_mode=WAL")
-            await conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            conn.row_factory = _aiosqlite.Row
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("PRAGMA foreign_keys=ON")
+            if self._wal_mode:
+                await conn.execute("PRAGMA journal_mode=WAL")
+                await conn.execute("PRAGMA synchronous=NORMAL")
+        except BaseException:
+            # Never leak the worker thread. "database is locked" here is
+            # the concurrent first-call race (the winner is switching the
+            # file to WAL): back off and pick up the winner's connection.
+            await conn.close()
+            if _attempts <= 1:
+                raise
+            await asyncio.sleep(0)
+            return await self.get_async_connection(_attempts - 1)
         if self._async_conn is not None:
             # Lost a concurrent first-call race: keep the winner and close
             # this connection, or its non-daemon worker thread leaks and

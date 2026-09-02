@@ -8,7 +8,6 @@ from typing import Any
 
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.memory import MemoryEntry
-from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE
 
 
 def context_item_to_row(item: ContextItem) -> dict[str, Any]:
@@ -40,8 +39,8 @@ def row_to_context_item(row: dict[str, Any] | Any) -> ContextItem:
         token_count=r["token_count"],
         metadata=json.loads(r["metadata_json"]),
         created_at=datetime.fromisoformat(r["created_at"]),
-        vault=r.get("vault") or DEFAULT_VAULT,
-        namespace=r.get("namespace") or ROOT_NAMESPACE,
+        vault=r["vault"],
+        namespace=r["namespace"],
     )
 
 

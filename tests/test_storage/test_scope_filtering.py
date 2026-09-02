@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from anchor.models.context import ContextItem, SourceType
-from anchor.models.scope import DEFAULT_VAULT, RetrievalScope
+from anchor.models.scope import RetrievalScope
 from tests.conftest import make_embedding
 
 
@@ -161,31 +161,6 @@ class TestWhereOperators:
             store.search(
                 make_embedding(1), top_k=10, where={"kind": {"$regex": ".*"}},
             )
-
-
-@pytest.fixture(params=["memory", "sqlite"])
-def make_context_store(request, tmp_path):
-    if request.param == "memory":
-        from anchor.storage.memory_store import InMemoryContextStore
-
-        def maker(vault: str = DEFAULT_VAULT):
-            return InMemoryContextStore(vault=vault)
-
-        return maker
-
-    from anchor.storage.sqlite import (
-        SqliteConnectionManager,
-        SqliteContextStore,
-        ensure_tables,
-    )
-
-    mgr = SqliteConnectionManager(tmp_path / "ctx.db")
-    ensure_tables(mgr.get_connection())
-
-    def maker(vault: str = DEFAULT_VAULT):
-        return SqliteContextStore(mgr, vault=vault)
-
-    return maker
 
 
 class TestContextStoreScopePersistence:

@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from anchor.models.context import ContextItem, SourceType
-from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE, validate_vault
+from anchor.models.scope import DEFAULT_VAULT, validate_vault
 
 if TYPE_CHECKING:
     from anchor.storage.postgres._connection import PostgresConnectionManager
@@ -116,14 +116,6 @@ def _row_to_context_item(row: Any) -> ContextItem:
         token_count=row["token_count"],
         metadata=metadata,
         created_at=row["created_at"],
-        vault=_get(row, "vault") or DEFAULT_VAULT,
-        namespace=_get(row, "namespace") or ROOT_NAMESPACE,
+        vault=row["vault"],
+        namespace=row["namespace"],
     )
-
-
-def _get(row: Any, key: str) -> Any:
-    """asyncpg Records raise on missing columns (pre-migration rows)."""
-    try:
-        return row[key]
-    except (KeyError, IndexError):
-        return None

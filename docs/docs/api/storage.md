@@ -28,8 +28,8 @@ class VectorStore(Protocol):
 
 | Method | Description |
 |---|---|
-| `add_embedding(item_id, embedding, metadata)` | Store an embedding vector. Overwrites if `item_id` exists. |
-| `search(query_embedding, top_k)` | Return `(item_id, score)` tuples sorted by descending similarity. |
+| `add_embedding(item_id, embedding, metadata, *, namespace="/")` | Store an embedding vector under a namespace. Overwrites if `item_id` exists in this vault. |
+| `search(query_embedding, top_k, where=None, *, scope=None)` | Return `(item_id, score)` tuples sorted by descending similarity; `where` (operators `$eq $ne $in $nin $gt $gte $lt $lte`) and `scope` (`RetrievalScope`) are pre-filters. |
 | `delete(item_id)` | Remove an embedding. Returns `True` if found. |
 
 ---
@@ -138,8 +138,8 @@ Implements `VectorStore`. Thread-safe via `threading.Lock`.
 
 | Method | Signature | Description |
 |---|---|---|
-| `add_embedding` | `(item_id: str, embedding: list[float], metadata: dict[str, Any] \| None = None) -> None` | Store an embedding vector with optional metadata. |
-| `search` | `(query_embedding: list[float], top_k: int = 10) -> list[tuple[str, float]]` | Brute-force cosine similarity search. Logs a warning above 5,000 embeddings. |
+| `add_embedding` | `(item_id: str, embedding: list[float], metadata: dict[str, Any] \| None = None, *, namespace: str = "/") -> None` | Store an embedding vector with optional metadata, under a namespace. |
+| `search` | `(query_embedding: list[float], top_k: int = 10, where: dict \| None = None, *, scope: RetrievalScope \| None = None) -> list[tuple[str, float]]` | Brute-force cosine similarity search over the rows the `where`/`scope` pre-filters keep. Logs a warning above 5,000 embeddings. |
 | `delete` | `(item_id: str) -> bool` | Remove an embedding. Returns `True` if found. |
 
 !!! warning

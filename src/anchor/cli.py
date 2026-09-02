@@ -27,6 +27,13 @@ except ImportError:
     sys.exit(1)
 
 from anchor import __version__
+from anchor.models.scope import (
+    DEFAULT_VAULT,
+    ROOT_NAMESPACE,
+    RetrievalScope,
+    normalize_namespace,
+    scope_kwargs,
+)
 
 app = typer.Typer(
     name="anchor",
@@ -103,7 +110,7 @@ def _make_embeddings(spec: str) -> Any:
     raise typer.Exit(code=1)
 
 
-def _open_context_store(db_path: Path, vault: str = "__default__") -> Any:
+def _open_context_store(db_path: Path, vault: str = DEFAULT_VAULT) -> Any:
     from anchor.storage.sqlite import (
         SqliteConnectionManager,
         SqliteContextStore,
@@ -120,7 +127,7 @@ def _open_context_store(db_path: Path, vault: str = "__default__") -> Any:
 
 
 def _open_vector_store(
-    db_path: Path, dimensions: int, vault: str = "__default__",
+    db_path: Path, dimensions: int, vault: str = DEFAULT_VAULT,
 ) -> Any:
     """Prefer sqlite-vec (real KNN); fall back to the brute-force store."""
     try:
@@ -162,10 +169,10 @@ def index(
     ),
     chunk_size: int = typer.Option(384, "--chunk-size", "-c", help="Chunk size in tokens"),
     vault: str = typer.Option(
-        "__default__", "--vault", help="Vault (hard isolation mount) to index into"
+        DEFAULT_VAULT, "--vault", help="Vault (hard isolation mount) to index into"
     ),
     namespace: str = typer.Option(
-        "/", "--namespace", "-n",
+        ROOT_NAMESPACE, "--namespace", "-n",
         help="Namespace path to stamp on the ingested chunks (e.g. /contratos/2026)",
     ),
 ) -> None:
@@ -188,7 +195,6 @@ def index(
         console.print("[yellow]No content ingested.[/yellow]")
         raise typer.Exit(code=1)
 
-    from anchor.models.scope import normalize_namespace
 
     try:
         ns = normalize_namespace(namespace)
@@ -277,7 +283,7 @@ def query(
         "english", "--language", "-l", help="Snowball language for BM25 stemming"
     ),
     vault: str = typer.Option(
-        "__default__", "--vault", help="Vault (hard isolation mount) to search"
+        DEFAULT_VAULT, "--vault", help="Vault (hard isolation mount) to search"
     ),
     include: list[str] = typer.Option(  # noqa: B008 -- typer.Option() must be called in default
         [], "--include", help="Namespace prefix(es) to include (repeatable)"
@@ -292,7 +298,6 @@ def query(
         raise typer.Exit(code=1)
 
     from anchor.models.query import QueryBundle
-    from anchor.models.scope import RetrievalScope, scope_kwargs
     from anchor.retrieval import HybridRetriever, SparseRetriever
 
     try:

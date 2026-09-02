@@ -113,3 +113,28 @@ def make_vector_store(request, tmp_path):
     yield maker
     for store in opened:
         store.close()
+
+
+@pytest.fixture(params=["memory", "sqlite"])
+def make_context_store(request, tmp_path):
+    if request.param == "memory":
+        from anchor.storage.memory_store import InMemoryContextStore
+
+        def maker(vault: str = DEFAULT_VAULT):
+            return InMemoryContextStore(vault=vault)
+
+        return maker
+
+    from anchor.storage.sqlite import (
+        SqliteConnectionManager,
+        SqliteContextStore,
+        ensure_tables,
+    )
+
+    mgr = SqliteConnectionManager(tmp_path / "ctx.db")
+    ensure_tables(mgr.get_connection())
+
+    def maker(vault: str = DEFAULT_VAULT):
+        return SqliteContextStore(mgr, vault=vault)
+
+    return maker

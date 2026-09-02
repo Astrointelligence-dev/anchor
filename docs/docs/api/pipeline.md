@@ -174,10 +174,12 @@ Execute the step asynchronously. Works for both sync and async step functions.
 
 ## Factory Functions
 
-### `retriever_step(name, retriever, top_k=10) -> PipelineStep`
+### `retriever_step(name, retriever, top_k=10, *, scope=None) -> PipelineStep`
 
 Create a step from a `Retriever` protocol implementation. Appends retrieved
-items to the current list.
+items to the current list. `scope` is intersected with the scope published by
+the running agent turn (`Agent.with_scope`, a parent's scope), so pipeline
+retrieval can only narrow.
 
 ```python
 from anchor import retriever_step
@@ -187,12 +189,13 @@ step = retriever_step("search", my_retriever, top_k=5)
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `str` | (required) | Step name for diagnostics. |
-| `retriever` | `Retriever` | (required) | Object with `retrieve(query, top_k)` method. |
+| `retriever` | `Retriever` | (required) | Object with `retrieve(query, top_k, *, scope=None)` method. |
 | `top_k` | `int` | `10` | Maximum items to retrieve. |
+| `scope` | `RetrievalScope \| None` | `None` | Static namespace scope for this step (include/exclude prefixes, exclude wins). |
 
-### `async_retriever_step(name, retriever, top_k=10) -> PipelineStep`
+### `async_retriever_step(name, retriever, top_k=10, *, scope=None) -> PipelineStep`
 
-Async variant. Wraps an `AsyncRetriever` (must have `aretrieve(query, top_k)`).
+Async variant. Wraps an `AsyncRetriever` (must have `aretrieve(query, top_k, *, scope=None)`).
 
 ```python
 from anchor import async_retriever_step
