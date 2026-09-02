@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from anchor.models.scope import DEFAULT_VAULT
 from anchor.storage.json_file_store import JsonFileMemoryStore
 from anchor.storage.json_memory_store import InMemoryEntryStore
 from anchor.storage.sqlite import (
@@ -77,3 +78,38 @@ def sqlite_document_store(
     return SqliteDocumentStore(sqlite_conn_manager)
 
 
+DIM = 128
+
+
+@pytest.fixture(params=["memory", "sqlite", "vec"])
+def make_vector_store(request, tmp_path):
+    """Factory: make_vector_store(vault) → store over ONE shared backing."""
+    opened: list = []
+    if request.param == "memory":
+        from anchor.storage.memory_store import InMemoryVectorStore
+
+        # In-memory instances share nothing by design; vault isolation
+        # is structural there.
+        def maker(vault: str = DEFAULT_VAULT):
+            return InMemoryVectorStore(vault=vault)
+
+    elif request.param == "sqlite":
+        mgr = SqliteConnectionManager(tmp_path / "scope.db")
+        ensure_tables(mgr.get_connection())
+
+        def maker(vault: str = DEFAULT_VAULT):
+            return SqliteVectorStore(mgr, vault=vault)
+
+    else:
+        pytest.importorskip("sqlite_vec")
+        from anchor.storage.sqlite import SqliteVecVectorStore
+
+        db = tmp_path / "scope-vec.db"
+
+        def maker(vault: str = DEFAULT_VAULT):
+            opened.append(SqliteVecVectorStore(db, dimensions=DIM, vault=vault))
+            return opened[-1]
+
+    yield maker
+    for store in opened:
+        store.close()

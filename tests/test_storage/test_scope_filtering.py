@@ -14,51 +14,6 @@ from anchor.models.context import ContextItem, SourceType
 from anchor.models.scope import DEFAULT_VAULT, RetrievalScope
 from tests.conftest import make_embedding
 
-DIM = 128
-
-
-@pytest.fixture(params=["memory", "sqlite", "vec"])
-def make_vector_store(request, tmp_path):
-    """Factory: make_vector_store(vault) → store over ONE shared backing."""
-    if request.param == "memory":
-        from anchor.storage.memory_store import InMemoryVectorStore
-
-        shared: dict = {}
-
-        def maker(vault: str = DEFAULT_VAULT):
-            store = InMemoryVectorStore(vault=vault)
-            # In-memory instances share nothing by design; vault
-            # isolation is structural there.
-            shared.setdefault("stores", []).append(store)
-            return store
-
-        return maker
-
-    if request.param == "sqlite":
-        from anchor.storage.sqlite import (
-            SqliteConnectionManager,
-            SqliteVectorStore,
-            ensure_tables,
-        )
-
-        mgr = SqliteConnectionManager(tmp_path / "scope.db")
-        ensure_tables(mgr.get_connection())
-
-        def maker(vault: str = DEFAULT_VAULT):
-            return SqliteVectorStore(mgr, vault=vault)
-
-        return maker
-
-    pytest.importorskip("sqlite_vec")
-    from anchor.storage.sqlite import SqliteVecVectorStore
-
-    db = tmp_path / "scope-vec.db"
-
-    def maker(vault: str = DEFAULT_VAULT):
-        return SqliteVecVectorStore(db, dimensions=DIM, vault=vault)
-
-    return maker
-
 
 class TestVaultIsolation:
     def test_other_vault_is_invisible(self, make_vector_store):
