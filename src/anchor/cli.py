@@ -123,6 +123,11 @@ def _open_vector_store(
         from anchor.storage.sqlite import SqliteVecVectorStore
 
         return SqliteVecVectorStore(db_path, dimensions=dimensions, vault=vault)
+    except ValueError as e:
+        # Declared dimension disagrees with the index on disk: a different
+        # embedding provider than the one used at index time.
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from None
     except ImportError:
         from anchor.storage.sqlite import (
             SqliteConnectionManager,
@@ -226,27 +231,25 @@ def migrate(
         console.print(f"[red]No database at {db}.[/red]")
         raise typer.Exit(code=1)
 
-    import re
-    import sqlite3
-
     from anchor.storage.sqlite import SqliteConnectionManager, ensure_tables
 
-    manager = SqliteConnectionManager(db)
-    ensure_tables(manager.get_connection())
+    conn = SqliteConnectionManager(db).get_connection()
+    ensure_tables(conn)
 
-    # If a sqlite-vec index exists, opening the store migrates its shape;
-    # the declared dimension is read back from the existing DDL.
-    row = sqlite3.connect(str(db)).execute(
-        "SELECT sql FROM sqlite_master WHERE name = 'vec_index'"
-    ).fetchone()
-    if row and row[0]:
-        match = re.search(r"float\[(\d+)\]", row[0])
-        if match:
-            from anchor.storage.sqlite import SqliteVecVectorStore
+    # A sqlite-vec index migrates on open; its dimension is read from the
+    # index itself, so nothing about the embedding provider is needed.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'vec_index'"
+    ).fetchone():
+        from anchor.storage.sqlite import SqliteVecVectorStore
 
-            SqliteVecVectorStore(db, dimensions=int(match.group(1))).close()
+        try:
+            SqliteVecVectorStore(db).close()
+        except ImportError as e:
+            console.print(f"[red]{db} has a sqlite-vec index but: {e}[/red]")
+            raise typer.Exit(code=1) from None
 
-    console.print(f"[green]{db} migrado (vault/namespace prontos).[/green]")
+    console.print(f"[green]{db} migrated (vault/namespace ready).[/green]")
 
 
 @app.command()

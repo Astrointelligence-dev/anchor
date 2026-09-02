@@ -130,3 +130,142 @@ class TestVecStoreMigratesOldShape:
         # E o dado migrado pertence ao vault default — outro vault não vê.
         other = SqliteVecVectorStore(db, dimensions=8, vault="outro")
         assert other.search(emb, top_k=5) == []
+
+
+_OLD_VEC_ITEMS_DDL = (
+    "CREATE TABLE vec_items ("
+    "rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "item_id TEXT UNIQUE NOT NULL, "
+    "metadata_json TEXT NOT NULL DEFAULT '{}')"
+)
+
+
+def _make_old_vec_db(path, dim: int = 8) -> list[float]:
+    import sqlite_vec
+
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.execute(_OLD_VEC_ITEMS_DDL)
+    conn.execute(
+        "CREATE VIRTUAL TABLE vec_index USING vec0("
+        f"embedding float[{dim}] distance_metric=cosine)"
+    )
+    emb = make_embedding(1, dim=dim)
+    cur = conn.execute(
+        "INSERT INTO vec_items (item_id, metadata_json) VALUES ('v1', '{}')"
+    )
+    conn.execute(
+        "INSERT INTO vec_index (rowid, embedding) VALUES (?, ?)",
+        (cur.lastrowid, sqlite_vec.serialize_float32(emb)),
+    )
+    conn.commit()
+    conn.close()
+    return emb
+
+
+class TestLegacyDbKeepsVaultsApart:
+    """Ritual xhigh #1/#9: a migrated DB must key rows on (vault, id).
+
+    Pre-fix the PK stayed (id), so INSERT OR REPLACE from one vault
+    deleted the other vault's row (context_items, embeddings) and the
+    legacy UNIQUE(item_id) on vec_items rejected the second vault.
+    """
+
+    def _old_db(self, path):
+        TestSqliteEnsureTablesMigrates()._make_old_db(path)
+
+    def test_context_and_vector_rows_coexist_across_vaults(self, tmp_path):
+        from anchor.storage.sqlite import (
+            SqliteConnectionManager,
+            SqliteContextStore,
+            SqliteVectorStore,
+            ensure_tables,
+        )
+
+        db = tmp_path / "legacy.db"
+        self._old_db(db)
+        mgr = SqliteConnectionManager(db)
+        ensure_tables(mgr.get_connection())
+
+        for vault, text in (("a", "A"), ("b", "B")):
+            SqliteContextStore(mgr, vault=vault).add(
+                ContextItem(id="d1", content=text, source=SourceType.RETRIEVAL)
+            )
+            SqliteVectorStore(mgr, vault=vault).add_embedding("d1", make_embedding(1))
+
+        assert SqliteContextStore(mgr, vault="a").get("d1").content == "A"
+        assert SqliteContextStore(mgr, vault="b").get("d1").content == "B"
+        assert SqliteContextStore(mgr).get("old1").content == "legado"
+        hits = SqliteVectorStore(mgr, vault="a").search(make_embedding(1), top_k=5)
+        assert [i for i, _ in hits] == ["d1"]
+
+    def test_async_twin_rebuilds_too(self, tmp_path):
+        import asyncio
+
+        from anchor.storage.sqlite import (
+            AsyncSqliteContextStore,
+            SqliteConnectionManager,
+            ensure_tables_async,
+        )
+
+        db = tmp_path / "legacy-async.db"
+        self._old_db(db)
+        mgr = SqliteConnectionManager(db)
+
+        async def scenario():
+            await ensure_tables_async(await mgr.get_async_connection())
+            for vault, text in (("a", "A"), ("b", "B")):
+                await AsyncSqliteContextStore(mgr, vault=vault).add(
+                    ContextItem(id="d1", content=text, source=SourceType.RETRIEVAL)
+                )
+            a = await AsyncSqliteContextStore(mgr, vault="a").get("d1")
+            old = await AsyncSqliteContextStore(mgr).get("old1")
+            await mgr.aclose()
+            return a.content, old.content
+
+        assert asyncio.run(scenario()) == ("A", "legado")
+
+    def test_vec_items_accepts_same_id_in_second_vault(self, tmp_path):
+        pytest.importorskip("sqlite_vec")
+        from anchor.storage.sqlite import SqliteVecVectorStore
+
+        db = tmp_path / "legacy-vec.db"
+        emb = _make_old_vec_db(db)
+        default = SqliteVecVectorStore(db, dimensions=8)
+        other = SqliteVecVectorStore(db, dimensions=8, vault="outro")
+        other.add_embedding("v1", make_embedding(2, dim=8))
+
+        assert [i for i, _ in default.search(emb, top_k=5)] == ["v1"]
+        assert [i for i, _ in other.search(make_embedding(2, dim=8), top_k=5)] == ["v1"]
+        assert default.count() == 1
+        assert other.count() == 1
+
+
+class TestVecRebuildIsSafe:
+    """Ritual xhigh #3: a wrong-dimension open must never touch the index."""
+
+    def test_wrong_dimension_raises_before_any_ddl(self, tmp_path):
+        pytest.importorskip("sqlite_vec")
+        from anchor.storage.sqlite import SqliteVecVectorStore
+
+        db = tmp_path / "legacy-vec.db"
+        emb = _make_old_vec_db(db, dim=8)
+        with pytest.raises(ValueError, match="8-dimensional"):
+            SqliteVecVectorStore(db, dimensions=16)
+
+        # Still the untouched legacy index: the right dimension migrates it.
+        store = SqliteVecVectorStore(db, dimensions=8)
+        assert [i for i, _ in store.search(emb, top_k=5)] == ["v1"]
+
+    def test_dimension_is_read_from_the_index(self, tmp_path):
+        pytest.importorskip("sqlite_vec")
+        from anchor.storage.sqlite import SqliteVecVectorStore
+
+        db = tmp_path / "legacy-vec.db"
+        emb = _make_old_vec_db(db, dim=8)
+        store = SqliteVecVectorStore(db)
+        assert [i for i, _ in store.search(emb, top_k=5)] == ["v1"]
+        with pytest.raises(ValueError, match="required"):
+            SqliteVecVectorStore(tmp_path / "fresh.db")

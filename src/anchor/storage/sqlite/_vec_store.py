@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -23,12 +24,41 @@ from anchor.models.scope import (
     normalize_namespace,
 )
 from anchor.storage._where import scope_sql_clauses, sql_where_clauses
+from anchor.storage.sqlite._schema import rebuild_with_scope_key
 
 logger = logging.getLogger(__name__)
 
 
 def _meta_expr(key: str) -> tuple[str, list[Any]]:
     return "json_extract(metadata_json, ?)", [f"$.{key}"]
+
+
+_VEC_ITEMS_DDL = (
+    "CREATE TABLE IF NOT EXISTS vec_items ("
+    "rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "item_id TEXT NOT NULL, "
+    "metadata_json TEXT NOT NULL DEFAULT '{}', "
+    f"vault TEXT NOT NULL DEFAULT '{DEFAULT_VAULT}', "
+    f"namespace TEXT NOT NULL DEFAULT '{ROOT_NAMESPACE}', "
+    "UNIQUE (vault, item_id))"
+)
+
+
+def _vec_index_ddl(dimensions: int) -> str:
+    return (
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0("
+        f"vault TEXT PARTITION KEY, "
+        f"embedding float[{dimensions}] distance_metric=cosine)"
+    )
+
+
+def _stored_dimensions(conn: sqlite3.Connection) -> int | None:
+    """Dimension declared by an existing vec_index, or None when absent."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'vec_index'"
+    ).fetchone()
+    match = re.search(r"float\s*\[\s*(\d+)\s*\]", row[0], re.I) if row else None
+    return int(match.group(1)) if match else None
 
 
 class SqliteVecVectorStore:
@@ -39,8 +69,9 @@ class SqliteVecVectorStore:
     db_path:
         SQLite database file (``:memory:`` works for tests).
     dimensions:
-        Embedding dimensionality — declared up front, validated on every
-        add and search.
+        Embedding dimensionality, validated on every add and search. May
+        be omitted for an existing file (read from the index); a declared
+        value that disagrees with the file raises instead of rebuilding.
 
     Implements the ``VectorStore`` protocol (including ``where``
     metadata filtering, executed as a rowid pre-filter inside the KNN
@@ -52,13 +83,10 @@ class SqliteVecVectorStore:
     def __init__(
         self,
         db_path: str | Path,
-        dimensions: int,
+        dimensions: int | None = None,
         *,
         vault: str = DEFAULT_VAULT,
     ) -> None:
-        if dimensions <= 0:
-            msg = f"dimensions must be positive, got {dimensions}"
-            raise ValueError(msg)
         try:
             import sqlite_vec
         except ImportError as e:
@@ -68,42 +96,35 @@ class SqliteVecVectorStore:
             )
             raise ImportError(msg) from e
 
-        self._dimensions = dimensions
         self._vault = vault
         self._conn = sqlite3.connect(str(db_path))
         self._conn.enable_load_extension(True)
         sqlite_vec.load(self._conn)
         self._conn.enable_load_extension(False)
 
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS vec_items ("
-            "rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "item_id TEXT NOT NULL, "
-            "metadata_json TEXT NOT NULL DEFAULT '{}', "
-            "vault TEXT NOT NULL DEFAULT '__default__', "
-            "namespace TEXT NOT NULL DEFAULT '/', "
-            "UNIQUE (vault, item_id))"
-        )
-        # Pre-vault vec_items (table existed, CREATE skipped): migrate in
-        # place. Migrated rows belong to __default__, never to this
-        # store's vault — old data must not be claimed by whatever vault
-        # happens to open the file first.
-        cols = {
-            row[1]
-            for row in self._conn.execute(
-                "PRAGMA table_info(vec_items)"
-            ).fetchall()
-        }
-        if "vault" not in cols:
-            self._conn.execute(
-                "ALTER TABLE vec_items ADD COLUMN "
-                "vault TEXT NOT NULL DEFAULT '__default__'"
+        # The index's declared dimension is the source of truth: an
+        # existing file dictates it, a new file needs it spelled out.
+        stored = _stored_dimensions(self._conn)
+        if dimensions is None:
+            if stored is None:
+                msg = "dimensions is required to create a new sqlite-vec index"
+                raise ValueError(msg)
+            dimensions = stored
+        elif dimensions <= 0:
+            msg = f"dimensions must be positive, got {dimensions}"
+            raise ValueError(msg)
+        elif stored is not None and stored != dimensions:
+            msg = (
+                f"sqlite-vec index at {db_path} is {stored}-dimensional; "
+                f"store declared {dimensions}"
             )
-        if "namespace" not in cols:
-            self._conn.execute(
-                "ALTER TABLE vec_items ADD COLUMN "
-                "namespace TEXT NOT NULL DEFAULT '/'"
-            )
+            raise ValueError(msg)
+        self._dimensions = dimensions
+
+        self._conn.execute(_VEC_ITEMS_DDL)
+        # Pre-vault vec_items keeps its UNIQUE(item_id): rebuild under the
+        # (vault, item_id) key, rowids preserved (vec0 points at them).
+        rebuild_with_scope_key(self._conn, "vec_items", _VEC_ITEMS_DDL)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vec_items_scope "
             "ON vec_items(vault, namespace)"
@@ -111,13 +132,7 @@ class SqliteVecVectorStore:
         # vault as vec0 PARTITION KEY: same-vault vectors are collocated
         # in chunks and other vaults' chunks are never scanned (verified
         # pre-filter; the 2026-09-01 research report has the evidence).
-        self._conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0("
-            f"vault TEXT PARTITION KEY, "
-            f"embedding float[{dimensions}] distance_metric=cosine)"
-        )
-        # Pre-vault vec0 cannot be ALTERed (virtual table): rebuild by
-        # copying the embedding blobs — no re-embedding involved.
+        self._conn.execute(_vec_index_ddl(dimensions))
         vcols = {
             row[1]
             for row in self._conn.execute(
@@ -125,26 +140,32 @@ class SqliteVecVectorStore:
             ).fetchall()
         }
         if "vault" not in vcols:
-            # RENAME on a vec0 vtab leaves its shadow tables behind, so
-            # the blobs take a round trip through a plain staging table
-            # and the new vec0 is created under the final name.
+            self._rebuild_vec_index()
+        self._conn.commit()
+
+    def _rebuild_vec_index(self) -> None:
+        """Pre-vault vec0 cannot be ALTERed (virtual table): rebuild it by
+        copying the embedding blobs — no re-embedding — in ONE transaction
+        (vec0 DDL is transactional), staged in a TEMP table so a crash
+        leaves neither a dropped index nor an orphan behind."""
+        self._conn.execute("BEGIN")
+        try:
             self._conn.execute(
-                "CREATE TABLE _vec_migrating AS "
+                "CREATE TEMP TABLE _vec_migrating AS "
                 "SELECT rowid AS old_rowid, embedding FROM vec_index"
             )
             self._conn.execute("DROP TABLE vec_index")
-            self._conn.execute(
-                f"CREATE VIRTUAL TABLE vec_index USING vec0("
-                f"vault TEXT PARTITION KEY, "
-                f"embedding float[{dimensions}] distance_metric=cosine)"
-            )
+            self._conn.execute(_vec_index_ddl(self._dimensions))
             self._conn.execute(
                 "INSERT INTO vec_index (rowid, vault, embedding) "
-                "SELECT old_rowid, '__default__', embedding "
-                "FROM _vec_migrating"
+                "SELECT old_rowid, ?, embedding FROM _vec_migrating",
+                (DEFAULT_VAULT,),
             )
             self._conn.execute("DROP TABLE _vec_migrating")
-        self._conn.commit()
+            self._conn.execute("COMMIT")
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
 
     @property
     def vault(self) -> str:

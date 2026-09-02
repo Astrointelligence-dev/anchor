@@ -39,7 +39,7 @@ async def ensure_tables(
             metadata    JSONB NOT NULL DEFAULT '{}',
             created_at  TIMESTAMPTZ NOT NULL,
             vault       TEXT NOT NULL DEFAULT '__default__',
-            namespace   TEXT NOT NULL DEFAULT '/',
+            namespace   TEXT COLLATE "C" NOT NULL DEFAULT '/',
             PRIMARY KEY (vault, id)
         )
     """)
@@ -50,7 +50,7 @@ async def ensure_tables(
             embedding vector({embedding_dim}),
             metadata  JSONB NOT NULL DEFAULT '{{}}',
             vault     TEXT NOT NULL DEFAULT '__default__',
-            namespace TEXT NOT NULL DEFAULT '/',
+            namespace TEXT COLLATE "C" NOT NULL DEFAULT '/',
             PRIMARY KEY (vault, item_id)
         )
     """)
@@ -113,27 +113,77 @@ async def ensure_tables(
         "CREATE INDEX IF NOT EXISTS idx_embeddings_metadata ON embeddings "
         "USING gin (metadata jsonb_path_ops)"
     )
-    # Front #3 migration: pre-vault tables gain the scope columns in
-    # place (metadata-only ALTER since PG 11; IF NOT EXISTS makes it
-    # idempotent). Composite (vault, id) PKs exist only on fresh tables —
-    # the PK rebuild on legacy tables is deferred until needed.
-    for table in ("context_items", "embeddings"):
-        await conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-            f"vault TEXT NOT NULL DEFAULT '__default__'"
-        )
-        await conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
-            f"namespace TEXT NOT NULL DEFAULT '/'"
-        )
+    # Front #3 migration of pre-vault tables: scope columns, the composite
+    # (vault, id) key the upserts rely on (ON CONFLICT needs a matching
+    # unique index), and a byte-wise namespace so the prefix ranges hold
+    # under any database collation. Every step probes the catalog first —
+    # ALTER TABLE takes ACCESS EXCLUSIVE even when IF NOT EXISTS is a no-op.
+    for table, id_col in (("context_items", "id"), ("embeddings", "item_id")):
+        await _migrate_scoped_table(conn, table, id_col)
 
     # Scope btree: vault bind + boundary-aware namespace prefix ranges.
-    # text_pattern_ops makes the range/prefix scans collation-independent.
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_embeddings_scope ON embeddings "
-        "(vault, namespace text_pattern_ops)"
+    # Plain opclass on a COLLATE "C" column — text_pattern_ops only serves
+    # LIKE, never the >=/< ranges the compiler emits.
+    for table in ("embeddings", "context_items"):
+        await conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_scope ON {table} "
+            "(vault, namespace)"
+        )
+
+
+async def _migrate_scoped_table(
+    conn: asyncpg.Connection,
+    table: str,
+    id_col: str,
+) -> None:
+    cols = {
+        r["attname"]
+        for r in await conn.fetch(
+            "SELECT attname FROM pg_attribute WHERE attrelid = $1::regclass "
+            "AND attnum > 0 AND NOT attisdropped",
+            table,
+        )
+    }
+    if "vault" not in cols:
+        await conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN vault TEXT NOT NULL "
+            "DEFAULT '__default__'"
+        )
+    if "namespace" not in cols:
+        await conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN namespace TEXT COLLATE \"C\" "
+            "NOT NULL DEFAULT '/'"
+        )
+    # The pre-fix index was built with text_pattern_ops: drop it before the
+    # collation change rebuilds it for nothing (recreated plain by the caller).
+    indexdef = await conn.fetchval(
+        "SELECT indexdef FROM pg_indexes WHERE indexname = $1",
+        f"idx_{table}_scope",
     )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_context_items_scope ON context_items "
-        "(vault, namespace text_pattern_ops)"
+    if indexdef and "text_pattern_ops" in indexdef:
+        await conn.execute(f"DROP INDEX idx_{table}_scope")
+    collation = await conn.fetchval(
+        "SELECT c.collname FROM pg_attribute a "
+        "JOIN pg_collation c ON c.oid = a.attcollation "
+        "WHERE a.attrelid = $1::regclass AND a.attname = 'namespace'",
+        table,
     )
+    if collation != "C":
+        await conn.execute(
+            f"ALTER TABLE {table} ALTER COLUMN namespace TYPE TEXT COLLATE \"C\""
+        )
+    pk = await conn.fetchrow(
+        "SELECT c.conname, array_agg(a.attname ORDER BY k.ord) AS cols "
+        "FROM pg_constraint c "
+        "JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) "
+        "ON true "
+        "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum "
+        "WHERE c.conrelid = $1::regclass AND c.contype = 'p' "
+        "GROUP BY c.conname",
+        table,
+    )
+    if pk is None or "vault" not in pk["cols"]:
+        drop = f"DROP CONSTRAINT {pk['conname']}, " if pk is not None else ""
+        await conn.execute(
+            f"ALTER TABLE {table} {drop}ADD PRIMARY KEY (vault, {id_col})"
+        )

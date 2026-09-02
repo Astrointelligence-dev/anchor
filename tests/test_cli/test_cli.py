@@ -126,3 +126,38 @@ class TestQueryCommand:
         )
         assert result.exit_code == 0
         assert "Top 1" in result.output
+
+
+class TestMigrate:
+    def _legacy_db(self, path: Path) -> None:
+        import sqlite3
+
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE context_items (id TEXT PRIMARY KEY, content TEXT NOT NULL, "
+            "source TEXT NOT NULL, score REAL NOT NULL DEFAULT 0.0, "
+            "priority INTEGER NOT NULL DEFAULT 5, token_count INTEGER NOT NULL "
+            "DEFAULT 0, metadata_json TEXT NOT NULL DEFAULT '{}', "
+            "created_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO context_items (id, content, source, created_at) VALUES "
+            "('old1', 'legacy', 'retrieval', '2026-01-01T00:00:00+00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_migrate_is_idempotent_and_keeps_rows(self, tmp_path: Path) -> None:
+        db = tmp_path / "legacy.db"
+        self._legacy_db(db)
+        for _ in range(2):
+            result = runner.invoke(app, ["migrate", "--db", str(db)])
+            assert result.exit_code == 0, result.output
+            assert "migrated" in result.output
+        result = runner.invoke(app, ["query", "legacy", "--db", str(db)])
+        assert result.exit_code == 0, result.output
+        assert "legacy" in result.output
+
+    def test_migrate_missing_db_errors(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["migrate", "--db", str(tmp_path / "nope.db")])
+        assert result.exit_code == 1
