@@ -355,18 +355,43 @@ entradas, inserção dentro de cada grupo.
 
 ### D. Extrator LLM + resolução de entidade (opt-in; default ligado para memória)
 
-- [ ] `LLMGraphExtractor`: uma chamada por chunk, saída estruturada
+- [x] `LLMGraphExtractor`: uma chamada por chunk, saída estruturada
       (entidades + triplas com `relation`, `fact`, `confidence` na rubrica),
       `max_gleanings=0`, vocabulário sugerido no prompt; provider injetado
       (o do agente/manager), nunca cliente novo.
-- [ ] Resolução: chave canônica + tabela de aliases (o `|alias` do wikilink
+- [x] Resolução: chave canônica + tabela de aliases (o `|alias` do wikilink
       entra de graça); `EmbeddingSynonymLinker` opt-in (`similar_to`,
       `inferred`, cosseno ≥ 0.8, só entre nomes de entidade).
 - [ ] Descrição de entidade = fragmentos por `item_id`; resumo LLM só com ≥8
       (regra LightRAG).
-- [ ] `MemoryManager`: extrator ligado por default para `MemoryEntry` (não tem
+- [x] `MemoryManager`: extrator ligado por default para `MemoryEntry` (não tem
       wikilink); invalidação por re-ingestão; passada de contradição opt-in.
-- [ ] Um caso live com `claude_cli`.
+- [x] Um caso live com `claude_cli`.
+
+**Fase D entregue** (sessão 11) como **opt-in mínimo**, a consequência do
+gate da fase B. `LLMGraphExtractor(llm)`: uma chamada por chunk, JSON com
+entidades (nome, tipo, aliases) e relações (`relation` livre normalizada,
+`fact`, `provenance` extracted/inferred, `confidence`; inválido →
+`ambiguous` ≤ 0.3), vocabulário sugerido no prompt (`DEFAULT_RELATIONS`),
+`max_gleanings=0`, fail-soft com warning (contrato do `TierCompactor`).
+Provider injetado, nunca cliente novo. `GraphIndexer.index_entries` põe
+memória no grafo com `item id = MemoryEntry.id`; `MemoryManager(graph=
+GraphIndexer(...))` mantém o grafo em passo: `add_fact` indexa,
+`update_fact` = `unlink_item` + reindexa (aresta cuja única evidência era a
+versão antiga é invalidada), `delete_fact` desliga, `clear` desliga tudo.
+**Live com `claude_cli` (sonnet) passou**: 4 arestas de um fato de memória
+(`leads` 0.95 extracted, `member_of` 0.7 inferred, `on_call_for` 0.95,
+`uses` 0.85), todas com `evidence=("mem-1",)`, em 12 s.
+
+Desvios (todos por YAGNI sob o gate): `EmbeddingSynonymLinker`
+(`similar_to`) **não construído** — a resolução da v0.2 é chave canônica +
+aliases (o modelo devolve aliases; o matcher de menções os usa); regra de
+merge de descrição do LightRAG **não construída** (nós não têm descrição
+ainda; `metadata` guarda `type`); passada de contradição **não construída**
+(invalidação vem de re-ingestão e de `valid_to`/`invalidate_edge`);
+"ligado por default para memória" virou **opt-in por construção** —
+o `MemoryManager` só indexa quando recebe `graph=`; sem `aextract` (o
+indexador é síncrono). Suíte 3048 verdes; ruff/mypy no baseline.
 
 ### E. Comunidades + hubs + docs
 

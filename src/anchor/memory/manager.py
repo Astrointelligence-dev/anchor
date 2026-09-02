@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from anchor.exceptions import StorageError
 from anchor.models.context import ContextItem, SourceType
@@ -24,6 +24,9 @@ from .progressive import ProgressiveSummarizationMemory
 from .sliding_window import SlidingWindowMemory
 from .summary_buffer import SummaryBufferMemory
 
+if TYPE_CHECKING:
+    from anchor.ingestion.graph_extractors import GraphIndexer
+
 
 class MemoryManager:
     """Coordinates different memory strategies and produces context items.
@@ -36,9 +39,16 @@ class MemoryManager:
     conversation backend, and *conversation_tokens*, *tokenizer*, and
     *on_evict* are ignored.  Otherwise a new ``SlidingWindowMemory`` is
     created from those parameters (backwards-compatible default).
+
+    *graph* (opt-in, roadmap #4) keeps a knowledge graph in step with the
+    persistent store: every fact added is indexed (the item id is the
+    entry id), an updated fact is re-extracted, a deleted fact takes its
+    evidence with it. Pass a ``GraphIndexer`` whose extractors suit
+    memory — typically ``[LLMGraphExtractor(llm)]``, since facts carry no
+    wikilinks.
     """
 
-    __slots__ = ("_conversation", "_persistent_store", "_tokenizer")
+    __slots__ = ("_conversation", "_graph", "_persistent_store", "_tokenizer")
 
     def __init__(
         self,
@@ -47,8 +57,10 @@ class MemoryManager:
         on_evict: Callable[[list[ConversationTurn]], None] | None = None,
         persistent_store: MemoryEntryStore | None = None,
         conversation_memory: ConversationMemory | None = None,
+        graph: GraphIndexer | None = None,
     ) -> None:
         self._tokenizer = tokenizer or get_default_counter()
+        self._graph = graph
         if conversation_memory is not None:
             self._conversation: ConversationMemory = conversation_memory
         else:
@@ -173,6 +185,8 @@ class MemoryManager:
             metadata=metadata or {},
         )
         self._persistent_store.add(entry)
+        if self._graph is not None:
+            self._graph.index_entries([entry])
         return entry
 
     def get_relevant_facts(self, query: str, top_k: int = 5) -> list[MemoryEntry]:
@@ -201,7 +215,10 @@ class MemoryManager:
         """
         if self._persistent_store is None:
             return False
-        return self._persistent_store.delete(entry_id)
+        deleted = self._persistent_store.delete(entry_id)
+        if deleted and self._graph is not None:
+            self._graph.graph.unlink_item(entry_id)
+        return deleted
 
     def update_fact(self, entry_id: str, content: str) -> MemoryEntry | None:
         """Update the content of an existing persistent memory entry.
@@ -231,6 +248,11 @@ class MemoryManager:
             }
         )
         self._persistent_store.add(updated)
+        if self._graph is not None:
+            # Re-extraction: the old evidence goes (edges it alone supported
+            # are invalidated), the new content is indexed under the same id.
+            self._graph.graph.unlink_item(entry_id)
+            self._graph.index_entries([updated])
         return updated
 
     # ---- Context assembly ----
@@ -273,4 +295,7 @@ class MemoryManager:
         """Clear conversation history and persistent store (if present)."""
         self._conversation.clear()
         if self._persistent_store is not None:
+            if self._graph is not None:
+                for entry in self._persistent_store.list_all():
+                    self._graph.graph.unlink_item(entry.id)
             self._persistent_store.clear()

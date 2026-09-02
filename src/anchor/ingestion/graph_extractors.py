@@ -10,22 +10,30 @@ that writes their output into a ``KnowledgeGraph``:
   ``links_to`` edge from the chunk's note to the target note, evidenced by
   the chunk, and the target node is linked to the chunk as a mention.
 
-An LLM extractor (phase D) plugs into the same :class:`GraphExtractor`
-protocol.
+:class:`LLMGraphExtractor` is the opt-in third source (phase D): one
+model call per chunk, entities and typed relations with fact, provenance
+and confidence — for text without links, memory above all.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from anchor._text import strip_markdown_fences
 from anchor.graph.knowledge_graph import KnowledgeGraph
-from anchor.models.context import ContextItem
+from anchor.models.context import ContextItem, SourceType
 from anchor.models.graph import GraphEdge, GraphNode, normalize_key
+from anchor.models.memory import MemoryEntry
+from anchor.models.scope import ROOT_NAMESPACE
+
+if TYPE_CHECKING:
+    from anchor.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +197,165 @@ class WikilinkExtractor:
         return "WikilinkExtractor()"
 
 
+DEFAULT_RELATIONS = (
+    "depends_on",
+    "part_of",
+    "uses",
+    "owns",
+    "works_on",
+    "member_of",
+    "located_in",
+    "caused_by",
+    "decided_by",
+    "related_to",
+)
+"""Suggested predicates: the prompt lists them to contain label drift; nothing validates them."""
+
+_EXTRACTION_PROMPT = """Extract the knowledge graph from the text below.
+
+Return ONLY a JSON object with two keys:
+- "entities": a list of {{"name": str, "type": str, "aliases": [str]}} — the concrete
+  things the text is about (people, systems, places, concepts). Use the most
+  specific, consistent name; put other spellings in "aliases".
+- "relations": a list of {{"source": str, "target": str, "relation": str, "fact": str,
+  "provenance": "extracted" | "inferred", "confidence": number between 0 and 1}}.
+
+Rules:
+- "relation" is a short snake_case predicate. Prefer one of: {relations}. Invent a
+  new one only when none fits.
+- "provenance" is "extracted" when the text states the relation, "inferred" when
+  you deduce it. "fact" quotes the evidence in the text's own words.
+- Never invent entities the text does not mention. Return
+  {{"entities": [], "relations": []}} when there is nothing.
+
+TEXT:
+{content}"""
+
+_PROVENANCE: frozenset[str] = frozenset({"extracted", "inferred", "ambiguous"})
+
+
+class LLMGraphExtractor:
+    """Entities and typed relations from a chunk, in one model call (no gleaning).
+
+    Opt-in: the corpus A/B (plan doc, phase B) showed the wikilink graph does
+    not beat hybrid retrieval, so this is for text without links — memory
+    entries first. The provider is injected (the agent's own), never a new
+    client; a malformed or failed response yields nothing and logs a
+    warning, the same fail-soft contract as ``TierCompactor``.
+    """
+
+    __slots__ = ("_llm", "_relations")
+
+    def __init__(self, llm: LLMProvider, *, relations: Iterable[str] = DEFAULT_RELATIONS) -> None:
+        self._llm = llm
+        self._relations = tuple(relations)
+
+    def extract(self, item: ContextItem) -> Extraction:
+        from anchor.llm.models import Message, Role
+
+        prompt = _EXTRACTION_PROMPT.format(
+            relations=", ".join(self._relations), content=item.content
+        )
+        try:
+            response = self._llm.invoke([Message(role=Role.USER, content=prompt)])
+            data = json.loads(strip_markdown_fences(response.content or ""))
+        except Exception as exc:
+            logger.warning("LLM graph extraction failed for item %s: %s", item.id, exc)
+            return Extraction()
+        if not isinstance(data, dict):
+            logger.warning("LLM graph extraction returned non-object JSON for item %s", item.id)
+            return Extraction()
+        return self._parse(data)
+
+    def _parse(self, data: dict[str, Any]) -> Extraction:
+        result = Extraction()
+        seen_nodes: set[str] = set()
+
+        def node(name: Any, **meta: Any) -> str | None:
+            if not isinstance(name, str) or not name.strip():
+                return None
+            key = normalize_key(name)
+            if key not in seen_nodes:
+                seen_nodes.add(key)
+                aliases = meta.pop("aliases", ())
+                result.nodes.append(
+                    GraphNode(
+                        id=name,
+                        label=name.strip(),
+                        aliases=tuple(a for a in aliases if isinstance(a, str) and a.strip()),
+                        metadata={"kind": "entity", "extractor": "llm", **meta},
+                    )
+                )
+            return key
+
+        for ent in data.get("entities") or []:
+            if isinstance(ent, dict):
+                node(ent.get("name"), type=ent.get("type"), aliases=ent.get("aliases") or ())
+        seen_edges: set[tuple[str, str, str]] = set()
+        for rel in data.get("relations") or []:
+            if not isinstance(rel, dict) or not isinstance(rel.get("relation"), str):
+                continue
+            src, tgt = rel.get("source"), rel.get("target")
+            if not (isinstance(src, str) and src.strip() and isinstance(tgt, str) and tgt.strip()):
+                continue
+            try:
+                relation = normalize_key(rel["relation"])
+            except ValueError:
+                continue
+            if normalize_key(src) == normalize_key(tgt):
+                continue
+            source, target = node(src), node(tgt)
+            if source is None or target is None:  # unreachable: validated above
+                continue
+            key = (source, relation, target)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            provenance = rel.get("provenance")
+            confidence = rel.get("confidence", 0.9)
+            if provenance not in _PROVENANCE:
+                provenance = "ambiguous"
+            if not isinstance(confidence, int | float):
+                confidence = 0.9
+            confidence = max(0.0, min(1.0, float(confidence)))
+            if provenance == "ambiguous":
+                confidence = min(confidence, 0.3)
+            fact = rel.get("fact")
+            result.edges.append(
+                GraphEdge(
+                    source=source,
+                    target=target,
+                    relation=relation,
+                    fact=fact if isinstance(fact, str) and fact.strip() else None,
+                    provenance=provenance,  # type: ignore[arg-type]
+                    confidence=confidence,
+                    metadata={"extractor": "llm"},
+                )
+            )
+        return result
+
+    def __repr__(self) -> str:
+        return f"LLMGraphExtractor(llm={self._llm!r})"
+
+
+def entry_to_item(entry: MemoryEntry, *, vault: str) -> ContextItem:
+    """A memory entry as the item the graph evidences — same id, root namespace."""
+    return ContextItem(
+        id=entry.id,
+        content=entry.content,
+        source=SourceType.MEMORY,
+        score=entry.relevance_score,
+        metadata={
+            "memory_id": entry.id,
+            "memory_type": str(entry.memory_type),
+            "tags": list(entry.tags),
+        },
+        created_at=entry.created_at,
+        vault=vault,
+        namespace=ROOT_NAMESPACE,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class IndexStats:
     items: int
@@ -220,8 +387,17 @@ class GraphIndexer:
         )
 
     @property
+    def graph(self) -> KnowledgeGraph:
+        return self._graph
+
+    @property
     def extractors(self) -> tuple[GraphExtractor, ...]:
         return self._extractors
+
+    def index_entries(self, entries: Iterable[MemoryEntry]) -> IndexStats:
+        """Index memory entries: the item id IS the entry id (one currency)."""
+        vault = self._graph.store.vault
+        return self.index(entry_to_item(e, vault=vault) for e in entries)
 
     def index(self, items: Iterable[ContextItem]) -> IndexStats:
         """Extract and write every item. Items from another vault are refused."""
