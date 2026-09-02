@@ -13,6 +13,8 @@ scope itself — the caller (``GraphRetriever``, tools) resolves
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections import deque
 from collections.abc import Iterable
 from datetime import datetime
@@ -26,6 +28,12 @@ from anchor.protocols.storage import GraphStore
 from anchor.storage.memory_store import InMemoryGraphStore
 
 Direction = Literal["out", "in", "both"]
+
+
+def _match_key(text: str) -> str:
+    """Looser than ``normalize_key``: any non-word run collapses to ``_``, so
+    ``auth-service`` and ``Auth Service`` meet for mention matching."""
+    return "_".join(re.findall(r"\w+", unicodedata.normalize("NFKC", text).casefold()))
 
 
 class KnowledgeGraph:
@@ -276,20 +284,24 @@ class KnowledgeGraph:
         self,
         seeds: Iterable[str],
         *,
+        item_seeds: Iterable[str] = (),
         top_k: int = 10,
         scope: RetrievalScope | None = None,
         as_of: datetime | None = None,
         damping: float = 0.5,
     ) -> list[tuple[str, float]]:
-        """Items ranked by personalized PageRank from the seed nodes.
+        """Items ranked by personalized PageRank from the seed nodes (and items).
 
         The walk runs over entities AND items (an item is adjacent to every
         node it evidences), so the score lands directly on items — the
-        ``TokenBudget`` cuts the tail. Seeds that are unknown or hidden by
-        *scope* are ignored; no visible seed → ``[]``.
+        ``TokenBudget`` cuts the tail. *item_seeds* lets a dense search seed
+        the walk with passages (HippoRAG-2). Seeds that are unknown or
+        hidden by *scope* are ignored; no visible seed → ``[]``.
         """
         sub = self._store.subgraph(scope=scope, as_of=as_of)
+        visible_items = {item_id for ids in sub.items.values() for item_id in ids}
         seed_keys = {("n", k) for k in (normalize_key(s) for s in seeds) if k in sub.nodes}
+        seed_keys |= {("i", i) for i in item_seeds if i in visible_items}
         if not seed_keys:
             return []
         pairs: list[tuple[tuple[str, str], tuple[str, str]]] = [
@@ -309,6 +321,34 @@ class KnowledgeGraph:
             key=lambda kv: (-kv[1], kv[0]),
         )
         return ranked[:top_k]
+
+    def mentions(
+        self,
+        text: str,
+        *,
+        scope: RetrievalScope | None = None,
+        max_words: int = 4,
+    ) -> list[str]:
+        """Visible nodes whose id or alias appears in *text* (word n-grams, longest first).
+
+        The zero-cost seeder: no model, just the vocabulary the graph already
+        has. ``"Who is on call for Checkout?"`` → ``["checkout-service"]`` when
+        ``Checkout`` is an alias of that note.
+        """
+        sub = self._store.subgraph(scope=scope)
+        index: dict[str, str] = {}
+        for node_id, node in sub.nodes.items():
+            index.setdefault(_match_key(node_id), node_id)
+            for alias in node.aliases:
+                index.setdefault(_match_key(alias), node_id)
+        words = _match_key(text).split("_")
+        found: dict[str, None] = {}
+        for n in range(max_words, 0, -1):
+            for i in range(len(words) - n + 1):
+                hit = index.get("_".join(words[i : i + n]))
+                if hit is not None:
+                    found[hit] = None
+        return list(found)
 
     def hubs(
         self,

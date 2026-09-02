@@ -5,6 +5,7 @@ from .async_reranker import AsyncCohereReranker, AsyncCrossEncoderReranker
 from .async_retriever import AsyncDenseRetriever, AsyncHybridRetriever
 from .cross_modal import CrossModalEncoder, SharedSpaceRetriever
 from .dense import DenseRetriever
+from .graph import GraphRetriever
 from .hybrid import HybridRetriever
 from .memory_retriever import MemoryRetrieverAdapter, ScoredMemoryRetriever
 from .rerankers import (
@@ -28,6 +29,7 @@ __all__ = [
     "CrossModalEncoder",
     "DenseRetriever",
     "FlashRankReranker",
+    "GraphRetriever",
     "HybridRetriever",
     "KeywordRouter",
     "MemoryRetrieverAdapter",

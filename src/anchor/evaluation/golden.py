@@ -16,18 +16,14 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from anchor.evaluation.models import RetrievalMetrics
 from anchor.evaluation.retrieval import RetrievalMetricsCalculator
-from anchor.models.context import ContextItem
 from anchor.models.query import QueryBundle
-
-
-class _Retriever(Protocol):
-    def retrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]: ...
+from anchor.models.scope import RetrievalScope, scope_kwargs
+from anchor.protocols.retriever import Retriever
 
 
 class GoldenCase(BaseModel):
@@ -103,10 +99,12 @@ def load_golden_set(path: str | Path) -> list[GoldenCase]:
 
 
 def evaluate_retriever(
-    retriever: _Retriever,
+    retriever: Retriever,
     cases: Sequence[GoldenCase],
     k: int = 10,
     calculator: RetrievalMetricsCalculator | None = None,
+    *,
+    scope: RetrievalScope | None = None,
 ) -> GoldenSetReport:
     """Run every golden case through *retriever* and score it.
 
@@ -121,11 +119,16 @@ def evaluate_retriever(
         Retrieval cutoff (both for ``top_k`` and the @k metrics).
     calculator:
         Optional custom metrics calculator.
+    scope:
+        Namespace scope forwarded to the retriever (only when set, so
+        retrievers written before front #3 keep working).
     """
     calc = calculator or RetrievalMetricsCalculator(k=k)
     results: list[GoldenCaseResult] = []
     for case in cases:
-        retrieved = retriever.retrieve(QueryBundle(query_str=case.query), top_k=k)
+        retrieved = retriever.retrieve(
+            QueryBundle(query_str=case.query), top_k=k, **scope_kwargs(scope)
+        )
         metrics = calc.evaluate(retrieved, case.relevant, k=k)
         results.append(
             GoldenCaseResult(

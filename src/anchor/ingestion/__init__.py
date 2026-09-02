@@ -12,6 +12,17 @@ from .chunkers import (
     SentenceChunker,
 )
 from .code_chunker import CodeChunker
+from .graph_extractors import (
+    Extraction,
+    GraphExtractor,
+    GraphIndexer,
+    IndexStats,
+    StructureExtractor,
+    Wikilink,
+    WikilinkExtractor,
+    parse_wikilink,
+    wikilinks,
+)
 from .hierarchical import ParentChildChunker, ParentExpander
 from .ingester import DocumentIngester
 from .metadata import MetadataEnricher, extract_chunk_metadata, generate_chunk_id, generate_doc_id
@@ -31,8 +42,12 @@ __all__ = [
     "CodeChunker",
     "DocumentIngester",
     "DocxParser",
+    "Extraction",
     "FixedSizeChunker",
+    "GraphExtractor",
+    "GraphIndexer",
     "HTMLParser",
+    "IndexStats",
     "JSONParser",
     "MarkdownHeaderChunker",
     "MarkdownParser",
@@ -44,8 +59,13 @@ __all__ = [
     "RecursiveCharacterChunker",
     "SemanticChunker",
     "SentenceChunker",
+    "StructureExtractor",
     "TableAwareChunker",
+    "Wikilink",
+    "WikilinkExtractor",
     "extract_chunk_metadata",
     "generate_chunk_id",
     "generate_doc_id",
+    "parse_wikilink",
+    "wikilinks",
 ]

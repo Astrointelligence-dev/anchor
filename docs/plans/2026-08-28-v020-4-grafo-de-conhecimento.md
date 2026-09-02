@@ -250,28 +250,64 @@ o indexador da fase B sempre cita ≥1). Suíte 2986 verdes; ruff 151 (baseline
 
 ### B. Golden set + extração determinística + `GraphRetriever` + A/B (o gate)
 
-- [ ] Corpus versionado em `tests/fixtures/graph_corpus/`: ~40 notas markdown
+- [x] Corpus versionado em `tests/fixtures/graph_corpus/`: ~40 notas markdown
       com wikilinks (3 estratos: fato simples / multi-hop / síntese-explicação)
       + golden JSONL (`evaluation/golden.py` formato). Feito à mão,
       determinístico.
-- [ ] `ingestion/graph_extractors.py`: `WikilinkExtractor` (gramática Obsidian
+- [x] `ingestion/graph_extractors.py`: `WikilinkExtractor` (gramática Obsidian
       completa: `[[note]]`, `|alias`, `#heading`, `#^block`, `![[embed]]`;
       resolução NFC + casefold, basename vault-wide, ambíguo → `ambiguous`)
       e `StructureExtractor` (`parent_id` → `contains`, `doc_id` →
       `belongs_to`). `MarkdownParser` passa a expor `metadata["wikilinks"]`.
       `GraphIndexer(store, extractors)` idempotente (reindexar = mesma
       evidência, zero duplicata).
-- [ ] `retrieval/graph.py`: `GraphRetriever(Retriever)` — sementes =
+- [x] `retrieval/graph.py`: `GraphRetriever(Retriever)` — sementes =
       `entity_extractor(query)` ∪ (opcional) top-k do `VectorStore` → nós;
       PPR sobre `subgraph(effective_scope)` → score por item →
       `ContextStore.get` → `ContextItem` com **id canônico** (funde no RRF).
-- [ ] `evaluation`: `evaluate_retriever` e `ABTestRunner.run` ganham `scope`
+- [x] `evaluation`: `evaluate_retriever` e `ABTestRunner.run` ganham `scope`
       (buraco achado na pesquisa).
-- [ ] `tests/test_retrieval/test_graph_ab_benchmark.py` no molde do
+- [x] `tests/test_retrieval/test_graph_ab_benchmark.py` no molde do
       `test_scope_recall_benchmark.py`: 3 condições — híbrido+RRF, grafo só,
       RRF(híbrido, grafo) — por estrato, número publicado no Review.
       **Gate:** grafo (ou a fusão) ganha em multi-hop/explain → D vale;
       senão D vira opt-in mínimo e o Review diz por quê.
+
+**Fase B entregue** (sessão 11, `17748f7`). Números do A/B (recall@5 / MRR,
+30 queries, 40 notas, híbrido = BM25 + bag-of-words hasheado como "denso" —
+sem modelo no CI):
+
+| Condição | fato | multi-hop | explain | **geral** |
+|---|---|---|---|---|
+| híbrido+RRF | 1.00 / 0.94 | 0.96 / 0.72 | 0.78 / 0.92 | **0.94 / 0.85** |
+| grafo só | 0.92 / 0.64 | 0.83 / 0.68 | 0.75 / 0.66 | 0.85 / 0.66 |
+| RRF(híbrido, grafo) | 1.00 / 0.80 | 0.96 / 0.66 | 0.78 / 0.72 | 0.94 / 0.73 |
+| RRF 2:1 | 1.00 / 0.84 | 0.96 / 0.71 | 0.78 / 0.75 | 0.94 / 0.77 |
+
+**Resultado do gate: o grafo de wikilinks NÃO ganha do híbrido+RRF em
+retrieval neste corpus.** O híbrido já está no teto (recall 0.94; k=5 sobre
+40 notas de um chunk, queries com vocabulário do alvo); a fusão empata em
+recall e perde MRR porque o PPR põe o chunk da própria semente em primeiro
+(certo para fato, errado para multi-hop, onde a query nomeia a origem e não
+o alvo). Os asserts do benchmark são **pisos de regressão**, não
+reivindicação de vitória. Consequência para a fase D, como o plano previa:
+extrator LLM vira **opt-in mínimo**; o valor do grafo nesta v0.2 é
+navegação (path/explain/backlinks/escopo) e memória sem wikilink, não
+substituir o retrieval híbrido. Ressalva honesta: o corpus é pequeno e
+keyword-friendly — um corpus onde o alvo não compartilha termos com a
+query discriminaria mais; não foi "ajustado" para o grafo ganhar.
+
+Desvios: `MarkdownParser` não ganhou `metadata["wikilinks"]` (o extrator
+lê o conteúdo do chunk, que é a evidência; a lista por documento era
+informativa e YAGNI); `parent_id → contains` descartado (chunks são
+evidência, não nós — a hierarquia pai/filho já é servida pelo
+`ParentExpander`); ambiguidade de basename (duas notas com o mesmo nome em
+pastas diferentes) fica como `ponytail:` no extrator (mergem num nó; índice
+de notas quando um vault real tiver duplicatas); `GraphIndexer` é add-only
+(reindexar reforça; remover é `unlink_item`) — consistente com o
+`ContextStore`, que também não remove itens obsoletos sozinho.
+`MemoryRetrieverAdapter` passou a devolver `id=MemoryEntry.id` (moeda
+única). Suíte 3017 verdes; ruff/mypy no baseline.
 
 ### C. Persistência + CLI
 

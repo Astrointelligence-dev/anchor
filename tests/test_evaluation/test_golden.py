@@ -79,3 +79,24 @@ class TestGradedNDCG:
         calc = RetrievalMetricsCalculator(k=2)
         m = calc.evaluate([_item("a"), _item("x")], ["a"])
         assert m.ndcg == pytest.approx(1.0)
+
+
+class TestScopeForwarding:
+    """evaluate_retriever forwards ``scope`` only when set (front #3 contract)."""
+
+    def test_scope_reaches_the_retriever(self) -> None:
+        from anchor.evaluation.golden import GoldenCase, evaluate_retriever
+        from anchor.models.scope import RetrievalScope
+
+        seen: list[object] = []
+
+        class Spy:
+            def retrieve(self, query, top_k=10, **kwargs):
+                seen.append(kwargs.get("scope", "absent"))
+                return []
+
+        cases = [GoldenCase(query="q", relevant=["a"])]
+        evaluate_retriever(Spy(), cases, k=3)
+        scope = RetrievalScope(exclude=("/x",))
+        evaluate_retriever(Spy(), cases, k=3, scope=scope)
+        assert seen == ["absent", scope]

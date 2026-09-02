@@ -19,7 +19,8 @@ Core Pipeline:
     query_transform_step, classified_retriever_step
 
 Knowledge Graph:
-    KnowledgeGraph, GraphNode, GraphEdge, GraphStore, InMemoryGraphStore
+    KnowledgeGraph, GraphNode, GraphEdge, GraphStore, InMemoryGraphStore,
+    GraphRetriever, GraphIndexer, WikilinkExtractor, StructureExtractor
 
 LLM Providers:
     BaseLLMProvider, LLMProvider, LLMResponse, Message, ContentBlock,
@@ -200,6 +201,7 @@ from anchor.graph import KnowledgeGraph
 from anchor.ingestion import (
     CodeChunker,
     DocumentIngester,
+    GraphIndexer,
     FixedSizeChunker,
     HTMLParser,
     MarkdownParser,
@@ -211,7 +213,9 @@ from anchor.ingestion import (
     RecursiveCharacterChunker,
     SemanticChunker,
     SentenceChunker,
+    StructureExtractor,
     TableAwareChunker,
+    WikilinkExtractor,
     extract_chunk_metadata,
     generate_chunk_id,
     generate_doc_id,
@@ -398,6 +402,7 @@ from anchor.retrieval import (
     CrossEncoderReranker,
     CrossModalEncoder,
     DenseRetriever,
+    GraphRetriever,
     FlashRankReranker,
     HybridRetriever,
     KeywordRouter,
@@ -511,7 +516,9 @@ __all__ = [
     "GarbageCollectableStore",
     "GenericTextFormatter",
     "GraphEdge",
+    "GraphIndexer",
     "GraphNode",
+    "GraphRetriever",
     "GraphStore",
     "HTMLParser",
     "HTMLTableParser",
@@ -631,6 +638,7 @@ __all__ = [
     "SparseRetriever",
     "StepBackTransformer",
     "StepDiagnostic",
+    "StructureExtractor",
     "StopReason",
     "StorageError",
     "StreamChunk",
@@ -662,6 +670,7 @@ __all__ = [
     "UsageLimitReached",
     "UsageLimits",
     "VectorStore",
+    "WikilinkExtractor",
     "VoyageEmbeddingProvider",
     "async_postprocessor_step",
     "async_reranker_step",

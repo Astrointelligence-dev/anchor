@@ -286,8 +286,11 @@ class MemoryRetrieverAdapter:
         if scope is not None and not scope.matches(ROOT_NAMESPACE):
             return []
         entries = self._retriever.retrieve(query.query_str, top_k=top_k)
+        # The item id IS the memory id (roadmap #4: one currency), so the
+        # graph's evidence and RRF fusion line up with what memory returns.
         return [
             ContextItem(
+                id=e.id,
                 content=e.content,
                 source=SourceType.MEMORY,
                 priority=7,
