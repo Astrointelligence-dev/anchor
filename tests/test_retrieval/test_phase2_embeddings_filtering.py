@@ -300,11 +300,23 @@ class TestPostgresSchema:
             async def execute(self, sql: str, *args) -> None:
                 executed.append(sql)
 
+            # Bare catalog: every probe of the migration sees a legacy table.
+            async def fetch(self, sql: str, *args) -> list:
+                return []
+
+            async def fetchval(self, sql: str, *args) -> None:
+                return None
+
+            async def fetchrow(self, sql: str, *args) -> None:
+                return None
+
         asyncio.run(ensure_tables(_FakeConn(), embedding_dim=1024))
         joined = "\n".join(executed)
         assert "vector(1024)" in joined
         assert "USING hnsw" in joined
         assert "gin (metadata jsonb_path_ops)" in joined
+        assert "ADD PRIMARY KEY (vault, id)" in joined
+        assert 'COLLATE "C"' in joined
 
         with pytest.raises(ValueError, match="embedding_dim"):
             asyncio.run(ensure_tables(_FakeConn(), embedding_dim=0))
