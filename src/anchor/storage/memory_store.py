@@ -19,6 +19,7 @@ from anchor.models.scope import (
     ROOT_NAMESPACE,
     RetrievalScope,
     normalize_namespace,
+    validate_vault,
 )
 from anchor.storage._where import matches_where
 
@@ -38,7 +39,7 @@ class InMemoryContextStore:
     def __init__(self, *, vault: str = DEFAULT_VAULT) -> None:
         self._items: dict[str, ContextItem] = {}
         self._lock = threading.Lock()
-        self._vault = vault
+        self._vault = validate_vault(vault)
 
     @property
     def vault(self) -> str:
@@ -97,7 +98,7 @@ class InMemoryVectorStore:
         self._namespaces: dict[str, str] = {}
         self._large_store_warned: bool = False
         self._lock = threading.Lock()
-        self._vault = vault
+        self._vault = validate_vault(vault)
 
     @property
     def vault(self) -> str:

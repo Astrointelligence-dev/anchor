@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from anchor.models.context import ContextItem
-from anchor.models.scope import DEFAULT_VAULT
+from anchor.models.scope import DEFAULT_VAULT, validate_vault
 from anchor.storage._serialization import context_item_to_row, row_to_context_item
 
 if TYPE_CHECKING:
@@ -21,7 +21,7 @@ class SqliteContextStore:
         self, conn_manager: SqliteConnectionManager, *, vault: str = DEFAULT_VAULT,
     ) -> None:
         self._conn_manager = conn_manager
-        self._vault = vault
+        self._vault = validate_vault(vault)
 
     @property
     def vault(self) -> str:
@@ -92,7 +92,7 @@ class AsyncSqliteContextStore:
         self, conn_manager: SqliteConnectionManager, *, vault: str = DEFAULT_VAULT,
     ) -> None:
         self._conn_manager = conn_manager
-        self._vault = vault
+        self._vault = validate_vault(vault)
 
     @property
     def vault(self) -> str:

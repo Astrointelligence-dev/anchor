@@ -12,6 +12,7 @@ from anchor.models.scope import (
     ROOT_NAMESPACE,
     RetrievalScope,
     normalize_namespace,
+    validate_vault,
 )
 from anchor.storage._where import (
     SET_OPS,
@@ -123,7 +124,7 @@ class PostgresVectorStore:
         vault: str = DEFAULT_VAULT,
     ) -> None:
         self._conn_manager = conn_manager
-        self._vault = vault
+        self._vault = validate_vault(vault)
 
     @property
     def vault(self) -> str:

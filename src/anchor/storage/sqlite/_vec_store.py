@@ -22,6 +22,7 @@ from anchor.models.scope import (
     ROOT_NAMESPACE,
     RetrievalScope,
     normalize_namespace,
+    validate_vault,
 )
 from anchor.storage._where import scope_sql_clauses, sql_where_clauses
 from anchor.storage.sqlite._schema import rebuild_with_scope_key
@@ -96,7 +97,7 @@ class SqliteVecVectorStore:
             )
             raise ImportError(msg) from e
 
-        self._vault = vault
+        self._vault = validate_vault(vault)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.enable_load_extension(True)
         sqlite_vec.load(self._conn)

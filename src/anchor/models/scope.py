@@ -33,6 +33,27 @@ convention — cannot collide with a legitimate user vault named "default")."""
 ROOT_NAMESPACE = "/"
 
 
+def validate_vault(vault: str) -> str:
+    """A vault is a flat mount name.
+
+    Non-empty, no ``/`` (that is namespace syntax) and no ``:`` (the key
+    separator on Redis, where the vault is part of the key path). Checked
+    once, at the boundary: on ``ContextItem`` and on every store mount —
+    a bad name must fail at construction, never on the read after the
+    write.
+    """
+    if not vault.strip():
+        msg = "vault must not be empty"
+        raise ValueError(msg)
+    if "/" in vault:
+        msg = "vault is a flat mount name — '/' belongs to namespaces"
+        raise ValueError(msg)
+    if ":" in vault:
+        msg = "vault must not contain ':' (it is a key separator on Redis)"
+        raise ValueError(msg)
+    return vault
+
+
 def normalize_namespace(namespace: str) -> str:
     """Canonical form: leading ``/``, no trailing ``/`` (root stays ``/``).
 

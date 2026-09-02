@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from anchor.models.context import ContextItem, SourceType
-from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE
+from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE, validate_vault
 
 if TYPE_CHECKING:
     from anchor.storage.postgres._connection import PostgresConnectionManager
@@ -27,7 +27,7 @@ class PostgresContextStore:
         vault: str = DEFAULT_VAULT,
     ) -> None:
         self._conn_manager = conn_manager
-        self._vault = vault
+        self._vault = validate_vault(vault)
 
     @property
     def vault(self) -> str:

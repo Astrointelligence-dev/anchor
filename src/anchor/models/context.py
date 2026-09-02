@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import TypedDict
 
-from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE, normalize_namespace
+from anchor.models.scope import DEFAULT_VAULT, ROOT_NAMESPACE, normalize_namespace, validate_vault
 
 
 class StepDiagnostic(TypedDict):
@@ -74,13 +74,7 @@ class ContextItem(BaseModel):
     @field_validator("vault")
     @classmethod
     def _validate_vault(cls, v: str) -> str:
-        if not v.strip():
-            msg = "vault must not be empty"
-            raise ValueError(msg)
-        if "/" in v:
-            msg = "vault is a flat mount name — '/' belongs to namespaces"
-            raise ValueError(msg)
-        return v
+        return validate_vault(v)
 
     @field_validator("namespace")
     @classmethod

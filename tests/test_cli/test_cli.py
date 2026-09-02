@@ -161,3 +161,37 @@ class TestMigrate:
     def test_migrate_missing_db_errors(self, tmp_path: Path) -> None:
         result = runner.invoke(app, ["migrate", "--db", str(tmp_path / "nope.db")])
         assert result.exit_code == 1
+
+
+class TestScopeOptions:
+    def test_invalid_vault_and_namespace_are_usage_errors(
+        self, corpus: Path, tmp_path: Path,
+    ) -> None:
+        db = tmp_path / "scope.db"
+        for args, flag in (
+            (["--vault", "a/b"], "--vault"),
+            (["--vault", "a:b"], "--vault"),
+            (["--namespace", " "], "--namespace"),
+        ):
+            result = runner.invoke(app, ["index", str(corpus), "--db", str(db), *args])
+            assert result.exit_code == 1, result.output
+            assert flag in result.output
+        result = runner.invoke(app, ["query", "x", "--db", str(db), "--include", ""])
+        assert result.exit_code == 1
+        assert "--include" in result.output
+
+    def test_vault_and_namespace_scope_the_query(self, corpus: Path, tmp_path: Path) -> None:
+        db = tmp_path / "scope.db"
+        assert runner.invoke(
+            app, ["index", str(corpus), "--db", str(db), "--vault", "docs", "-n", "/kb/a"],
+        ).exit_code == 0
+        hit = runner.invoke(app, ["query", "retrieval", "--db", str(db), "--vault", "docs"])
+        assert hit.exit_code == 0
+        assert "Retrieval" in hit.output
+        other_vault = runner.invoke(app, ["query", "retrieval", "--db", str(db)])
+        assert other_vault.exit_code == 1  # __default__ is empty
+        excluded = runner.invoke(
+            app, ["query", "retrieval", "--db", str(db), "--vault", "docs", "--exclude", "/kb"],
+        )
+        assert "Retrieval" not in excluded.output
+

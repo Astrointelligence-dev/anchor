@@ -112,7 +112,11 @@ def _open_context_store(db_path: Path, vault: str = "__default__") -> Any:
 
     manager = SqliteConnectionManager(db_path)
     ensure_tables(manager.get_connection())
-    return SqliteContextStore(manager, vault=vault)
+    try:
+        return SqliteContextStore(manager, vault=vault)
+    except ValueError as e:
+        console.print(f"[red]--vault: {e}[/red]")
+        raise typer.Exit(code=1) from None
 
 
 def _open_vector_store(
@@ -186,7 +190,11 @@ def index(
 
     from anchor.models.scope import normalize_namespace
 
-    ns = normalize_namespace(namespace)
+    try:
+        ns = normalize_namespace(namespace)
+    except ValueError as e:
+        console.print(f"[red]--namespace: {e}[/red]")
+        raise typer.Exit(code=1) from None
     items = [item.model_copy(update={"namespace": ns}) for item in items]
 
     context_store = _open_context_store(db, vault)
@@ -287,11 +295,15 @@ def query(
     from anchor.models.scope import RetrievalScope, scope_kwargs
     from anchor.retrieval import HybridRetriever, SparseRetriever
 
-    scope = (
-        RetrievalScope(include=tuple(include), exclude=tuple(exclude))
-        if include or exclude
-        else None
-    )
+    try:
+        scope = (
+            RetrievalScope(include=tuple(include), exclude=tuple(exclude))
+            if include or exclude
+            else None
+        )
+    except ValueError as e:
+        console.print(f"[red]--include/--exclude: {e}[/red]")
+        raise typer.Exit(code=1) from None
 
     context_store = _open_context_store(db, vault)
     items = context_store.get_all()
