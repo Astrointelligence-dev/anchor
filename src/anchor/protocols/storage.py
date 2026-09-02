@@ -509,7 +509,7 @@ class GraphStore(Protocol):
         scope: RetrievalScope | None = None,
         as_of: datetime | None = None,
     ) -> list[GraphEdge]:
-        """Visible live edges touching a node, insertion order."""
+        """Visible live edges touching a node, in insertion order (directions mixed)."""
         ...
 
     def subgraph(
@@ -524,3 +524,54 @@ class GraphStore(Protocol):
     def clear(self) -> None:
         """Remove every node, edge and link."""
         ...
+
+
+@runtime_checkable
+class AsyncGraphStore(Protocol):
+    """Async twin of :class:`GraphStore` — same contract, awaited."""
+
+    @property
+    def vault(self) -> str: ...
+
+    @property
+    def version(self) -> int: ...
+
+    async def upsert_node(self, node: GraphNode) -> GraphNode: ...
+
+    async def get_node(self, node_id: str) -> GraphNode | None: ...
+
+    async def add_edge(self, edge: GraphEdge) -> GraphEdge: ...
+
+    async def get_edge(self, edge_id: str) -> GraphEdge | None: ...
+
+    async def invalidate_edge(self, edge_id: str, *, at: datetime | None = None) -> bool: ...
+
+    async def remove_node(self, node_id: str) -> bool: ...
+
+    async def link_item(
+        self, node_id: str, item_id: str, namespace: str = ROOT_NAMESPACE
+    ) -> None: ...
+
+    async def unlink_item(self, item_id: str) -> int: ...
+
+    async def node_items(
+        self, node_id: str, *, scope: RetrievalScope | None = None
+    ) -> list[str]: ...
+
+    async def edges_of(
+        self,
+        node_id: str,
+        *,
+        direction: Literal["out", "in", "both"] = "both",
+        scope: RetrievalScope | None = None,
+        as_of: datetime | None = None,
+    ) -> list[GraphEdge]: ...
+
+    async def subgraph(
+        self,
+        *,
+        scope: RetrievalScope | None = None,
+        as_of: datetime | None = None,
+    ) -> Subgraph: ...
+
+    async def clear(self) -> None: ...

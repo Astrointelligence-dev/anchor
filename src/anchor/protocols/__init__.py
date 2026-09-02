@@ -28,6 +28,7 @@ from .reranker import AsyncReranker, Reranker
 from .retriever import AsyncRetriever, Retriever
 from .router import QueryRouter
 from .storage import (
+    AsyncGraphStore,
     ContextStore,
     DocumentStore,
     GarbageCollectableStore,
@@ -39,6 +40,7 @@ from .tokenizer import Tokenizer
 
 __all__ = [
     "AsyncCompactionStrategy",
+    "AsyncGraphStore",
     "AsyncMemoryExtractor",
     "AsyncPostProcessor",
     "AsyncQueryTransformer",

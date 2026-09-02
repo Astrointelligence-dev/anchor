@@ -110,24 +110,68 @@ def _make_embeddings(spec: str) -> Any:
     raise typer.Exit(code=1)
 
 
-def _open_context_store(db_path: Path, vault: str = DEFAULT_VAULT) -> Any:
-    from anchor.storage.sqlite import (
-        SqliteConnectionManager,
-        SqliteContextStore,
-        ensure_tables,
-    )
+def _open_manager(db_path: Path) -> Any:
+    from anchor.storage.sqlite import SqliteConnectionManager, ensure_tables
 
     manager = SqliteConnectionManager(db_path)
     ensure_tables(manager.get_connection())
+    return manager
+
+
+def _open_context_store(db_path: Path, vault: str = DEFAULT_VAULT) -> Any:
+    from anchor.storage.sqlite import SqliteContextStore
+
     try:
-        return SqliteContextStore(manager, vault=vault)
+        return SqliteContextStore(_open_manager(db_path), vault=vault)
     except ValueError as e:
         console.print(f"[red]--vault: {e}[/red]")
         raise typer.Exit(code=1) from None
 
 
+def _open_graph(db_path: Path, vault: str = DEFAULT_VAULT) -> Any:
+    """The knowledge graph persisted next to the index (``anchor index --graph``)."""
+    from anchor.graph import KnowledgeGraph
+    from anchor.storage.sqlite import SqliteGraphStore
+
+    try:
+        return KnowledgeGraph(SqliteGraphStore(_open_manager(db_path), vault=vault))
+    except ValueError as e:
+        console.print(f"[red]--vault: {e}[/red]")
+        raise typer.Exit(code=1) from None
+
+
+def _scope_option(include: list[str], exclude: list[str]) -> RetrievalScope | None:
+    try:
+        return (
+            RetrievalScope(include=tuple(include), exclude=tuple(exclude))
+            if include or exclude
+            else None
+        )
+    except ValueError as e:
+        console.print(f"[red]--include/--exclude: {e}[/red]")
+        raise typer.Exit(code=1) from None
+
+
+def _print_results(results: list[Any], title: str) -> None:
+    table = Table(title=title)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Score", style="cyan", width=7)
+    table.add_column("Source", style="magenta")
+    table.add_column("Content", style="green")
+    for rank, item in enumerate(results, start=1):
+        source = str(item.metadata.get("doc_filename", item.metadata.get("parent_doc_id", "")))
+        page = item.metadata.get("doc_page")
+        if page:
+            source = f"{source} p.{page}"
+        snippet = item.content[:160].replace("\n", " ")
+        table.add_row(str(rank), f"{item.score:.3f}", source, snippet)
+    console.print(table)
+
+
 def _open_vector_store(
-    db_path: Path, dimensions: int, vault: str = DEFAULT_VAULT,
+    db_path: Path,
+    dimensions: int,
+    vault: str = DEFAULT_VAULT,
 ) -> Any:
     """Prefer sqlite-vec (real KNN); fall back to the brute-force store."""
     try:
@@ -172,8 +216,13 @@ def index(
         DEFAULT_VAULT, "--vault", help="Vault (hard isolation mount) to index into"
     ),
     namespace: str = typer.Option(
-        ROOT_NAMESPACE, "--namespace", "-n",
+        ROOT_NAMESPACE,
+        "--namespace",
+        "-n",
         help="Namespace path to stamp on the ingested chunks (e.g. /contratos/2026)",
+    ),
+    graph: bool = typer.Option(
+        False, "--graph", help="Also build the knowledge graph (wikilinks + note structure)"
     ),
 ) -> None:
     """Ingest documents into a local index (chunks + optional dense vectors)."""
@@ -186,15 +235,10 @@ def index(
 
     ingester = DocumentIngester(chunker=RecursiveCharacterChunker(chunk_size=chunk_size))
     with console.status("Ingesting..."):
-        items = (
-            ingester.ingest_file(path)
-            if path.is_file()
-            else ingester.ingest_directory(path)
-        )
+        items = ingester.ingest_file(path) if path.is_file() else ingester.ingest_directory(path)
     if not items:
         console.print("[yellow]No content ingested.[/yellow]")
         raise typer.Exit(code=1)
-
 
     try:
         ns = normalize_namespace(namespace)
@@ -214,8 +258,18 @@ def index(
             vector_store = _open_vector_store(db, len(vectors[0]), vault)
             for item, vector in zip(items, vectors, strict=True):
                 vector_store.add_embedding(
-                    item.id, vector, item.metadata, namespace=ns,
+                    item.id,
+                    vector,
+                    item.metadata,
+                    namespace=ns,
                 )
+
+    stats = None
+    if graph:
+        from anchor.ingestion import GraphIndexer
+
+        with console.status("Building graph..."):
+            stats = GraphIndexer(_open_graph(db, vault)).index(items)
 
     table = Table(title=f"Indexed into {db}")
     table.add_column("Metric", style="cyan")
@@ -223,6 +277,9 @@ def index(
     table.add_row("Chunks", str(len(items)))
     table.add_row("Total tokens", str(sum(item.token_count for item in items)))
     table.add_row("Dense vectors", str(len(items)) if provider else "no (BM25 only)")
+    if stats is not None:
+        table.add_row("Graph nodes", str(stats.nodes))
+        table.add_row("Graph edges", str(stats.edges))
     table.add_row("Vault", vault)
     table.add_row("Namespace", ns)
     console.print(table)
@@ -252,9 +309,7 @@ def migrate(
 
     # A sqlite-vec index migrates on open; its dimension is read from the
     # index itself, so nothing about the embedding provider is needed.
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE name = 'vec_index'"
-    ).fetchone():
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'vec_index'").fetchone():
         from anchor.storage.sqlite import SqliteVecVectorStore
 
         try:
@@ -300,15 +355,7 @@ def query(
     from anchor.models.query import QueryBundle
     from anchor.retrieval import HybridRetriever, SparseRetriever
 
-    try:
-        scope = (
-            RetrievalScope(include=tuple(include), exclude=tuple(exclude))
-            if include or exclude
-            else None
-        )
-    except ValueError as e:
-        console.print(f"[red]--include/--exclude: {e}[/red]")
-        raise typer.Exit(code=1) from None
+    scope = _scope_option(include, exclude)
 
     context_store = _open_context_store(db, vault)
     items = context_store.get_all()
@@ -325,33 +372,170 @@ def query(
         from anchor.retrieval import DenseRetriever
 
         vector_store = _open_vector_store(db, provider.dimensions, vault)
-        retrievers.append(
-            DenseRetriever(vector_store, context_store, embeddings=provider)
-        )
+        retrievers.append(DenseRetriever(vector_store, context_store, embeddings=provider))
 
-    retriever: Any = (
-        HybridRetriever(retrievers) if len(retrievers) > 1 else retrievers[0]
-    )
+    retriever: Any = HybridRetriever(retrievers) if len(retrievers) > 1 else retrievers[0]
     results = retriever.retrieve(
-        QueryBundle(query_str=query_text), top_k=top_k, **scope_kwargs(scope),
+        QueryBundle(query_str=query_text),
+        top_k=top_k,
+        **scope_kwargs(scope),
     )
 
     if not results:
         console.print("[yellow]No results.[/yellow]")
         raise typer.Exit()
+    _print_results(results, f"Top {len(results)} for: {query_text}")
 
-    table = Table(title=f"Top {len(results)} for: {query_text}")
-    table.add_column("#", style="dim", width=3)
-    table.add_column("Score", style="cyan", width=7)
-    table.add_column("Source", style="magenta")
-    table.add_column("Content", style="green")
-    for rank, item in enumerate(results, start=1):
-        source = str(item.metadata.get("doc_filename", item.metadata.get("parent_doc_id", "")))
-        page = item.metadata.get("doc_page")
-        if page:
-            source = f"{source} p.{page}"
-        snippet = item.content[:160].replace("\n", " ")
-        table.add_row(str(rank), f"{item.score:.3f}", source, snippet)
+
+graph_app = typer.Typer(help="Navigate the knowledge graph built by 'anchor index --graph'.")
+app.add_typer(graph_app, name="graph")
+
+_DB_OPT = typer.Option(Path("anchor.db"), "--db", help="SQLite database file for the index")
+_VAULT_OPT = typer.Option(DEFAULT_VAULT, "--vault", help="Vault (hard isolation mount)")
+_INCLUDE_OPT = typer.Option([], "--include", help="Namespace prefix(es) to include (repeatable)")
+_EXCLUDE_OPT = typer.Option(
+    [], "--exclude", help="Namespace prefix(es) to exclude (repeatable; wins)"
+)
+
+
+def _require_graph(db: Path, vault: str) -> Any:
+    if not db.exists():
+        console.print(f"[red]No index at {db}. Run 'anchor index --graph' first.[/red]")
+        raise typer.Exit(code=1)
+    graph = _open_graph(db, vault)
+    if len(graph) == 0:
+        console.print(
+            "[yellow]Graph is empty (for this vault). Run 'anchor index --graph'.[/yellow]"
+        )
+        raise typer.Exit(code=1)
+    return graph
+
+
+@graph_app.command("query")
+def graph_query(
+    query_text: str = typer.Argument(..., help="Query text"),
+    db: Path = _DB_OPT,
+    top_k: int = typer.Option(5, "--top-k", "-k", help="Number of results"),
+    vault: str = _VAULT_OPT,
+    include: list[str] = _INCLUDE_OPT,
+    exclude: list[str] = _EXCLUDE_OPT,
+) -> None:
+    """Retrieve chunks by spreading activation from the nodes the query mentions."""
+    from anchor.models.query import QueryBundle
+    from anchor.retrieval import GraphRetriever
+
+    scope = _scope_option(include, exclude)
+    graph = _require_graph(db, vault)
+    retriever = GraphRetriever(graph, _open_context_store(db, vault))
+    results = retriever.retrieve(
+        QueryBundle(query_str=query_text), top_k=top_k, **scope_kwargs(scope)
+    )
+    if not results:
+        console.print("[yellow]No results (no known node mentioned).[/yellow]")
+        raise typer.Exit()
+    _print_results(results, f"Graph top {len(results)} for: {query_text}")
+
+
+@graph_app.command("path")
+def graph_path(
+    source: str = typer.Argument(..., help="Start node (name or alias)"),
+    target: str = typer.Argument(..., help="End node"),
+    db: Path = _DB_OPT,
+    vault: str = _VAULT_OPT,
+    include: list[str] = _INCLUDE_OPT,
+    exclude: list[str] = _EXCLUDE_OPT,
+) -> None:
+    """Fewest-hops path between two nodes (never through a node hidden by the scope)."""
+    scope = _scope_option(include, exclude)
+    graph = _require_graph(db, vault)
+    trail = graph.path(source, target, **scope_kwargs(scope))
+    if trail is None:
+        console.print("[yellow]No path.[/yellow]")
+        raise typer.Exit(code=1)
+    console.print(" -> ".join(trail))
+
+
+@graph_app.command("explain")
+def graph_explain(
+    source: str = typer.Argument(..., help="Start node (name or alias)"),
+    target: str = typer.Argument(..., help="End node"),
+    db: Path = _DB_OPT,
+    vault: str = _VAULT_OPT,
+    include: list[str] = _INCLUDE_OPT,
+    exclude: list[str] = _EXCLUDE_OPT,
+) -> None:
+    """Why two nodes are connected: relation, fact, provenance and evidence per hop."""
+    scope = _scope_option(include, exclude)
+    graph = _require_graph(db, vault)
+    hops = graph.explain(source, target, **scope_kwargs(scope))
+    if not hops:
+        console.print("[yellow]No path.[/yellow]")
+        raise typer.Exit(code=1)
+    table = Table(title=f"{source} -> {target}")
+    for col, style in (
+        ("Source", "magenta"),
+        ("Relation", "cyan"),
+        ("Target", "magenta"),
+        ("Provenance", "dim"),
+        ("Conf.", "dim"),
+        ("Evidence", "dim"),
+        ("Fact", "green"),
+    ):
+        table.add_column(col, style=style)
+    for edge in hops:
+        table.add_row(
+            edge.source,
+            edge.relation,
+            edge.target,
+            edge.provenance,
+            f"{edge.confidence:.2f}",
+            str(len(edge.evidence)),
+            edge.fact or "",
+        )
+    console.print(table)
+
+
+@graph_app.command("hubs")
+def graph_hubs(
+    db: Path = _DB_OPT,
+    top_k: int = typer.Option(10, "--top-k", "-k", help="Number of hubs"),
+    vault: str = _VAULT_OPT,
+    include: list[str] = _INCLUDE_OPT,
+    exclude: list[str] = _EXCLUDE_OPT,
+) -> None:
+    """The best-connected nodes (degree) visible under the scope."""
+    scope = _scope_option(include, exclude)
+    graph = _require_graph(db, vault)
+    table = Table(title="Hubs")
+    table.add_column("Node", style="magenta")
+    table.add_column("Degree", style="cyan")
+    table.add_column("Label", style="green")
+    for node_id, degree in graph.hubs(k=top_k, **scope_kwargs(scope)):
+        node = graph.node(node_id)
+        table.add_row(node_id, str(degree), node.label if node else "")
+    console.print(table)
+
+
+@graph_app.command("backlinks")
+def graph_backlinks(
+    name: str = typer.Argument(..., help="Node (name or alias)"),
+    db: Path = _DB_OPT,
+    vault: str = _VAULT_OPT,
+    include: list[str] = _INCLUDE_OPT,
+    exclude: list[str] = _EXCLUDE_OPT,
+) -> None:
+    """Edges pointing INTO a node — who links here."""
+    scope = _scope_option(include, exclude)
+    graph = _require_graph(db, vault)
+    edges = graph.backlinks(name, **scope_kwargs(scope))
+    if not edges:
+        console.print("[yellow]No backlinks.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"Backlinks of {name}")
+    for col in ("Source", "Relation", "Provenance", "Evidence"):
+        table.add_column(col)
+    for edge in edges:
+        table.add_row(edge.source, edge.relation, edge.provenance, ", ".join(edge.evidence))
     console.print(table)
 
 

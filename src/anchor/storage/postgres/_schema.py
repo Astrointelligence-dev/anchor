@@ -8,6 +8,63 @@ if TYPE_CHECKING:
     import asyncpg
 
 
+_GRAPH_DDL = (
+    """CREATE TABLE IF NOT EXISTS graph_nodes (
+        vault    TEXT NOT NULL,
+        id       TEXT NOT NULL,
+        seq      BIGSERIAL,
+        label    TEXT NOT NULL,
+        aliases  JSONB NOT NULL DEFAULT '[]',
+        metadata JSONB NOT NULL DEFAULT '{}',
+        PRIMARY KEY (vault, id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS graph_edges (
+        vault          TEXT NOT NULL,
+        id             TEXT NOT NULL,
+        seq            BIGSERIAL,
+        source         TEXT NOT NULL,
+        target         TEXT NOT NULL,
+        relation       TEXT NOT NULL,
+        fact           TEXT,
+        provenance     TEXT NOT NULL DEFAULT 'extracted',
+        confidence     DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+        valid_from     TIMESTAMPTZ,
+        valid_to       TIMESTAMPTZ,
+        created_at     TIMESTAMPTZ NOT NULL,
+        invalidated_at TIMESTAMPTZ,
+        metadata       JSONB NOT NULL DEFAULT '{}',
+        PRIMARY KEY (vault, id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS graph_items (
+        vault     TEXT NOT NULL,
+        item_id   TEXT NOT NULL,
+        namespace TEXT COLLATE "C" NOT NULL DEFAULT '/',
+        PRIMARY KEY (vault, item_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS graph_node_items (
+        vault   TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        seq     BIGSERIAL,
+        PRIMARY KEY (vault, node_id, item_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS graph_edge_items (
+        vault   TEXT NOT NULL,
+        edge_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        seq     BIGSERIAL,
+        PRIMARY KEY (vault, edge_id, item_id)
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_live ON graph_edges "
+    "(vault, source, relation, target) WHERE invalidated_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges (vault, source)",
+    "CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges (vault, target)",
+    "CREATE INDEX IF NOT EXISTS idx_graph_items_scope ON graph_items (vault, namespace)",
+    "CREATE INDEX IF NOT EXISTS idx_graph_node_items_item ON graph_node_items (vault, item_id)",
+    "CREATE INDEX IF NOT EXISTS idx_graph_edge_items_item ON graph_edge_items (vault, item_id)",
+)
+
+
 async def ensure_tables(
     conn: asyncpg.Connection,  # type: ignore[type-arg]
     *,
@@ -83,6 +140,11 @@ async def ensure_tables(
             links           JSONB NOT NULL DEFAULT '[]'
         )
     """)
+
+    # Knowledge graph (roadmap #4). New tables, keyed by vault from day one;
+    # the live (source, relation, target) is unique through a partial index.
+    for ddl in _GRAPH_DDL:
+        await conn.execute(ddl)
 
     # Indexes
     await conn.execute(

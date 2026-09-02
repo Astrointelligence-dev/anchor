@@ -55,6 +55,55 @@ _TABLES: dict[str, str] = {
         source_turns_json TEXT NOT NULL DEFAULT '[]',
         links_json      TEXT NOT NULL DEFAULT '[]'
     )""",
+    # Knowledge graph (roadmap #4). New tables, keyed by vault from day one.
+    # Edges are invalidated, never deleted; the live (source, relation,
+    # target) is unique through the partial index below.
+    "graph_nodes": """CREATE TABLE IF NOT EXISTS graph_nodes (
+        vault         TEXT NOT NULL,
+        id            TEXT NOT NULL,
+        label         TEXT NOT NULL,
+        aliases_json  TEXT NOT NULL DEFAULT '[]',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (vault, id)
+    )""",
+    "graph_edges": """CREATE TABLE IF NOT EXISTS graph_edges (
+        vault          TEXT NOT NULL,
+        id             TEXT NOT NULL,
+        source         TEXT NOT NULL,
+        target         TEXT NOT NULL,
+        relation       TEXT NOT NULL,
+        fact           TEXT,
+        provenance     TEXT NOT NULL DEFAULT 'extracted',
+        confidence     REAL NOT NULL DEFAULT 1.0,
+        valid_from     TEXT,
+        valid_to       TEXT,
+        created_at     TEXT NOT NULL,
+        invalidated_at TEXT,
+        metadata_json  TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (vault, id)
+    )""",
+    "graph_items": """CREATE TABLE IF NOT EXISTS graph_items (
+        vault     TEXT NOT NULL,
+        item_id   TEXT NOT NULL,
+        namespace TEXT NOT NULL DEFAULT '/',
+        PRIMARY KEY (vault, item_id)
+    )""",
+    "graph_node_items": """CREATE TABLE IF NOT EXISTS graph_node_items (
+        vault   TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        PRIMARY KEY (vault, node_id, item_id)
+    )""",
+    "graph_edge_items": """CREATE TABLE IF NOT EXISTS graph_edge_items (
+        vault   TEXT NOT NULL,
+        edge_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        PRIMARY KEY (vault, edge_id, item_id)
+    )""",
+    "graph_meta": """CREATE TABLE IF NOT EXISTS graph_meta (
+        vault   TEXT PRIMARY KEY,
+        version INTEGER NOT NULL DEFAULT 0
+    )""",
 }
 
 # Tables keyed by (vault, id) since front #3 — the ones the migration rebuilds.
@@ -68,6 +117,13 @@ _INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_memory_entries_memory_type ON memory_entries(memory_type)",
     "CREATE INDEX IF NOT EXISTS idx_memory_entries_created_at ON memory_entries(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_memory_entries_expires_at ON memory_entries(expires_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_live ON graph_edges"
+    "(vault, source, relation, target) WHERE invalidated_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(vault, source)",
+    "CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(vault, target)",
+    "CREATE INDEX IF NOT EXISTS idx_graph_items_scope ON graph_items(vault, namespace)",
+    "CREATE INDEX IF NOT EXISTS idx_graph_node_items_item ON graph_node_items(vault, item_id)",
+    "CREATE INDEX IF NOT EXISTS idx_graph_edge_items_item ON graph_edge_items(vault, item_id)",
 ]
 
 

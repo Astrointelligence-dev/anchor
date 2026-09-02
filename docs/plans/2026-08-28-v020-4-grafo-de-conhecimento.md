@@ -311,20 +311,47 @@ de notas quando um vault real tiver duplicatas); `GraphIndexer` é add-only
 
 ### C. Persistência + CLI
 
-- [ ] `storage/sqlite/_graph_store.py` (`SqliteGraphStore` + twin async):
+- [x] `storage/sqlite/_graph_store.py` (`SqliteGraphStore` + twin async):
       `graph_nodes`, `graph_edges`, `graph_node_items`, `graph_edge_items`
       em `_TABLES` com PK `(vault, …)`, índice único parcial `WHERE
       invalidated_at IS NULL`, `_SCOPED_TABLES`; visibilidade por
       `EXISTS` + `scope_sql_clauses(scope, "namespace")` (`_where.py:156`).
       `subgraph` carrega o visível de uma vez (`ponytail:` teto ~50k arestas,
       paginação/CTE quando doer).
-- [ ] `storage/postgres/_graph_store.py`: mesmo schema, `COLLATE "C"`,
+- [x] `storage/postgres/_graph_store.py`: mesmo schema, `COLLATE "C"`,
       integração com docker (`ANCHOR_TEST_POSTGRES_DSN`) + fake asyncpg.
-- [ ] Fixture `make_graph_store(vault)` em `tests/test_storage/conftest.py`;
+- [x] Fixture `make_graph_store(vault)` em `tests/test_storage/conftest.py`;
       teste de isolamento entre vaults num só `.db`.
-- [ ] CLI: `anchor index --graph` (roda `GraphIndexer` com os extratores
+- [x] CLI: `anchor index --graph` (roda `GraphIndexer` com os extratores
       determinísticos) e `anchor graph query|path|explain|hubs|backlinks`.
-- [ ] Remover o worktree `.worktrees/storage-layer-gaps` (branch fica).
+- [x] Remover o worktree `.worktrees/storage-layer-gaps` (branch fica).
+
+**Fase C entregue** (sessão 11). `SqliteGraphStore` (tabelas `graph_nodes`,
+`graph_edges`, `graph_items`, `graph_node_items`, `graph_edge_items`,
+`graph_meta`, PK `(vault, …)`, índice único parcial `WHERE invalidated_at IS
+NULL`, `graph_items(vault, namespace)` para o range de escopo) e
+`PostgresGraphStore` (mesmo schema, `COLLATE "C"`, `BIGSERIAL seq` no lugar
+do rowid, JSONB) com a regra de visibilidade escrita **uma vez** em
+`storage/_graph_sql.py` e aplicada em Python sobre linhas buscadas por
+índice — o in-memory é a referência e os três backends respondem igual
+(teste de contrato compara `subgraph`/`edges_of`/`node_items` sob 4 escopos ×
+3 instantes). Postgres rodado de verdade (`supabase/postgres:17.6.1.084` via
+docker, 7 testes: pgvector + grafo). CLI: `anchor index --graph` e `anchor
+graph query|path|explain|hubs|backlinks` com `--vault/--include/--exclude`.
+Worktree `.worktrees/storage-layer-gaps` removido (branch mantido como
+referência).
+
+Desvios: `AsyncSqliteGraphStore` delega ao store síncrono via
+`asyncio.to_thread` (é o que o aiosqlite faz por baixo; conexões do manager
+são thread-local) — `ponytail:` twin nativo quando o grafo estiver num
+caminho async quente; `PostgresGraphStore.version` é contador in-process
+(caches derivados vivem in-process; `graph_meta` quando outro processo
+precisar ver); sem teste com fake asyncpg — a integração real substituiu
+(fake que emula SQL seria um segundo motor); **`KnowledgeGraph` é síncrono
+e o Postgres é async** — a API de navegação sobre Postgres precisa de um
+`AsyncKnowledgeGraph` (follow-up; o store cumpre o protocolo e é testado
+direto). Ordem de `edges_of` fixada no protocolo: saídas primeiro, depois
+entradas, inserção dentro de cada grupo.
 
 ### D. Extrator LLM + resolução de entidade (opt-in; default ligado para memória)
 

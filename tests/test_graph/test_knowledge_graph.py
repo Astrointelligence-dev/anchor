@@ -24,14 +24,14 @@ def _basic() -> KnowledgeGraph:
     return g
 
 
-def _campaign() -> KnowledgeGraph:
+def _campaign(g: KnowledgeGraph | None = None) -> KnowledgeGraph:
     """hero -knows-> villain -rules-> city; hero -lives_in-> city;
     hero -allied_with-> ally -lives_in-> city.
 
     The villain is evidenced only by a /secret item — the decoy every
-    scope test hides.
+    scope test hides. Pass a graph to build the same world on any store.
     """
-    g = KnowledgeGraph()
+    g = g if g is not None else KnowledgeGraph()
     for name in ("hero", "villain", "city", "ally"):
         g.add_node(name)
     g.link_item("hero", "doc-1", "/public")
