@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!-- --8<-- [start:releases] -->
 ## [Unreleased]
+
+## [0.2.0] - 2026-09-08
 
 ### Breaking
 - **`TimeoutError` renamed to `LLMTimeoutError`** (`anchor` and `anchor.llm`): the old name shadowed the builtin, so `from anchor import *` or an `except TimeoutError` after the import silently changed meaning. Catch provider timeouts with `LLMTimeoutError` (or `ProviderError`); the builtin keeps meaning asyncio/socket timeouts
@@ -198,3 +201,4 @@ branding, and documentation (verified against the published sdist).
 - JSON file-backed persistent memory store
 - CLI with index and query commands (via typer+rich)
 - 961 tests with 94% coverage
+<!-- --8<-- [end:releases] -->
