@@ -123,18 +123,29 @@ class MemoryConsolidator(Protocol):
         """Consolidate new memory entries against existing ones.
 
         For each new entry, the implementation decides whether to add it,
-        update an existing entry, delete an existing entry, or take no
+        update an existing entry, invalidate an existing entry, or take no
         action.
 
         Parameters:
             new_entries: Newly extracted ``MemoryEntry`` objects to be
                 consolidated.
-            existing: All entries currently in the memory store.
+            existing: Candidate entries already in the store — all of
+                them, or a similarity-selected subset.
 
         Returns:
-            A list of ``(MemoryOperation, entry | None)`` tuples.  For
-            ``ADD`` and ``UPDATE`` operations the entry must be non-None.
-            For ``DELETE`` and ``NONE`` operations the entry may be None.
+            A list of ``(MemoryOperation, entry)`` tuples. The ``entry``
+            slot names the target of the operation:
+
+            - ``ADD`` — the new entry to store.
+            - ``UPDATE`` — the existing entry rewritten **under its own
+              id** (``store.add`` overwrites by id; a fresh id is a
+              silent ADD).
+            - ``DELETE`` — the existing entry to invalidate. The applier
+              soft-deletes it (``MemoryEntry.invalidate``: hidden from
+              ``search``/``list_all``, kept as history until the garbage
+              collector's retention elapses). ``(DELETE, None)`` has no
+              target and is a no-op.
+            - ``NONE`` — ``None``; nothing to do.
         """
         ...
 

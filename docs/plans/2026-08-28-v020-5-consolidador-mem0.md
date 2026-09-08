@@ -77,15 +77,15 @@ o LLM é o do agente, injetado; `SimilarityConsolidator` continua default.
 ## Execução (um commit por fase, suíte verde antes de cada)
 
 ### Fase A — protocolo, DELETE aplicado, grafo, GC
-- [ ] `protocols/memory.py`: docstring de `consolidate` — `existing` =
+- [x] `protocols/memory.py`: docstring de `consolidate` — `existing` =
       candidatos; DELETE carrega a existente a invalidar; NONE → `None`.
-- [ ] `pipeline/memory_steps.py`: ramo DELETE grava a entry marcada
+- [x] `pipeline/memory_steps.py`: ramo DELETE grava a entry marcada
       (`store.add`), `(DELETE, None)` = no-op documentado.
-- [ ] `ingestion/graph_extractors.py`: `GraphIndexingEntryStore.add` com
+- [x] `ingestion/graph_extractors.py`: `GraphIndexingEntryStore.add` com
       `entry.is_expired` → grava + `unlink_item`.
-- [ ] `memory/gc.py`: `retention: timedelta | None` — expirado com
+- [x] `memory/gc.py`: `retention: timedelta | None` — expirado com
       `invalidated_by` só cai após `retention`.
-- [ ] Testes: ramo DELETE; decorador; GC retention; `expires_at` no contrato
+- [x] Testes: ramo DELETE; decorador; GC retention; `expires_at` no contrato
       compartilhado para SQLite/Postgres/Redis.
 
 ### Fase B — `LLMExtractor` + `LLMConsolidator`

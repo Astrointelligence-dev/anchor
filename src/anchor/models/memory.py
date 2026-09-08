@@ -86,6 +86,17 @@ class MemoryEntry(BaseModel):
             }
         )
 
+    def invalidate(self, *, by: str | None = None) -> MemoryEntry:
+        """Return a copy expired now — a soft delete.
+
+        The entry drops out of ``search``/``list_all`` but stays readable
+        through ``list_all_unfiltered`` until the garbage collector's
+        retention elapses. *by* records the id of the entry that superseded
+        it in ``metadata["invalidated_by"]``.
+        """
+        metadata = {**self.metadata, "invalidated_by": by} if by else self.metadata
+        return self.model_copy(update={"expires_at": datetime.now(UTC), "metadata": metadata})
+
 
 class FactType(StrEnum):
     """Classification of key facts extracted during progressive summarization."""

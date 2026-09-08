@@ -93,22 +93,21 @@ class TestGraphIndexingEntryStore:
         store.add(MemoryEntry(id="e1", content="alice carol"))
         assert graph.neighbors("alice") == ["carol"]
         assert graph.items("bob") == []
-        # the garbage collector deletes straight on the store
-        expired = MemoryEntry(
-            id="e2", content="dave erin", expires_at=datetime.now(UTC) - timedelta(days=1)
-        )
-        store.add(expired)
+        # a soft delete (same text, now expired) takes its evidence with it
+        past = datetime.now(UTC) - timedelta(days=1)
+        store.add(MemoryEntry(id="e2", content="dave erin"))
         assert graph.items("dave") == ["e2"]
-        MemoryGarbageCollector(store).collect_expired()
+        store.add(MemoryEntry(id="e2", content="dave erin", expires_at=past))
         assert graph.items("dave") == []
-        # clear unlinks expired entries too
-        store.add(
-            MemoryEntry(
-                id="e3", content="fay gus", expires_at=datetime.now(UTC) - timedelta(days=1)
-            )
-        )
-        store.clear()
+        assert {e.id for e in store.list_all_unfiltered()} == {"e1", "e2"}  # history kept
+        # an entry arriving already expired never evidences the graph
+        store.add(MemoryEntry(id="e3", content="fay gus", expires_at=past))
         assert graph.items("fay") == []
+        # the garbage collector deletes straight on the store
+        MemoryGarbageCollector(store).collect_expired()
+        assert {e.id for e in store.list_all_unfiltered()} == {"e1"}
+        # clear unlinks everything
+        store.clear()
         assert graph.items("alice") == []
         assert store.list_all() == []
         assert store.inner is inner

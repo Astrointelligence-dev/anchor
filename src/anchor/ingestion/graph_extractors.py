@@ -378,8 +378,9 @@ class GraphIndexingEntryStore:
     Wrap the persistent store once and every writer — ``MemoryManager``,
     the pipeline's consolidation step, ``MemoryGarbageCollector`` — keeps
     the graph honest without knowing it exists: ``add`` re-extracts the
-    entry (unless its content is unchanged), ``delete`` and ``clear`` take
-    the evidence with them. Everything else forwards to the wrapped store.
+    entry (unless its content is unchanged), while ``add`` of an expired
+    entry (a soft delete), ``delete`` and ``clear`` take the evidence with
+    them. Everything else forwards to the wrapped store.
     """
 
     __slots__ = ("_indexer", "_inner")
@@ -399,6 +400,11 @@ class GraphIndexingEntryStore:
     def add(self, entry: MemoryEntry) -> None:
         current = getattr(self._inner, "get", lambda _id: None)(entry.id)
         self._inner.add(entry)
+        if entry.is_expired:
+            # A soft delete (or an entry arriving already expired): hidden from
+            # list_all, so its evidence leaves the graph — same as delete.
+            self._indexer.graph.unlink_item(entry.id)
+            return
         if current is not None and current.content == entry.content:
             return  # same text: the graph already has this evidence, no re-extraction
         self._indexer.graph.unlink_item(entry.id)

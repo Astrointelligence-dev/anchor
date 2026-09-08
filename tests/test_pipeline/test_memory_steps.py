@@ -510,6 +510,36 @@ class TestAutoPromotionStepConsolidation:
         # Should have 2: original + updated
         assert len(stored) == 2
 
+    def test_consolidator_delete_invalidates_the_target(self) -> None:
+        """DELETE is a soft delete: the target leaves list_all/search but stays
+        readable unfiltered (history); a target-less DELETE is a no-op."""
+        store = InMemoryEntryStore()
+        store.add(MemoryEntry(id="old", content="User lives in São Paulo"))
+
+        def extract_fn(turns: list[ConversationTurn]) -> list[dict[str, Any]]:
+            return [{"content": "User moved to Rio"}]
+
+        class MoveConsolidator:
+            def consolidate(
+                self,
+                new_entries: list[MemoryEntry],
+                existing: list[MemoryEntry],
+            ) -> list[tuple[str, MemoryEntry | None]]:
+                return [("delete", existing[0]), ("add", new_entries[0]), ("delete", None)]
+
+        step = auto_promotion_step(
+            extractor=CallbackExtractor(extract_fn=extract_fn),
+            store=store,
+            consolidator=MoveConsolidator(),  # type: ignore[arg-type]
+        )
+        step.execute(_make_memory_items(1), _make_query())
+
+        assert [e.content for e in store.list_all()] == ["User moved to Rio"]
+        assert store.search("Paulo") == []
+        old = {e.id: e for e in store.list_all_unfiltered()}["old"]
+        assert old.is_expired
+        assert old.content == "User lives in São Paulo"
+
 
 # ===========================================================================
 # TestAutoPromotionStepPassthrough

@@ -30,23 +30,26 @@ def _store_with_consolidation(
     store: MemoryEntryStore,
     consolidator: MemoryConsolidator | None,
 ) -> None:
-    """Persist entries, optionally deduplicating via a consolidator.
+    """Persist entries, optionally consolidating via a consolidator.
 
-    If *consolidator* is provided, new entries are consolidated against
-    entries already in the store.  Only ``ADD`` and ``UPDATE`` operations
-    result in a ``store.add()`` call.
-
-    When no consolidator is configured, every entry is added directly.
+    With a *consolidator*, each ``(operation, entry)`` it returns is applied
+    to the store: ``ADD`` and ``UPDATE`` write the entry, ``DELETE``
+    invalidates it (``MemoryEntry.invalidate`` — a soft delete hidden from
+    ``search``/``list_all`` and kept as history until the garbage
+    collector's retention elapses); ``NONE`` and a target-less ``DELETE``
+    do nothing. Without a consolidator every entry is added directly.
     """
-    if consolidator is not None:
-        existing = store.list_all()
-        actions = consolidator.consolidate(entries, existing)
-        for action, entry in actions:
-            if action in (MemoryOperation.ADD, MemoryOperation.UPDATE) and entry is not None:
-                store.add(entry)
-    else:
+    if consolidator is None:
         for entry in entries:
             store.add(entry)
+        return
+    for action, target in consolidator.consolidate(entries, store.list_all()):
+        if target is None:
+            continue
+        if action in (MemoryOperation.ADD, MemoryOperation.UPDATE):
+            store.add(target)
+        elif action == MemoryOperation.DELETE:
+            store.add(target if target.is_expired else target.invalidate())
 
 
 def graph_retrieval_step(

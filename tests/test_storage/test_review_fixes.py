@@ -82,6 +82,9 @@ class _FakeRedis:
     def smembers(self, key):
         return set(self.sets.get(key, set()))
 
+    def mget(self, keys):
+        return [self.kv.get(k) for k in keys]
+
     def pipeline(self):
         return _FakePipeline(self)
 

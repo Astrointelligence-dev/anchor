@@ -13,12 +13,15 @@ garbage collector can identify and delete them.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from anchor.memory.callbacks import MemoryCallback, _fire_memory_callback
 from anchor.protocols.storage import GarbageCollectableStore
 
 if TYPE_CHECKING:
+    from datetime import timedelta
+
     from anchor.models.memory import MemoryEntry
     from anchor.protocols.memory import MemoryDecay
 
@@ -92,19 +95,36 @@ class MemoryGarbageCollector:
        those whose score falls below ``retention_threshold``.
 
     Both phases fire the appropriate ``MemoryCallback`` hooks.
+
+    *retention* keeps expired entries around for that long before the
+    expiry phase deletes them, so an invalidated memory (a consolidator's
+    ``DELETE``, see ``MemoryEntry.invalidate``) stays readable through
+    ``list_all_unfiltered`` as history. ``None`` (default) deletes on the
+    first collection.
     """
 
-    __slots__ = ("_callbacks", "_decay", "_store")
+    __slots__ = ("_callbacks", "_decay", "_retention", "_store")
 
     def __init__(
         self,
         store: GarbageCollectableStore,
         decay: MemoryDecay | None = None,
         callbacks: list[MemoryCallback] | None = None,
+        *,
+        retention: timedelta | None = None,
     ) -> None:
         self._store = store
         self._decay = decay
         self._callbacks = callbacks or []
+        self._retention = retention
+
+    def _collectable(self, entry: MemoryEntry) -> bool:
+        """Expired — and past the retention window when one is configured."""
+        if entry.expires_at is None or not entry.is_expired:
+            return False
+        if self._retention is None:
+            return True
+        return entry.expires_at + self._retention <= datetime.now(UTC)
 
     def collect(
         self,
@@ -159,7 +179,7 @@ class MemoryGarbageCollector:
             The list of entries that were (or would be) pruned.
         """
         all_entries = _entries if _entries is not None else self._store.list_all_unfiltered()
-        expired = [e for e in all_entries if e.is_expired]
+        expired = [e for e in all_entries if self._collectable(e)]
 
         if expired and not dry_run:
             for entry in expired:

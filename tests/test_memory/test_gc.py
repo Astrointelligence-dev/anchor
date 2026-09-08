@@ -598,3 +598,36 @@ class TestIntegration:
         assert stats.total_remaining == 1
         assert len(store.list_all_unfiltered()) == 1
         assert store.list_all_unfiltered()[0].id == "e3"
+
+
+# ---------------------------------------------------------------------------
+# Retention (history of invalidated entries)
+# ---------------------------------------------------------------------------
+
+
+class TestRetention:
+    def test_expired_entries_survive_until_retention_elapses(self) -> None:
+        store = SimpleStore()
+        now = datetime.now(UTC)
+        store.add(MemoryEntry(id="fresh", content="a", expires_at=now - timedelta(minutes=1)))
+        store.add(MemoryEntry(id="stale", content="b", expires_at=now - timedelta(hours=2)))
+        store.add(MemoryEntry(id="live", content="c"))
+
+        stats = MemoryGarbageCollector(store, retention=timedelta(hours=1)).collect()
+
+        assert stats == GCStats(
+            expired_pruned=1, decayed_pruned=0, total_remaining=2, dry_run=False
+        )
+        assert {e.id for e in store.list_all_unfiltered()} == {"fresh", "live"}
+
+    def test_invalidate_is_a_soft_delete_the_collector_honours(self) -> None:
+        store = SimpleStore()
+        old = MemoryEntry(id="old", content="lives in SP")
+        store.add(old.invalidate(by="new"))
+
+        kept = store.list_all_unfiltered()[0]
+        assert kept.is_expired
+        assert kept.metadata == {"invalidated_by": "new"}
+        assert kept.content_hash == old.content_hash  # content untouched
+        assert MemoryGarbageCollector(store, retention=timedelta(days=1)).collect_expired() == []
+        assert [e.id for e in MemoryGarbageCollector(store).collect_expired()] == ["old"]
