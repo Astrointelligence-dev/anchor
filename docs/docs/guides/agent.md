@@ -380,6 +380,21 @@ def search_kb(query: str, max_results: int = 5) -> str:
     instead of basic JSON Schema type checking. This gives you richer constraints
     like `ge=`, `le=`, `pattern=`, etc.
 
+### Async Tools
+
+An `async def` under `@tool` (or as `AgentTool.fn`) is awaited: on the async path
+(`achat`/`astream`) with the tool's `timeout`, and from `chat()` in a fresh event loop.
+A sync loop driven from inside a running loop cannot await it, so the tool returns an
+error result telling the model to use the async path.
+
+```python
+@tool
+async def fetch(url: str) -> str:
+    """Fetch a page."""
+    async with httpx.AsyncClient() as client:
+        return (await client.get(url)).text
+```
+
 ### Three Tiers of Tool Creation
 
 | Tier | Approach | Schema Source |

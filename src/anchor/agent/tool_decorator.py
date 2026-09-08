@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import overload
 
 from pydantic import BaseModel
@@ -16,7 +16,7 @@ from anchor.agent.schema import (
 
 
 @overload
-def tool(fn: Callable[..., str]) -> AgentTool: ...
+def tool(fn: Callable[..., str | Awaitable[str]]) -> AgentTool: ...
 
 
 @overload
@@ -29,11 +29,11 @@ def tool(
     requires_approval: bool = False,
     read_only: bool = False,
     max_result_tokens: int | None = None,
-) -> Callable[[Callable[..., str]], AgentTool]: ...
+) -> Callable[[Callable[..., str | Awaitable[str]]], AgentTool]: ...
 
 
 def tool(
-    fn: Callable[..., str] | None = None,
+    fn: Callable[..., str | Awaitable[str]] | None = None,
     *,
     name: str | None = None,
     description: str | None = None,
@@ -41,7 +41,7 @@ def tool(
     requires_approval: bool = False,
     read_only: bool = False,
     max_result_tokens: int | None = None,
-) -> AgentTool | Callable[[Callable[..., str]], AgentTool]:
+) -> AgentTool | Callable[[Callable[..., str | Awaitable[str]]], AgentTool]:
     """Create an :class:`AgentTool` from a decorated function.
 
     Supports both bare and parameterised usage::
@@ -87,7 +87,7 @@ def tool(
         )
 
     # Parameterised @tool(...) usage — return a decorator
-    def decorator(func: Callable[..., str]) -> AgentTool:
+    def decorator(func: Callable[..., str | Awaitable[str]]) -> AgentTool:
         return _build_agent_tool(
             func, name=name, description=description, input_model=input_model,
             requires_approval=requires_approval, read_only=read_only,
@@ -98,7 +98,7 @@ def tool(
 
 
 def _build_agent_tool(
-    fn: Callable[..., str],
+    fn: Callable[..., str | Awaitable[str]],
     *,
     name: str | None,
     description: str | None,
