@@ -149,7 +149,7 @@ output, ADD-only do mem0 v2. Motivos no doc de pesquisa.
 | Commits | `4e1661f..HEAD` na dev (pesquisa+plano, fases A–E, calibração, ritual, sweep, condições do juiz) |
 | Suíte | 3140 verdes / 10 skipped (baseline 3088), Postgres real +1 (docker pgvector), ruff 150 = baseline, mypy 140 = baseline |
 | Golden set (48 casos, 10 cenários) — baselines determinísticos | adiciona-tudo **0,271**; `SimilarityConsolidator` (bag-of-words, 0,5) **0,354** — por desenho: não enxergam contradição |
-| Golden set — par LLM (sonnet via `claude_cli`, sem `embed_fn`) | run 1 **0,875** (99 chamadas), run 2 (prompt "só o fato atual") **0,896** (89), run 3 (pós-ritual) **0,917** (98); ~5,5 min por rodada; piso do teste live: 0,75 |
+| Golden set — par LLM (sonnet via `claude_cli`, sem `embed_fn`) | run 1 **0,875** (99 chamadas), run 2 (prompt "só o fato atual") **0,896** (89), run 3 (pós-ritual) **0,917** (98), run 4 (pós-juiz) **0,9375** (97); ~5,5 min por rodada; piso do teste live: 0,75 |
 | Cenário do plano (SP→Rio) live | `UPDATE` no mesmo id `m1`, `previous_content` = "User lives in São Paulo", data relativa resolvida, **2 chamadas** (1 extração + 1 consolidação), 6,5 s |
 | Custo por turno | 1 chamada de extração por turno com turnos novos + ≤1 de consolidação; hash igual, store vazio e (com `embed_fn`) fato sem vizinho acima de `new_threshold` não chamam o modelo; cada fato cujos candidatos não couberam no cap vira ADD sem chamada |
 
