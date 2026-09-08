@@ -805,3 +805,28 @@ class TestSelfRegistration:
         from anchor.llm.providers.litellm import LiteLLMProvider
         from anchor.llm.registry import _PROVIDERS
         assert _PROVIDERS["litellm"] is LiteLLMProvider
+
+
+# ---------------------------------------------------------------------------
+# Test: provider-level extra_body reaches litellm too (it lives on the base)
+# ---------------------------------------------------------------------------
+
+
+def test_provider_extra_body_reaches_litellm_and_call_wins():
+    from anchor.llm.models import Message as _Message
+    from anchor.llm.models import Role as _Role
+    from tests.llm.providers.test_openai import _sdk_response
+
+    fake = MagicMock()
+    fake.completion.return_value = _sdk_response()
+    with patch.dict(sys.modules, {"litellm": fake}):
+        provider = _make_provider(
+            extra_body={"provider": {"order": ["x"]}, "reasoning": {"effort": "high"}},
+        )
+        provider._do_invoke(
+            [_Message(role=_Role.USER, content="Hi")],
+            tools=None,
+            extra_body={"reasoning": {"effort": "low"}},
+        )
+    sent = fake.completion.call_args.kwargs["extra_body"]
+    assert sent == {"provider": {"order": ["x"]}, "reasoning": {"effort": "low"}}

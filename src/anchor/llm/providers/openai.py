@@ -70,6 +70,10 @@ class OpenAIProvider(BaseLLMProvider):
     Also serves as a base class for GrokProvider, OpenRouterProvider, and
     OllamaProvider — all OpenAI-compatible APIs — which override
     `provider_name` and `_resolve_api_key()` and pass a custom `base_url`.
+
+    ``extra_body`` is merged into every request body (per-call
+    ``extra_body`` wins key by key) — the escape hatch for params the SDK
+    has no field for, e.g. OpenRouter ``provider``/``reasoning``.
     """
 
     provider_name = "openai"
@@ -120,7 +124,7 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> LLMResponse:
         client = self._get_client()
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, **kwargs,
+            self._model, convert_messages(messages), tools, **self._call_options(kwargs),
         )
 
         try:
@@ -138,7 +142,11 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> Iterator[StreamChunk]:
         client = self._get_client()
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, stream=True, **kwargs,
+            self._model,
+            convert_messages(messages),
+            tools,
+            stream=True,
+            **self._call_options(kwargs),
         )
 
         try:
@@ -156,7 +164,7 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> LLMResponse:
         client = self._get_async_client()
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, **kwargs,
+            self._model, convert_messages(messages), tools, **self._call_options(kwargs),
         )
 
         try:
@@ -174,7 +182,11 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> AsyncIterator[StreamChunk]:
         client = self._get_async_client()
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, stream=True, **kwargs,
+            self._model,
+            convert_messages(messages),
+            tools,
+            stream=True,
+            **self._call_options(kwargs),
         )
 
         try:

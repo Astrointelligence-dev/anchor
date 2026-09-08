@@ -170,7 +170,12 @@ def build_call_kwargs(
     stream: bool = False,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Build the shared Chat Completions kwargs (openai/litellm family)."""
+    """Build the shared Chat Completions kwargs (openai/litellm family).
+
+    ``extra_body`` (a dict) is forwarded verbatim for body params the SDK
+    has no field for — OpenRouter ``provider``/``reasoning``/``usage``,
+    vendor extensions. Streaming asks for the final usage-only chunk.
+    """
     call_kwargs: dict[str, Any] = {
         "model": model,
         "messages": converted,
@@ -178,6 +183,11 @@ def build_call_kwargs(
     }
     if stream:
         call_kwargs["stream"] = True
+        # A final usage-only chunk: streamed turns carry real token counts
+        # (and, on OpenRouter, the billed cost) instead of tokenizer estimates.
+        # ponytail: unconditional; a strict OpenAI-compatible server that 400s
+        # on unknown params would need a provider flag — none has shown up yet
+        call_kwargs["stream_options"] = {"include_usage": True}
     if tools:
         call_kwargs["tools"] = [convert_tool(t) for t in tools]
     if kwargs.get("temperature") is not None:
@@ -186,12 +196,42 @@ def build_call_kwargs(
         call_kwargs["stop"] = kwargs["stop"]
     if kwargs.get("tool_choice") is not None and tools:
         call_kwargs["tool_choice"] = convert_tool_choice(kwargs["tool_choice"])
+    if kwargs.get("extra_body"):
+        call_kwargs["extra_body"] = kwargs["extra_body"]
     return call_kwargs
 
 
 # ---------------------------------------------------------------------------
 # Response parsing
 # ---------------------------------------------------------------------------
+
+
+def parse_usage(usage: Any) -> Usage | None:
+    """Read an OpenAI-compatible ``usage`` object; ``None`` when absent.
+
+    OpenRouter adds ``cost`` (billed USD, when the body carries
+    ``usage: {"include": true}``) and both OpenAI and OpenRouter report
+    cached prompt tokens under ``prompt_tokens_details.cached_tokens``.
+    Anything else — an SDK object without those fields, a mock, a server
+    that omits usage — degrades to plain token counts, never to an error.
+    """
+    if usage is None:
+        return None
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
+    if not isinstance(prompt, int) or not isinstance(completion, int):
+        return None
+    total = getattr(usage, "total_tokens", None)
+    cost = getattr(usage, "cost", None)
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
+    return Usage(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=total if isinstance(total, int) else prompt + completion,
+        total_cost=float(cost) if isinstance(cost, (int, float)) else None,
+        cache_read_tokens=cached if isinstance(cached, int) else 0,
+    )
 
 
 def parse_response(response: Any, provider_name: str) -> LLMResponse:
@@ -217,10 +257,8 @@ def parse_response(response: Any, provider_name: str) -> LLMResponse:
                 )
             )
 
-    usage = Usage(
-        prompt_tokens=response.usage.prompt_tokens,
-        completion_tokens=response.usage.completion_tokens,
-        total_tokens=response.usage.total_tokens,
+    usage = parse_usage(getattr(response, "usage", None)) or Usage(
+        prompt_tokens=0, completion_tokens=0, total_tokens=0,
     )
 
     return LLMResponse(
@@ -247,8 +285,10 @@ def parse_stream_chunks(chunk: Any) -> list[StreamChunk]:
     ``finish_reason`` so fragments arriving on the final chunk still
     reach the accumulator.
     """
+    usage = parse_usage(getattr(chunk, "usage", None))
     if not chunk.choices:
-        return []
+        # The usage-only chunk that stream_options.include_usage appends
+        return [StreamChunk(usage=usage)] if usage is not None else []
 
     choice = chunk.choices[0]
     delta = choice.delta
@@ -280,6 +320,8 @@ def parse_stream_chunks(chunk: Any) -> list[StreamChunk]:
     if finish_reason is not None:
         chunks.append(StreamChunk(stop_reason=map_stop_reason(finish_reason)))
 
-    return chunks
+    # Some servers (OpenRouter) put usage on the final content chunk instead
+    if usage is not None:
+        chunks.append(StreamChunk(usage=usage))
 
-    return None
+    return chunks

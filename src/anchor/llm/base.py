@@ -7,6 +7,7 @@ The ABC provides shared retry, timeout, and property logic.
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Iterator
@@ -88,6 +89,7 @@ class BaseLLMProvider(ABC):
         base_url: str | None = None,
         max_retries: int = 2,
         timeout: float = 60.0,
+        extra_body: dict[str, Any] | None = None,
         **kwargs: Any,
     ):
         self._model = model
@@ -95,6 +97,18 @@ class BaseLLMProvider(ABC):
         self._base_url = base_url
         self._max_retries = max_retries
         self._timeout = timeout
+        # Body params the SDK has no field for, merged into every request by
+        # the OpenAI-compatible family (openai/grok/openrouter/ollama/litellm);
+        # a per-call ``extra_body`` wins key by key. Deep-copied once so the
+        # caller's nested dicts are not aliased.
+        self._extra_body: dict[str, Any] = copy.deepcopy(extra_body) if extra_body else {}
+
+    def _call_options(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Per-call options with the provider's ``extra_body`` folded in."""
+        if not self._extra_body:
+            return kwargs
+        merged = {**self._extra_body, **(kwargs.get("extra_body") or {})}
+        return {**kwargs, "extra_body": merged}
 
     @property
     def model_id(self) -> str:

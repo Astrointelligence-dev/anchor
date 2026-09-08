@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -36,7 +36,7 @@ class AgentTool(BaseModel):
     name: str
     description: str
     input_schema: dict[str, Any]
-    fn: Callable[..., str]
+    fn: Callable[..., str | Awaitable[str]]
     input_model: type[BaseModel] | None = None
     timeout: float | None = None
     defer_loading: bool = False

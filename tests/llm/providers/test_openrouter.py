@@ -11,7 +11,9 @@ Tests cover:
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+from anchor.llm.models import Message, Role
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -103,3 +105,42 @@ class TestRegistry:
         _import_provider()
         assert "openrouter" in _PROVIDERS
         assert _PROVIDERS["openrouter"] is _import_provider()
+
+
+# ---------------------------------------------------------------------------
+# Test: billed cost (usage.include) and extra_body merge
+# ---------------------------------------------------------------------------
+
+from tests.llm.providers.test_openai import _sdk_response, _usage_mock  # noqa: E402
+
+
+class TestUsageAndCost:
+    @patch("anchor.llm.providers.openai.openai")
+    def test_usage_include_is_requested_by_default(self, mock_openai):
+        provider = _make_provider()
+        mock_client = MagicMock()
+        mock_openai.OpenAI.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _sdk_response()
+
+        provider._do_invoke([Message(role=Role.USER, content="Hi")], tools=None)
+        sent = mock_client.chat.completions.create.call_args.kwargs["extra_body"]
+        assert sent == {"usage": {"include": True}}
+
+    @patch("anchor.llm.providers.openai.openai")
+    def test_caller_extra_body_is_merged_and_wins(self, mock_openai):
+        provider = _make_provider(
+            extra_body={"provider": {"order": ["Google AI Studio"]}, "usage": {"include": False}},
+        )
+        mock_client = MagicMock()
+        mock_openai.OpenAI.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _sdk_response()
+
+        provider._do_invoke([Message(role=Role.USER, content="Hi")], tools=None)
+        sent = mock_client.chat.completions.create.call_args.kwargs["extra_body"]
+        assert sent == {"provider": {"order": ["Google AI Studio"]}, "usage": {"include": False}}
+
+    def test_billed_cost_lands_in_total_cost(self):
+        provider = _make_provider()
+        out = provider._parse_response(_sdk_response(usage=_usage_mock(cost=0.0042)))
+        assert out.usage.total_cost == 0.0042
+        assert out.provider == "openrouter"

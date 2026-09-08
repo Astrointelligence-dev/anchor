@@ -9,6 +9,7 @@ Self-registers via register_provider() at module import time.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from anchor.llm.providers.openai import OpenAIProvider
 from anchor.llm.registry import register_provider
@@ -19,10 +20,19 @@ class OpenRouterProvider(OpenAIProvider):
 
     provider_name = "openrouter"
 
-    def __init__(self, model: str, base_url: str | None = None, **kwargs):
+    def __init__(
+        self,
+        model: str,
+        base_url: str | None = None,
+        extra_body: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(
             model=model,
             base_url=base_url or "https://openrouter.ai/api/v1",
+            # OpenRouter reports the billed cost (usage.cost) and cached/audio
+            # token details only when asked; the caller's extra_body wins.
+            extra_body={"usage": {"include": True}, **(extra_body or {})},
             **kwargs,
         )
 

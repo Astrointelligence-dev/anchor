@@ -5,14 +5,42 @@ on:
     branches: [main]
     paths:
       - 'docs/docs/**'
+      - 'CHANGELOG.md'
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      - name: Check DOCS_SYNC_TOKEN
+        id: token
+        env:
+          TOKEN: ${{ secrets.DOCS_SYNC_TOKEN }}
+        run: |
+          echo "DOCS_SYNC_TOKEN length: ${#TOKEN}"
+          if [ -n "$TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::DOCS_SYNC_TOKEN is missing or empty; astro-docs was not notified (see 02-repos/repo-astro-docs)"
+          fi
+
+      - name: Probe what the token can see on astro-docs
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_SYNC_TOKEN }}
+        run: |
+          # 404 = token cannot see the repo (wrong resource owner / pending org approval).
+          # The dispatch itself needs the token's Contents: write; a 403 there says so in
+          # X-Accepted-GitHub-Permissions (permissions below are the user's, not the token's)
+          gh api repos/Astrointelligence-dev/astro-docs --jq '{full_name, permissions}' \
+            || echo "token cannot access Astrointelligence-dev/astro-docs"
+
       - name: Dispatch to astro-docs
+        if: steps.token.outputs.present == 'true'
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.DOCS_SYNC_TOKEN }}
-          repository: artcgranja/astro-docs
+          repository: Astrointelligence-dev/astro-docs
           event-type: sync-anchor-docs
+          client-payload: '{"ref": "${{ github.ref_name }}", "sha": "${{ github.sha }}"}'

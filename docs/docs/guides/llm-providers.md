@@ -234,6 +234,30 @@ async for chunk in llm.astream(messages):
     print(chunk.content, end="")
 ```
 
+## Body Parameters and Billed Cost
+
+`extra_body` forwards JSON body parameters the SDK has no field for — OpenRouter's
+`provider` routing and `reasoning`, vendor extensions. Set it once on the provider
+(every request) or per call; the two are merged key by key and the call wins.
+
+```python
+from anchor.llm import create_provider
+
+llm = create_provider(
+    "openrouter/google/gemini-2.5-flash",
+    extra_body={"provider": {"order": ["Google AI Studio"], "allow_fallbacks": False}},
+)
+llm.invoke(messages, extra_body={"reasoning": {"effort": "low"}})
+```
+
+Applies to every OpenAI-compatible provider (`openai`, `grok`, `openrouter`, `ollama`,
+`litellm`; the option lives on the base provider). Streaming requests the final usage-only chunk (`stream_options.include_usage`),
+so `RoundUsage` carries the provider's real token counts instead of tokenizer estimates,
+and `prompt_tokens_details.cached_tokens` becomes `Usage.cache_read_tokens`.
+`OpenRouterProvider` also asks for `usage: {"include": true}` by default: the billed
+`usage.cost` lands in `Usage.total_cost`, which prices the round (`RoundUsage.cost_usd`)
+and feeds `UsageLimits.cost_limit`.
+
 ## Custom Providers
 
 Implement `BaseLLMProvider` to add support for a new backend:
