@@ -5,14 +5,25 @@ on:
     branches: [main]
     paths:
       - 'docs/docs/**'
+      - 'CHANGELOG.md'
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      # secrets are not allowed in `if:`; surface presence through env
+      HAS_TOKEN: ${{ secrets.DOCS_SYNC_TOKEN != '' }}
     steps:
+      - name: Skip when DOCS_SYNC_TOKEN is missing
+        if: env.HAS_TOKEN != 'true'
+        run: echo "::warning::DOCS_SYNC_TOKEN is not set; astro-docs was not notified (see 02-repos/repo-astro-docs)"
+
       - name: Dispatch to astro-docs
+        if: env.HAS_TOKEN == 'true'
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.DOCS_SYNC_TOKEN }}
           repository: artcgranja/astro-docs
           event-type: sync-anchor-docs
+          client-payload: '{"ref": "${{ github.ref_name }}", "sha": "${{ github.sha }}"}'
