@@ -175,7 +175,8 @@ _DECISION_PROMPT = (
     '- "add": new information — record it.\n'
     '- "update": the fact is about the same thing as an existing memory and changes or '
     "enriches it (a move, a changed preference, more detail): give \"target\" (the memory "
-    'index) and the full rewritten "content" that replaces it.\n'
+    'index) and the full rewritten "content" that replaces it — the current fact only; '
+    "the memory keeps its previous text itself, so never restate what changed.\n"
     '- "delete": an existing memory stopped being true and nothing replaces it: give '
     '"target".\n'
     '- "none": the fact is already captured by an existing memory.\n'
