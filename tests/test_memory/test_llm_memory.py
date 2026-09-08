@@ -316,7 +316,9 @@ class TestLLMConsolidatorRanking:
             ),
             *[
                 MemoryEntry(
-                    id=f"m{i}", content=f"User likes thing {i}", updated_at=now - timedelta(minutes=i)
+                    id=f"m{i}",
+                    content=f"User likes thing {i}",
+                    updated_at=now - timedelta(minutes=i),
                 )
                 for i in range(6)
             ],

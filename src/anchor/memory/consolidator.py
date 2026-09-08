@@ -265,9 +265,10 @@ class LLMConsolidator:
     per fact, capped at *max_candidates* in total; without embed_fn the
     ranking is word overlap (recency breaking ties) and, being uncalibrated,
     each fact is shown up to the whole cap. A fact none of whose candidates
-    made the cap is ``ADD`` without a call rather than asked blind. High similarity never decides ``NONE`` on its own: cosine
-    cannot tell a contradiction from a paraphrase (MemStrata, 2026), so that
-    band is exactly where the model decides.
+    made the cap is ``ADD`` without a call rather than asked blind. High
+    similarity never decides ``NONE`` on its own: cosine cannot tell a
+    contradiction from a paraphrase (MemStrata, 2026), so that band is
+    exactly where the model decides.
 
     Targets are indices into the candidates and are validated: an unknown
     ``update`` target degrades to ``ADD``, an unknown ``delete`` target is
