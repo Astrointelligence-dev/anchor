@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -15,17 +16,21 @@ from anchor.models.memory import (
     Role,
     _compute_content_hash,
 )
-from anchor.protocols.memory import ConversationMemory
+from anchor.protocols.memory import ConversationMemory, MemoryOperation
 from anchor.protocols.storage import MemoryEntryStore
 from anchor.protocols.tokenizer import Tokenizer
 from anchor.tokens.counter import get_default_counter
 
+from .callbacks import MemoryCallback, _fire_memory_callback
 from .progressive import ProgressiveSummarizationMemory
 from .sliding_window import SlidingWindowMemory
 from .summary_buffer import SummaryBufferMemory
 
 if TYPE_CHECKING:
     from anchor.ingestion.graph_extractors import GraphIndexer
+    from anchor.protocols.memory import MemoryConsolidator, MemoryExtractor
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryManager:
@@ -50,9 +55,29 @@ class MemoryManager:
     since facts carry no wikilinks. Entries that already exist when the
     graph is attached are not backfilled: run
     ``indexer.index_entries(store.list_all())`` once.
+
+    *extractor* and *consolidator* (opt-in, roadmap #5) turn the
+    conversation into long-term facts: ``remember()`` runs the extractor
+    over the last *extract_window* turns and applies the consolidator's
+    ADD / UPDATE / DELETE / NONE to the persistent store — the two-phase
+    update of the mem0 paper, with ``LLMExtractor(agent.llm)`` and
+    ``LLMConsolidator(agent.llm)``, or the cheap ``SimilarityConsolidator``.
+    An ``Agent`` calls ``after_turn()`` once per completed turn, which runs
+    ``remember()`` every *remember_every* turns (``0`` = only when you call
+    it). *callbacks* observe ``on_extraction`` and ``on_consolidation``.
     """
 
-    __slots__ = ("_conversation", "_persistent_store", "_tokenizer")
+    __slots__ = (
+        "_callbacks",
+        "_consolidator",
+        "_conversation",
+        "_extract_window",
+        "_extractor",
+        "_persistent_store",
+        "_remember_every",
+        "_tokenizer",
+        "_turns_since_remember",
+    )
 
     def __init__(
         self,
@@ -62,7 +87,24 @@ class MemoryManager:
         persistent_store: MemoryEntryStore | None = None,
         conversation_memory: ConversationMemory | None = None,
         graph: GraphIndexer | None = None,
+        extractor: MemoryExtractor | None = None,
+        consolidator: MemoryConsolidator | None = None,
+        extract_window: int = 10,
+        remember_every: int = 1,
+        callbacks: list[MemoryCallback] | None = None,
     ) -> None:
+        if extract_window <= 0:
+            msg = "extract_window must be a positive integer"
+            raise ValueError(msg)
+        if remember_every < 0:
+            msg = "remember_every must be >= 0 (0 = only on an explicit remember())"
+            raise ValueError(msg)
+        self._extractor = extractor
+        self._consolidator = consolidator
+        self._extract_window = extract_window
+        self._remember_every = remember_every
+        self._turns_since_remember = 0
+        self._callbacks = callbacks or []
         self._tokenizer = tokenizer or get_default_counter()
         if graph is not None and persistent_store is not None:
             from anchor.ingestion.graph_extractors import GraphIndexingEntryStore
@@ -251,6 +293,53 @@ class MemoryManager:
         )
         self._persistent_store.add(updated)
         return updated
+
+    # ---- Long-term memory from the conversation (roadmap #5) ----
+
+    def remember(self) -> list[tuple[MemoryOperation, MemoryEntry | None]]:
+        """Extract facts from the recent turns and consolidate them into the store.
+
+        Returns the operations applied — empty without an extractor, a
+        persistent store or turns. ``DELETE`` is the soft delete of
+        ``MemoryEntry.invalidate``. Fires ``on_extraction`` once and
+        ``on_consolidation`` per operation, and resets the ``after_turn``
+        counter. Errors propagate: this is the explicit call.
+        """
+        self._turns_since_remember = 0
+        if self._extractor is None or self._persistent_store is None:
+            return []
+        turns = self._conversation.turns[-self._extract_window :]
+        if not turns:
+            return []
+        entries = self._extractor.extract(turns)
+        _fire_memory_callback(self._callbacks, "on_extraction", turns, entries)
+        if not entries:
+            return []
+        from anchor.pipeline.memory_steps import _store_with_consolidation
+
+        outcomes = _store_with_consolidation(entries, self._persistent_store, self._consolidator)
+        for op, entry in outcomes:
+            new, existing = (None, entry) if op == MemoryOperation.DELETE else (entry, None)
+            _fire_memory_callback(self._callbacks, "on_consolidation", str(op), new, existing)
+        return outcomes
+
+    def after_turn(self) -> list[tuple[MemoryOperation, MemoryEntry | None]]:
+        """Count a completed turn; run ``remember()`` every *remember_every* turns.
+
+        Called by ``Agent`` after each turn. Like the eviction promoter, a
+        failure here is logged and never propagates — the answer has
+        already been delivered.
+        """
+        if self._remember_every == 0 or self._extractor is None:
+            return []
+        self._turns_since_remember += 1
+        if self._turns_since_remember < self._remember_every:
+            return []
+        try:
+            return self.remember()
+        except Exception:
+            logger.exception("remember() failed after the turn — ignoring to protect the agent")
+            return []
 
     # ---- Context assembly ----
 

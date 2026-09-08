@@ -501,3 +501,57 @@ def test_tool_calls_recorded_in_memory():
     assert "Hello, Alice!" in turns[1].content
     assert turns[2].role == "assistant"
     assert turns[2].content == "Done greeting!"
+
+
+# ---------------------------------------------------------------------------
+# Tests — after_turn: the conversation becomes long-term memory (roadmap #5)
+# ---------------------------------------------------------------------------
+
+
+class _CountingExtractor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract(self, turns):
+        self.calls += 1
+        return []
+
+
+def _remembering_memory() -> tuple[MemoryManager, _CountingExtractor]:
+    from anchor.storage.json_memory_store import InMemoryEntryStore
+
+    extractor = _CountingExtractor()
+    memory = MemoryManager(
+        conversation_tokens=2000,
+        tokenizer=_Tok(),
+        persistent_store=InMemoryEntryStore(),
+        extractor=extractor,
+    )
+    return memory, extractor
+
+
+def test_stream_remembers_once_per_completed_turn():
+    memory, extractor = _remembering_memory()
+    agent = _make_agent([_text_response("Hi!"), _text_response("Again!")], memory=memory)
+    list(agent.stream("Hello"))
+    assert extractor.calls == 1
+    list(agent.stream("More"))
+    assert extractor.calls == 2
+
+
+def test_abandoned_stream_does_not_remember():
+    memory, extractor = _remembering_memory()
+    agent = _make_agent([_text_response("Hi!")], memory=memory)
+    events = agent.stream("Hello")
+    next(events)
+    events.close()
+    assert extractor.calls == 0
+    assert memory.conversation.turns[0].content == "Hello"  # the finally still ran
+
+
+async def test_astream_remembers_once_per_completed_turn():
+    memory, extractor = _remembering_memory()
+    agent = _make_agent([_text_response("Hi!")], memory=memory)
+    async for _ in agent.astream("Hello"):
+        pass
+    assert extractor.calls == 1

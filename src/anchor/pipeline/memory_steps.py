@@ -29,7 +29,7 @@ def _store_with_consolidation(
     entries: list[MemoryEntry],
     store: MemoryEntryStore,
     consolidator: MemoryConsolidator | None,
-) -> None:
+) -> list[tuple[MemoryOperation, MemoryEntry | None]]:
     """Persist entries, optionally consolidating via a consolidator.
 
     With a *consolidator*, each ``(operation, entry)`` it returns is applied
@@ -38,18 +38,22 @@ def _store_with_consolidation(
     ``search``/``list_all`` and kept as history until the garbage
     collector's retention elapses); ``NONE`` and a target-less ``DELETE``
     do nothing. Without a consolidator every entry is added directly.
+    Returns the operations applied.
     """
     if consolidator is None:
         for entry in entries:
             store.add(entry)
-        return
+        return [(MemoryOperation.ADD, entry) for entry in entries]
+    applied: list[tuple[MemoryOperation, MemoryEntry | None]] = []
     for action, target in consolidator.consolidate(entries, store.list_all()):
-        if target is None:
-            continue
-        if action in (MemoryOperation.ADD, MemoryOperation.UPDATE):
+        if target is not None and action in (MemoryOperation.ADD, MemoryOperation.UPDATE):
             store.add(target)
-        elif action == MemoryOperation.DELETE:
-            store.add(target if target.is_expired else target.invalidate())
+        elif target is not None and action == MemoryOperation.DELETE:
+            if not target.is_expired:
+                target = target.invalidate()
+            store.add(target)
+        applied.append((action, target))
+    return applied
 
 
 def graph_retrieval_step(

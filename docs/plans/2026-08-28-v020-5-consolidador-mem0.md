@@ -100,11 +100,11 @@ o LLM é o do agente, injetado; `SimilarityConsolidator` continua default.
       `existing==[]` e hash-gate não chamam o LLM, extractor filtra `tool`.
 
 ### Fase C — `MemoryManager.remember()` + `Agent`
-- [ ] Manager: `extractor`, `consolidator`, `extract_window=10`,
+- [x] Manager: `extractor`, `consolidator`, `extract_window=10`,
       `remember_every=1`; `remember()` devolve as ops e dispara
       `on_extraction`/`on_consolidation` se houver callbacks.
-- [ ] `agent.py`: 2 linhas em `stream` e `astream` após o `finally`.
-- [ ] Testes: `remember()` com stubs; grafo mantido em UPDATE/DELETE via
+- [x] `agent.py`: 2 linhas em `stream` e `astream` após o `finally`.
+- [x] Testes: `remember()` com stubs; grafo mantido em UPDATE/DELETE via
       `remember()`; `Agent` sync/async chama 1× por turno completo e 0× em
       abandono; `remember_every`.
 

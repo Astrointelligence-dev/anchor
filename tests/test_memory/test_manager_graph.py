@@ -61,6 +61,37 @@ class TestManagerGraph:
         manager.add_fact("alice bob")  # content-hash dedupe returns the existing entry
         assert graph.store.version == version
 
+    def test_remember_keeps_the_graph_in_step(self) -> None:
+        from anchor.models.memory import MemoryEntry
+        from anchor.protocols.memory import MemoryOperation
+
+        class LastTurnExtractor:
+            def extract(self, turns):
+                return [MemoryEntry(content=turns[-1].content)]
+
+        class Replace:
+            def consolidate(self, new_entries, existing):
+                gone = [(MemoryOperation.DELETE, e) for e in existing]
+                return gone + [(MemoryOperation.ADD, e) for e in new_entries]
+
+        graph = KnowledgeGraph()
+        manager = MemoryManager(
+            tokenizer=FakeTokenizer(),
+            persistent_store=InMemoryEntryStore(),
+            graph=GraphIndexer(graph, extractors=[WordPairExtractor()]),
+            extractor=LastTurnExtractor(),
+            consolidator=Replace(),
+        )
+        manager.add_user_message("alice bob")
+        manager.remember()
+        assert graph.neighbors("alice") == ["bob"]
+
+        manager.add_user_message("alice carol")
+        manager.remember()
+        assert graph.neighbors("alice") == ["carol"]  # the invalidated fact took its evidence
+        assert graph.items("bob") == []
+        assert [e.content for e in manager.get_all_facts()] == ["alice carol"]
+
     def test_without_graph_nothing_changes(self) -> None:
         manager = MemoryManager(tokenizer=FakeTokenizer(), persistent_store=InMemoryEntryStore())
         entry = manager.add_fact("alice bob")
