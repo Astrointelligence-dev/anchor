@@ -11,7 +11,9 @@ Tests cover:
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+from anchor.llm.models import Message, Role
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -103,3 +105,64 @@ class TestRegistry:
         _import_provider()
         assert "openrouter" in _PROVIDERS
         assert _PROVIDERS["openrouter"] is _import_provider()
+
+
+# ---------------------------------------------------------------------------
+# Test: billed cost (usage.include) and extra_body merge
+# ---------------------------------------------------------------------------
+
+
+def _usage_mock(cost=None):
+    usage = MagicMock()
+    usage.prompt_tokens = 10
+    usage.completion_tokens = 5
+    usage.total_tokens = 15
+    usage.cost = cost
+    usage.prompt_tokens_details.cached_tokens = None
+    return usage
+
+
+def _sdk_response(cost=None):
+    msg = MagicMock()
+    msg.content = "ok"
+    msg.tool_calls = None
+    choice = MagicMock()
+    choice.message = msg
+    choice.finish_reason = "stop"
+    resp = MagicMock()
+    resp.choices = [choice]
+    resp.usage = _usage_mock(cost)
+    resp.model = "openai/gpt-4o"
+    return resp
+
+
+class TestUsageAndCost:
+    @patch("anchor.llm.providers.openai.openai")
+    def test_usage_include_is_requested_by_default(self, mock_openai):
+        provider = _make_provider()
+        mock_client = MagicMock()
+        mock_openai.OpenAI.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _sdk_response()
+
+        provider._do_invoke([Message(role=Role.USER, content="Hi")], tools=None)
+        sent = mock_client.chat.completions.create.call_args.kwargs["extra_body"]
+        assert sent == {"usage": {"include": True}}
+
+    @patch("anchor.llm.providers.openai.openai")
+    def test_caller_extra_body_is_merged_and_wins(self, mock_openai):
+        provider = _make_provider(
+            extra_body={"provider": {"order": ["Google AI Studio"]}, "usage": {"include": False}},
+        )
+        mock_client = MagicMock()
+        mock_openai.OpenAI.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _sdk_response()
+
+        provider._do_invoke([Message(role=Role.USER, content="Hi")], tools=None)
+        sent = mock_client.chat.completions.create.call_args.kwargs["extra_body"]
+        assert sent == {"provider": {"order": ["Google AI Studio"]}, "usage": {"include": False}}
+
+    def test_billed_cost_lands_in_total_cost(self):
+        provider = _make_provider()
+        out = provider._parse_response(_sdk_response(cost=0.0042))
+        assert out.usage.total_cost == 0.0042
+        assert out.provider == "openrouter"

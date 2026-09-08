@@ -70,14 +70,28 @@ class OpenAIProvider(BaseLLMProvider):
     Also serves as a base class for GrokProvider, OpenRouterProvider, and
     OllamaProvider — all OpenAI-compatible APIs — which override
     `provider_name` and `_resolve_api_key()` and pass a custom `base_url`.
+
+    ``extra_body`` is merged into every request body (per-call
+    ``extra_body`` wins key by key) — the escape hatch for params the SDK
+    has no field for, e.g. OpenRouter ``provider``/``reasoning``.
     """
 
     provider_name = "openai"
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, extra_body: dict[str, Any] | None = None, **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
+        self._extra_body: dict[str, Any] = dict(extra_body or {})
         self._client: Any = None
         self._async_client: Any = None
+
+    def _call_options(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Per-call options with the provider's ``extra_body`` folded in."""
+        if not self._extra_body:
+            return kwargs
+        merged = {**self._extra_body, **(kwargs.get("extra_body") or {})}
+        return {**kwargs, "extra_body": merged}
 
     # ------------------------------------------------------------------
     # Client caching
@@ -120,7 +134,7 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> LLMResponse:
         client = self._get_client()
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, **kwargs,
+            self._model, convert_messages(messages), tools, **self._call_options(kwargs),
         )
 
         try:
@@ -138,7 +152,11 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> Iterator[StreamChunk]:
         client = self._get_client()
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, stream=True, **kwargs,
+            self._model,
+            convert_messages(messages),
+            tools,
+            stream=True,
+            **self._call_options(kwargs),
         )
 
         try:
@@ -156,7 +174,7 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> LLMResponse:
         client = self._get_async_client()
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, **kwargs,
+            self._model, convert_messages(messages), tools, **self._call_options(kwargs),
         )
 
         try:
@@ -174,7 +192,11 @@ class OpenAIProvider(BaseLLMProvider):
     ) -> AsyncIterator[StreamChunk]:
         client = self._get_async_client()
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, stream=True, **kwargs,
+            self._model,
+            convert_messages(messages),
+            tools,
+            stream=True,
+            **self._call_options(kwargs),
         )
 
         try:

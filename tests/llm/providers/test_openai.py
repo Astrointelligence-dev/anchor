@@ -503,9 +503,11 @@ class TestStreamChunkParsing:
         usage.completion_tokens = 5
         usage.total_tokens = 15
         chunk = self._make_chunk(content=None, finish_reason="stop", usage=usage)
-        [result] = self.provider._parse_stream_chunks(chunk)
-        # Should parse something (finish_reason driven)
-        assert result.stop_reason == StopReason.STOP
+        stop, used = self.provider._parse_stream_chunks(chunk)
+        assert stop.stop_reason == StopReason.STOP
+        # Usage riding on the final chunk reaches the accumulator
+        assert used.usage is not None
+        assert used.usage.total_tokens == 15
 
 
 # ---------------------------------------------------------------------------
@@ -815,3 +817,130 @@ class TestSelfRegistration:
         import anchor.llm.providers.openai  # noqa: F401
         from anchor.llm.registry import _PROVIDERS
         assert "openai" in _PROVIDERS
+
+
+# ---------------------------------------------------------------------------
+# Test: extra_body passthrough + real usage/cost (astro-finance gaps #1/#2)
+# ---------------------------------------------------------------------------
+
+
+def _usage_mock(prompt=10, completion=5, total=15, *, cost=None, cached=None):
+    usage = MagicMock()
+    usage.prompt_tokens = prompt
+    usage.completion_tokens = completion
+    usage.total_tokens = total
+    usage.cost = cost
+    usage.prompt_tokens_details.cached_tokens = cached
+    return usage
+
+
+def _sdk_response(text="Answer", usage=None):
+    msg = MagicMock()
+    msg.content = text
+    msg.tool_calls = None
+    choice = MagicMock()
+    choice.message = msg
+    choice.finish_reason = "stop"
+    resp = MagicMock()
+    resp.choices = [choice]
+    resp.usage = usage if usage is not None else _usage_mock()
+    resp.model = "gpt-4o"
+    return resp
+
+
+class TestExtraBody:
+    def test_extra_body_passthrough(self):
+        from anchor.llm.providers._openai_compat import build_call_kwargs
+
+        kw = build_call_kwargs("m", [], None, extra_body={"provider": {"order": ["x"]}})
+        assert kw["extra_body"] == {"provider": {"order": ["x"]}}
+
+    def test_no_extra_body_by_default(self):
+        from anchor.llm.providers._openai_compat import build_call_kwargs
+
+        assert "extra_body" not in build_call_kwargs("m", [], None)
+
+    @patch("anchor.llm.providers.openai.openai")
+    def test_provider_extra_body_merges_with_call_and_call_wins(self, mock_openai):
+        provider = _make_provider(
+            extra_body={"provider": {"order": ["a"]}, "reasoning": {"effort": "high"}},
+        )
+        mock_client = MagicMock()
+        mock_openai.OpenAI.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _sdk_response()
+
+        provider._do_invoke(
+            [Message(role=Role.USER, content="Hi")],
+            tools=None,
+            extra_body={"reasoning": {"effort": "low"}},
+        )
+        sent = mock_client.chat.completions.create.call_args.kwargs["extra_body"]
+        assert sent == {"provider": {"order": ["a"]}, "reasoning": {"effort": "low"}}
+
+    @patch("anchor.llm.providers.openai.openai")
+    def test_provider_without_extra_body_sends_none(self, mock_openai):
+        provider = _make_provider()
+        mock_client = MagicMock()
+        mock_openai.OpenAI.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _sdk_response()
+
+        provider._do_invoke([Message(role=Role.USER, content="Hi")], tools=None)
+        assert "extra_body" not in mock_client.chat.completions.create.call_args.kwargs
+
+
+class TestRealUsage:
+    def test_stream_requests_a_usage_chunk(self):
+        from anchor.llm.providers._openai_compat import build_call_kwargs
+
+        streamed = build_call_kwargs("m", [], None, stream=True)
+        assert streamed["stream_options"] == {"include_usage": True}
+        assert "stream_options" not in build_call_kwargs("m", [], None)
+
+    def test_usage_only_chunk_is_emitted(self):
+        from anchor.llm.providers._openai_compat import parse_stream_chunks
+
+        chunk = MagicMock()
+        chunk.choices = []
+        chunk.usage = _usage_mock(120, 30, 150, cached=100)
+        [out] = parse_stream_chunks(chunk)
+        assert out.usage is not None
+        assert out.usage.prompt_tokens == 120
+        assert out.usage.completion_tokens == 30
+        assert out.usage.cache_read_tokens == 100
+        assert out.usage.total_cost is None
+
+    def test_chunk_without_choices_or_usage_is_skipped(self):
+        from anchor.llm.providers._openai_compat import parse_stream_chunks
+
+        chunk = MagicMock()
+        chunk.choices = []
+        chunk.usage = None
+        assert parse_stream_chunks(chunk) == []
+
+    def test_parse_response_reads_billed_cost_and_cached_tokens(self):
+        from anchor.llm.providers._openai_compat import parse_response
+
+        out = parse_response(_sdk_response(usage=_usage_mock(cost=0.0123, cached=7)), "openrouter")
+        assert out.usage.total_cost == pytest.approx(0.0123)
+        assert out.usage.cache_read_tokens == 7
+
+    def test_parse_response_without_usage_degrades_to_zero(self):
+        from anchor.llm.providers._openai_compat import parse_response
+
+        resp = _sdk_response()
+        resp.usage = None
+        out = parse_response(resp, "openai")
+        assert (out.usage.prompt_tokens, out.usage.completion_tokens) == (0, 0)
+
+    def test_sdk_objects_without_the_extra_fields_still_parse(self):
+        """A bare usage object (no cost, no details) is plain token counts."""
+        from anchor.llm.providers._openai_compat import parse_usage
+
+        class _Bare:
+            prompt_tokens = 3
+            completion_tokens = 4
+            total_tokens = 7
+
+        out = parse_usage(_Bare())
+        assert out is not None
+        assert (out.total_tokens, out.total_cost, out.cache_read_tokens) == (7, None, 0)
