@@ -22,13 +22,17 @@ Synchronous retrieval of context items.
 ```python
 @runtime_checkable
 class Retriever(Protocol):
-    def retrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]: ...
+    def retrieve(
+        self, query: QueryBundle, top_k: int = 10,
+        *, scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]: ...
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | `QueryBundle` | required | Query text and metadata |
 | `top_k` | `int` | `10` | Maximum items to return |
+| `scope` | `RetrievalScope \| None` | `None` | Namespace scope; a retriever that cannot honor it must raise, never ignore it |
 
 **Returns:** List of `ContextItem` ranked by relevance (most relevant first).
 
@@ -185,29 +189,8 @@ class AsyncReranker(Protocol):
 
 ---
 
-## Late Interaction
 
-### TokenLevelEncoder
-
-Encodes text into per-token embeddings for late interaction scoring
-(e.g., ColBERT MaxSim).
-
-```python
-@runtime_checkable
-class TokenLevelEncoder(Protocol):
-    def encode_tokens(self, text: str) -> list[list[float]]: ...
-```
-
-| Parameter | Type | Description |
-|---|---|---|
-| `text` | `str` | Text to encode into per-token embeddings |
-
-**Returns:** A list of embeddings, one per token. Each embedding is a list
-of floats.
-
----
-
-## Memory
+### ## Memory
 
 ### ConversationMemory
 
@@ -300,8 +283,12 @@ class MemoryConsolidator(Protocol):
     ) -> list[tuple[MemoryOperation, MemoryEntry | None]]: ...
 ```
 
-**Returns:** A list of `(MemoryOperation, entry | None)` tuples. Operations
-are `ADD`, `UPDATE`, `DELETE`, or `NONE`.
+**Returns:** A list of `(MemoryOperation, entry)` tuples where the `entry`
+slot names the target: `ADD` — the new entry; `UPDATE` — the existing entry
+rewritten under its own id (a fresh id is a silent ADD); `DELETE` — the
+existing entry to invalidate (the applier soft-deletes it via
+`MemoryEntry.invalidate`; `(DELETE, None)` is a no-op); `NONE` — `None`.
+`existing` may be every entry in the store or a similarity-selected subset.
 
 ### EvictionPolicy
 
@@ -411,10 +398,13 @@ class VectorStore(Protocol):
     def add_embedding(
         self, item_id: str, embedding: list[float],
         metadata: dict[str, Any] | None = None,
+        *, namespace: str = "/",
     ) -> None: ...
 
     def search(
         self, query_embedding: list[float], top_k: int = 10,
+        where: dict[str, Any] | None = None,
+        *, scope: RetrievalScope | None = None,
     ) -> list[tuple[str, float]]: ...
 
     def delete(self, item_id: str) -> bool: ...

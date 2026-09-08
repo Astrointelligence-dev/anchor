@@ -11,6 +11,7 @@ from anchor.models.context import ContextItem
 from anchor.models.query import QueryBundle
 from anchor.pipeline.pipeline import ContextPipeline
 from anchor.pipeline.step import PipelineStep
+from tests.conftest import FakeTokenizer
 from tests.test_pipeline.conftest import make_pipeline
 
 # ---------------------------------------------------------------------------
@@ -363,11 +364,11 @@ class TestMaxTokensValidation:
             ContextPipeline(max_tokens=-1)
 
     def test_max_tokens_positive_is_valid(self) -> None:
-        pipeline = ContextPipeline(max_tokens=1)
+        pipeline = ContextPipeline(max_tokens=1, tokenizer=FakeTokenizer())
         assert pipeline.max_tokens == 1
 
     def test_max_tokens_large_is_valid(self) -> None:
-        pipeline = ContextPipeline(max_tokens=1_000_000)
+        pipeline = ContextPipeline(max_tokens=1_000_000, tokenizer=FakeTokenizer())
         assert pipeline.max_tokens == 1_000_000
 
 

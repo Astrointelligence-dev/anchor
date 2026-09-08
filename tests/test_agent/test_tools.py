@@ -35,17 +35,17 @@ def _fake_embed(text: str) -> list[float]:
 # -- AgentTool --
 
 
-def test_agent_tool_to_anthropic_schema():
+def test_agent_tool_to_tool_schema_minimal():
     tool = AgentTool(
         name="my_tool",
         description="A test tool",
         input_schema={"type": "object", "properties": {}},
         fn=lambda: "ok",
     )
-    schema = tool.to_anthropic_schema()
-    assert schema["name"] == "my_tool"
-    assert schema["description"] == "A test tool"
-    assert "type" in schema["input_schema"]
+    schema = tool.to_tool_schema()
+    assert schema.name == "my_tool"
+    assert schema.description == "A test tool"
+    assert "type" in schema.input_schema
 
 
 def test_agent_tool_is_frozen():
@@ -355,3 +355,20 @@ def test_validate_input_extra_fields():
     valid, err = tool.validate_input({"name": "Alice", "extra": "ignored"})
     assert valid is True
     assert err == ""
+
+
+def test_agent_tool_to_tool_schema():
+    """Convert AgentTool to provider-agnostic ToolSchema."""
+    from anchor.llm.models import ToolSchema
+
+    tool = AgentTool(
+        name="get_weather",
+        description="Get weather",
+        input_schema={"type": "object", "properties": {"city": {"type": "string"}}},
+        fn=lambda **kwargs: "sunny",
+    )
+    schema = tool.to_tool_schema()
+    assert isinstance(schema, ToolSchema)
+    assert schema.name == "get_weather"
+    assert schema.description == "Get weather"
+    assert schema.input_schema == tool.input_schema

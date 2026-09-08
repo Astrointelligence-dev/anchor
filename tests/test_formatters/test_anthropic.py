@@ -193,7 +193,10 @@ class TestAnthropicFormatterCaching:
         )
         formatter = AnthropicFormatter(enable_caching=True)
         output = formatter.format(window)
-        assert output["messages"][0]["cache_control"] == {"type": "ephemeral"}
+        # Valid wire format: cache_control on a content block, not the message
+        block = output["messages"][0]["content"][0]
+        assert block["cache_control"] == {"type": "ephemeral"}
+        assert block["type"] == "text"
 
     def test_caching_disabled_no_cache_control(self) -> None:
         window = ContextWindow(max_tokens=10000)
@@ -230,11 +233,12 @@ class TestAnthropicFormatterCaching:
         # System block has cache_control
         assert output["system"][0]["cache_control"] == {"type": "ephemeral"}
         # Context and user memory merged into one message (both user role);
-        # cache_control preserved from the context message (first in group).
+        # cache_control on the merged message's content block.
         assert len(output["messages"]) == 1
-        assert output["messages"][0]["cache_control"] == {"type": "ephemeral"}
-        assert "Here is relevant context:" in output["messages"][0]["content"]
-        assert "User says hi" in output["messages"][0]["content"]
+        block = output["messages"][0]["content"][0]
+        assert block["cache_control"] == {"type": "ephemeral"}
+        assert "Here is relevant context:" in block["text"]
+        assert "User says hi" in block["text"]
 
     def test_caching_empty_window(self) -> None:
         window = ContextWindow(max_tokens=10000)

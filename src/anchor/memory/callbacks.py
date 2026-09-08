@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from anchor._callbacks import fire_callbacks
 
 if TYPE_CHECKING:
-    from anchor.models.memory import ConversationTurn, MemoryEntry
+    from anchor.models.memory import ConversationTurn, KeyFact, MemoryEntry
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,29 @@ class MemoryCallback(Protocol):
         Parameters:
             pruned_entries: The entries that were (or will be) removed.
         """
+        ...
+
+
+@runtime_checkable
+class ProgressiveSummarizationCallback(Protocol):
+    """Callback protocol for progressive summarization events.
+
+    All methods have default no-op implementations.  Implementers
+    only need to override the methods they care about.
+    """
+
+    def on_tier_cascade(
+        self, from_tier: int, to_tier: int, tokens_in: int, tokens_out: int
+    ) -> None:
+        """Called when content cascades from one tier to a lower tier."""
+        ...
+
+    def on_facts_extracted(self, facts: list[KeyFact], source_tier: int) -> None:
+        """Called when key facts are extracted during a tier transition."""
+        ...
+
+    def on_compaction_error(self, tier: int, error: Exception) -> None:
+        """Called when compaction fails and falls back."""
         ...
 
 

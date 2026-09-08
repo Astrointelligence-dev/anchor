@@ -82,28 +82,48 @@ class TestActivationFlow:
         assert "save_brainstorm_result" in names
 
 
-class _FakeClient:
-    """Minimal stand-in so Agent.__init__ doesn't need anthropic installed."""
-    pass
+class _FakeLLMProvider:
+    """Minimal stand-in so Agent.__init__ doesn't need any SDK installed."""
+
+    @property
+    def model_id(self) -> str:
+        return "mock/test"
+
+    @property
+    def provider_name(self) -> str:
+        return "mock"
+
+    def stream(self, messages, **kwargs):  # type: ignore[override]
+        return iter([])
+
+    async def astream(self, messages, **kwargs):  # type: ignore[override]
+        return
+        yield  # make it an async generator
+
+    def invoke(self, messages, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    async def ainvoke(self, messages, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
 
 
 class TestAgentSkillLoading:
     def test_with_skills_directory(self) -> None:
-        agent = Agent(model="test", client=_FakeClient())
+        agent = Agent(llm=_FakeLLMProvider())
         agent.with_skills_directory(FIXTURES)
         reg = agent._skill_registry
         assert reg.get("brainstorm") is not None
         assert reg.get("minimal-helper") is not None
 
     def test_with_skill_from_path(self) -> None:
-        agent = Agent(model="test", client=_FakeClient())
+        agent = Agent(llm=_FakeLLMProvider())
         agent.with_skill_from_path(FIXTURES / "brainstorm")
         reg = agent._skill_registry
         assert reg.get("brainstorm") is not None
 
     def test_chaining(self) -> None:
         agent = (
-            Agent(model="test", client=_FakeClient())
+            Agent(llm=_FakeLLMProvider())
             .with_skill_from_path(FIXTURES / "brainstorm")
             .with_skills_directory(FIXTURES)
         )
@@ -112,6 +132,6 @@ class TestAgentSkillLoading:
         assert agent._skill_registry.get("minimal-helper") is not None
 
     def test_activate_tool_created_for_on_demand(self) -> None:
-        agent = Agent(model="test", client=_FakeClient())
+        agent = Agent(llm=_FakeLLMProvider())
         agent.with_skill_from_path(FIXTURES / "brainstorm")
         assert agent._activate_tool is not None

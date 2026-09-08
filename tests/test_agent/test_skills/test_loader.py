@@ -25,13 +25,13 @@ class TestLoadSkillParsing:
         assert "Propose approaches" in skill.instructions
 
     def test_instructions_only_skill(self) -> None:
-        skill = load_skill(FIXTURES / "minimal")
+        skill = load_skill(FIXTURES / "minimal-helper")
         assert skill.name == "minimal-helper"
         assert skill.tools == ()
         assert skill.activation == "on_demand"
 
     def test_default_activation_is_on_demand(self) -> None:
-        skill = load_skill(FIXTURES / "minimal")
+        skill = load_skill(FIXTURES / "minimal-helper")
         assert skill.activation == "on_demand"
 
 
@@ -73,7 +73,7 @@ class TestLoadSkillValidation:
             load_skill(skill_dir)
 
     def test_description_too_long_raises(self, tmp_path: Path) -> None:
-        skill_dir = tmp_path / "longdesc"
+        skill_dir = tmp_path / "test-skill"
         skill_dir.mkdir()
         long_desc = "a" * 1025
         (skill_dir / "SKILL.md").write_text(
@@ -101,7 +101,7 @@ class TestToolDiscovery:
         assert skill.tools[0].name == "save_brainstorm_result"
 
     def test_instructions_only_has_no_tools(self) -> None:
-        skill = load_skill(FIXTURES / "minimal")
+        skill = load_skill(FIXTURES / "minimal-helper")
         assert skill.tools == ()
 
     def test_tool_is_callable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

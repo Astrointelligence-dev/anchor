@@ -369,3 +369,11 @@ same parent are deduplicated (first occurrence wins).
 | `query`   | `QueryBundle \| None`   | `None`  | Original query (unused)    |
 
 **Returns:** `list[ContextItem]`
+
+---
+
+## Graph extraction
+
+`GraphExtractor`, `Extraction`, `StructureExtractor`, `WikilinkExtractor`,
+`LLMGraphExtractor` and `GraphIndexer` turn `ContextItem`s into knowledge-graph
+nodes and edges. See [Knowledge Graph](graph.md).

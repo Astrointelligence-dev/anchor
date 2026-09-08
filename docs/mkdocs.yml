@@ -1,8 +1,8 @@
 site_name: anchor
 site_description: Context engineering toolkit for AI applications
-site_url: https://artcgranja.github.io/anchor/
-repo_url: https://github.com/artcgranja/anchor
-repo_name: artcgranja/anchor
+site_url: https://astrointelligence-dev.github.io/anchor/
+repo_url: https://github.com/Astrointelligence-dev/anchor
+repo_name: Astrointelligence-dev/anchor
 copyright: Copyright &copy; 2026 Astro — MIT License
 edit_uri: edit/main/docs/docs/
 
@@ -31,6 +31,10 @@ theme:
   logo: assets/logo-dark.svg
   favicon: assets/logo-light.svg
   icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+    annotation: material/information
   features:
     - announce.dismiss
     - content.action.edit
@@ -56,12 +60,6 @@ theme:
     - search.share
     - search.suggest
     - toc.follow
-  icon:
-    repo: fontawesome/brands/github
-    edit: material/pencil
-    view: material/eye
-    annotation: material/information
-
 nav:
   - Home: index.md
   - Getting Started:
@@ -81,6 +79,7 @@ nav:
     - Retrieval: guides/retrieval.md
     - Advanced Retrieval: guides/advanced-retrieval.md
     - Memory: guides/memory.md
+    - Knowledge Graph: guides/knowledge-graph.md
     - Ingestion: guides/ingestion.md
     - Query Transform: guides/query-transform.md
     - Classifiers: guides/classifiers.md
@@ -88,6 +87,8 @@ nav:
     - Observability: guides/observability.md
     - Formatters: guides/formatters.md
     - Agent: guides/agent.md
+    - LLM Providers: guides/llm-providers.md
+    - MCP Bridge: guides/mcp.md
     - Storage: guides/storage.md
     - Multi-modal: guides/multimodal.md
     - Cache: guides/cache.md
@@ -105,17 +106,21 @@ nav:
     - Pipeline: api/pipeline.md
     - Retrieval: api/retrieval.md
     - Memory: api/memory.md
+    - Knowledge Graph: api/graph.md
     - Ingestion: api/ingestion.md
     - Query: api/query.md
     - Evaluation: api/evaluation.md
     - Observability: api/observability.md
     - Formatters: api/formatters.md
     - Agent: api/agent.md
+    - LLM Providers: api/llm.md
     - Models: api/models.md
     - Protocols: api/protocols.md
     - Storage: api/storage.md
     - Multi-modal: api/multimodal.md
     - Cache: api/cache.md
+    - MCP Bridge: api/mcp.md
+    - Tokens: api/tokens.md
     - Exceptions: api/exceptions.md
   - FAQ: faq.md
   - Changelog: changelog.md
@@ -156,7 +161,7 @@ markdown_extensions:
   - pymdownx.magiclink:
       normalize_issue_symbols: true
       repo_url_shorthand: true
-      user: artcgranja
+      user: Astrointelligence-dev
       repo: anchor
   - pymdownx.mark
   - pymdownx.smartsymbols
@@ -180,7 +185,7 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/artcgranja/anchor
+      link: https://github.com/Astrointelligence-dev/anchor
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/astro-anchor/
   generator: false

@@ -88,13 +88,17 @@ and cost. Start with a preset and tune from there.
 ### Built-in Presets
 
 ```python
-from anchor import ContextPipeline, TokenBudget
+from anchor import ContextPipeline
+from anchor.models.budget_defaults import (
+    default_chat_budget,
+    default_rag_budget,
+    default_agent_budget,
+)
 
-# Presets for common model context windows
-pipeline_fast = ContextPipeline(max_tokens=TokenBudget.SMALL)    # 4,096 tokens
-pipeline_std  = ContextPipeline(max_tokens=TokenBudget.MEDIUM)   # 16,384 tokens
-pipeline_lg   = ContextPipeline(max_tokens=TokenBudget.LARGE)    # 32,768 tokens
-pipeline_xl   = ContextPipeline(max_tokens=TokenBudget.XL)       # 65,536 tokens
+# Preset budgets for common application archetypes
+chat_pipeline  = ContextPipeline(budget=default_chat_budget(max_tokens=16384))
+rag_pipeline   = ContextPipeline(budget=default_rag_budget(max_tokens=32768))
+agent_pipeline = ContextPipeline(budget=default_agent_budget(max_tokens=65536))
 ```
 
 ### Custom Budget Allocation
@@ -102,24 +106,34 @@ pipeline_xl   = ContextPipeline(max_tokens=TokenBudget.XL)       # 65,536 tokens
 For fine-grained control, allocate tokens across sources:
 
 ```python
-from anchor import ContextPipeline, TokenBudgetConfig
+from anchor import ContextPipeline
+from anchor.models.budget import TokenBudget, BudgetAllocation
+from anchor.models.context import SourceType
 
-budget = TokenBudgetConfig(
-    total=16384,
-    system_prompt=1024,       # reserve for system prompt
-    memory_conversation=4096, # conversation history
-    memory_facts=512,         # persistent facts
-    retrieval=8192,           # retrieved documents
-    overflow_policy="truncate_lowest_priority",
+budget = TokenBudget(
+    total_tokens=16384,
+    reserve_tokens=1024,  # reserve for LLM response overhead
+    allocations=[
+        BudgetAllocation(source=SourceType.SYSTEM, max_tokens=1024, priority=10),
+        BudgetAllocation(source=SourceType.CONVERSATION, max_tokens=4096, priority=7),
+        BudgetAllocation(source=SourceType.MEMORY, max_tokens=512, priority=8),
+        BudgetAllocation(
+            source=SourceType.RETRIEVAL,
+            max_tokens=8192,
+            priority=5,
+            overflow_strategy="truncate",
+        ),
+    ],
 )
 
 pipeline = ContextPipeline(budget=budget)
 ```
 
-!!! warning "Overflow Policies"
-    - `"truncate_lowest_priority"` -- drop lowest-priority items first (default)
-    - `"truncate_oldest"` -- drop oldest items first
-    - `"error"` -- raise `TokenBudgetExceeded` if total is exceeded
+!!! warning "Overflow Strategies"
+    Each ``BudgetAllocation`` has an ``overflow_strategy``:
+
+    - `"truncate"` (default) -- truncate content to fit within the allocation
+    - `"drop"` -- drop entire items that exceed the allocation
 
 ### Monitoring Token Usage
 
@@ -149,9 +163,10 @@ from anchor import (
     MemoryManager,
     SlidingWindowMemory,
     ImportanceEviction,
-    SummaryEviction,
+    PairedEviction,
     InMemoryEntryStore,
 )
+from anchor.memory import FIFOEviction
 
 # FIFO eviction (default) -- simplest, good for most cases
 fifo_memory = SlidingWindowMemory(max_tokens=4096)
@@ -160,17 +175,15 @@ fifo_memory = SlidingWindowMemory(max_tokens=4096)
 importance_memory = SlidingWindowMemory(
     max_tokens=4096,
     eviction_policy=ImportanceEviction(
-        score_fn=lambda turn: 1.0 if "action" in turn.content.lower() else 0.5,
+        importance_fn=lambda turn: 1.0 if "action" in turn.content.lower() else 0.5,
     ),
 )
 
-# Summary eviction -- summarizes evicted turns into a condensed fact
-summary_memory = SlidingWindowMemory(
+# Paired eviction -- evicts user+assistant turn pairs together
+# to prevent orphaned context
+paired_memory = SlidingWindowMemory(
     max_tokens=4096,
-    eviction_policy=SummaryEviction(
-        summarize_fn=my_summarize_function,
-        summary_max_tokens=256,
-    ),
+    eviction_policy=PairedEviction(),
 )
 ```
 
@@ -331,11 +344,11 @@ print(f"Per-step breakdown: {tracker.step_costs}")
 
 ```python
 from anchor import ContextPipeline
-from anchor.observability import OTLPExporter
+from anchor.observability.otlp import OTLPSpanExporter
 
-# Export traces to your OTLP-compatible backend
-exporter = OTLPExporter(
-    endpoint="http://localhost:4317",
+# Export traces to your OTLP-compatible backend (OTLP/HTTP)
+exporter = OTLPSpanExporter(
+    endpoint="http://localhost:4318",
     service_name="my-rag-service",
     headers={"Authorization": "Bearer <token>"},
 )

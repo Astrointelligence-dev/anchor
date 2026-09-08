@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from anchor.evaluation.evaluator import PipelineEvaluator
 from anchor.evaluation.models import RetrievalMetrics
 from anchor.models.query import QueryBundle
+from anchor.models.scope import RetrievalScope, scope_kwargs
 from anchor.protocols.retriever import Retriever
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,8 @@ class ABTestRunner:
         retriever_b: Retriever,
         k: int = 10,
         significance_level: float = 0.05,
+        *,
+        scope: RetrievalScope | None = None,
     ) -> ABTestResult:
         """Execute the A/B test and return statistical results.
 
@@ -185,6 +188,7 @@ class ABTestRunner:
             retriever_b: The second retriever ("B").
             k: Top-k cutoff for retrieval evaluation.
             significance_level: Threshold below which p-value is significant.
+            scope: Namespace scope forwarded to both retrievers (only when set).
 
         Returns:
             An ``ABTestResult`` with aggregated metrics, p-value, and winner.
@@ -206,8 +210,8 @@ class ABTestRunner:
 
         for sample in samples:
             query = QueryBundle(query_str=sample.query)
-            retrieved_a = retriever_a.retrieve(query, top_k=k)
-            retrieved_b = retriever_b.retrieve(query, top_k=k)
+            retrieved_a = retriever_a.retrieve(query, top_k=k, **scope_kwargs(scope))
+            retrieved_b = retriever_b.retrieve(query, top_k=k, **scope_kwargs(scope))
             m_a = self._evaluator.evaluate_retrieval(retrieved_a, sample.relevant_ids, k=k)
             m_b = self._evaluator.evaluate_retrieval(retrieved_b, sample.relevant_ids, k=k)
             metrics_a_list.append(m_a)

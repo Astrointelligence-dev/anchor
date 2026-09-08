@@ -1,6 +1,6 @@
 """Observability module: tracing, metrics, cost tracking, and span export."""
 
-from .callback import TracingCallback
+from .callback import TracingAgentCallback, TracingCallback
 from .cost import CostEntry, CostSummary, CostTracker, CostTrackingCallback
 from .exporters import ConsoleSpanExporter, FileSpanExporter, InMemorySpanExporter
 from .metrics import InMemoryMetricsCollector, LoggingMetricsCollector
@@ -25,5 +25,6 @@ __all__ = [
     "SpanKind",
     "TraceRecord",
     "Tracer",
+    "TracingAgentCallback",
     "TracingCallback",
 ]

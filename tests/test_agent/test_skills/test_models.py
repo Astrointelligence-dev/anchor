@@ -28,7 +28,7 @@ class TestSkillCreation:
         assert skill.description == "A test skill"
         assert skill.instructions == ""
         assert skill.tools == ()
-        assert skill.activation == "always"
+        assert skill.activation == "on_demand"
         assert skill.tags == ()
 
     def test_full_creation(self) -> None:

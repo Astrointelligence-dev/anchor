@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from anchor.graph import KnowledgeGraph
 from anchor.memory.extractor import CallbackExtractor
-from anchor.memory.graph_memory import SimpleGraphMemory
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.memory import ConversationTurn, MemoryEntry
 from anchor.models.query import QueryBundle
@@ -24,12 +24,12 @@ from tests.conftest import FakeRetriever, FakeTokenizer
 # ---------------------------------------------------------------------------
 
 
-def _make_graph_and_store() -> tuple[SimpleGraphMemory, InMemoryEntryStore]:
+def _make_graph_and_store() -> tuple[KnowledgeGraph, InMemoryEntryStore]:
     """Build a small graph with two entities and linked memory entries."""
-    graph = SimpleGraphMemory()
-    graph.add_entity("alice", {"type": "person"})
-    graph.add_entity("project-x", {"type": "project"})
-    graph.add_relationship("alice", "works_on", "project-x")
+    graph = KnowledgeGraph()
+    graph.add_node("alice", metadata={"type": "person"})
+    graph.add_node("project-x", metadata={"type": "project"})
+    graph.add_edge("alice", "works_on", "project-x")
 
     store = InMemoryEntryStore()
     entry_a = MemoryEntry(id="mem-a", content="Alice is an engineer")
@@ -37,8 +37,8 @@ def _make_graph_and_store() -> tuple[SimpleGraphMemory, InMemoryEntryStore]:
     store.add(entry_a)
     store.add(entry_b)
 
-    graph.link_memory("alice", "mem-a")
-    graph.link_memory("project-x", "mem-b")
+    graph.link_item("alice", "mem-a")
+    graph.link_item("project-x", "mem-b")
 
     return graph, store
 
@@ -248,10 +248,10 @@ class TestGraphRetrievalStepMaxDepth:
     """graph_retrieval_step: max_depth controls traversal depth."""
 
     def test_depth_1_only_direct_neighbors(self) -> None:
-        graph = SimpleGraphMemory()
-        graph.add_relationship("alice", "knows", "bob")
-        graph.add_relationship("bob", "knows", "carol")
-        graph.add_entity("carol")
+        graph = KnowledgeGraph()
+        graph.add_edge("alice", "knows", "bob")
+        graph.add_edge("bob", "knows", "carol")
+        graph.add_node("carol")
 
         store = InMemoryEntryStore()
         entry_bob = MemoryEntry(id="mem-bob", content="Bob info")
@@ -259,8 +259,8 @@ class TestGraphRetrievalStepMaxDepth:
         store.add(entry_bob)
         store.add(entry_carol)
 
-        graph.link_memory("bob", "mem-bob")
-        graph.link_memory("carol", "mem-carol")
+        graph.link_item("bob", "mem-bob")
+        graph.link_item("carol", "mem-carol")
 
         step = graph_retrieval_step(
             graph=graph,
@@ -274,15 +274,15 @@ class TestGraphRetrievalStepMaxDepth:
         assert "Carol info" not in contents
 
     def test_depth_2_includes_hop_2(self) -> None:
-        graph = SimpleGraphMemory()
-        graph.add_relationship("alice", "knows", "bob")
-        graph.add_relationship("bob", "knows", "carol")
-        graph.add_entity("carol")
+        graph = KnowledgeGraph()
+        graph.add_edge("alice", "knows", "bob")
+        graph.add_edge("bob", "knows", "carol")
+        graph.add_node("carol")
 
         store = InMemoryEntryStore()
         entry_carol = MemoryEntry(id="mem-carol", content="Carol info")
         store.add(entry_carol)
-        graph.link_memory("carol", "mem-carol")
+        graph.link_item("carol", "mem-carol")
 
         step = graph_retrieval_step(
             graph=graph,
@@ -304,18 +304,18 @@ class TestGraphRetrievalStepMaxItems:
     """graph_retrieval_step: max_items limits results."""
 
     def test_max_items_caps_output(self) -> None:
-        graph = SimpleGraphMemory()
+        graph = KnowledgeGraph()
         store = InMemoryEntryStore()
 
-        graph.add_entity("hub")
+        graph.add_node("hub")
         for i in range(10):
             entity_id = f"node-{i}"
             mem_id = f"mem-{i}"
-            graph.add_entity(entity_id)
-            graph.add_relationship("hub", "links_to", entity_id)
+            graph.add_node(entity_id)
+            graph.add_edge("hub", "links_to", entity_id)
             entry = MemoryEntry(id=mem_id, content=f"Memory {i}")
             store.add(entry)
-            graph.link_memory(entity_id, mem_id)
+            graph.link_item(entity_id, mem_id)
 
         step = graph_retrieval_step(
             graph=graph,
@@ -327,18 +327,18 @@ class TestGraphRetrievalStepMaxItems:
         assert len(result) == 3
 
     def test_default_max_items_is_5(self) -> None:
-        graph = SimpleGraphMemory()
+        graph = KnowledgeGraph()
         store = InMemoryEntryStore()
 
-        graph.add_entity("hub")
+        graph.add_node("hub")
         for i in range(10):
             entity_id = f"node-{i}"
             mem_id = f"mem-{i}"
-            graph.add_entity(entity_id)
-            graph.add_relationship("hub", "links_to", entity_id)
+            graph.add_node(entity_id)
+            graph.add_edge("hub", "links_to", entity_id)
             entry = MemoryEntry(id=mem_id, content=f"Memory {i}")
             store.add(entry)
-            graph.link_memory(entity_id, mem_id)
+            graph.link_item(entity_id, mem_id)
 
         step = graph_retrieval_step(
             graph=graph,
@@ -510,6 +510,36 @@ class TestAutoPromotionStepConsolidation:
         # Should have 2: original + updated
         assert len(stored) == 2
 
+    def test_consolidator_delete_invalidates_the_target(self) -> None:
+        """DELETE is a soft delete: the target leaves list_all/search but stays
+        readable unfiltered (history); a target-less DELETE is a no-op."""
+        store = InMemoryEntryStore()
+        store.add(MemoryEntry(id="old", content="User lives in São Paulo"))
+
+        def extract_fn(turns: list[ConversationTurn]) -> list[dict[str, Any]]:
+            return [{"content": "User moved to Rio"}]
+
+        class MoveConsolidator:
+            def consolidate(
+                self,
+                new_entries: list[MemoryEntry],
+                existing: list[MemoryEntry],
+            ) -> list[tuple[str, MemoryEntry | None]]:
+                return [("delete", existing[0]), ("add", new_entries[0]), ("delete", None)]
+
+        step = auto_promotion_step(
+            extractor=CallbackExtractor(extract_fn=extract_fn),
+            store=store,
+            consolidator=MoveConsolidator(),  # type: ignore[arg-type]
+        )
+        step.execute(_make_memory_items(1), _make_query())
+
+        assert [e.content for e in store.list_all()] == ["User moved to Rio"]
+        assert store.search("Paulo") == []
+        old = {e.id: e for e in store.list_all_unfiltered()}["old"]
+        assert old.is_expired
+        assert old.content == "User lives in São Paulo"
+
 
 # ===========================================================================
 # TestAutoPromotionStepPassthrough
@@ -580,9 +610,7 @@ class TestAutoPromotionStepErrorHandling:
     def test_on_error_raise_can_be_set(self) -> None:
         store = InMemoryEntryStore()
         extractor = CallbackExtractor(extract_fn=_simple_extract_fn)
-        step = auto_promotion_step(
-            extractor=extractor, store=store, on_error="raise"
-        )
+        step = auto_promotion_step(extractor=extractor, store=store, on_error="raise")
         assert step.on_error == "raise"
 
 
@@ -735,7 +763,8 @@ class TestCreateEvictionPromoterErrorHandling:
 
         extractor = CallbackExtractor(extract_fn=_simple_extract_fn)
         promoter = create_eviction_promoter(
-            extractor=extractor, store=FailingStore()  # type: ignore[arg-type]
+            extractor=extractor,
+            store=FailingStore(),  # type: ignore[arg-type]
         )
 
         turns = [
@@ -830,3 +859,50 @@ class TestIntegrationGraphRetrievalWithPipeline:
         # Side-effect: memories should be extracted and stored
         stored = store.list_all()
         assert len(stored) > 0
+
+
+# ===========================================================================
+# TestGraphRetrievalStepScope
+# ===========================================================================
+
+
+class TestGraphRetrievalStepScope:
+    """graph_retrieval_step: memory reached through the graph honors the published scope."""
+
+    def _graph_with_secret(self) -> tuple[KnowledgeGraph, InMemoryEntryStore]:
+        graph = KnowledgeGraph()
+        graph.add_edge("alice", "knows", "villain")
+        store = InMemoryEntryStore()
+        store.add(MemoryEntry(id="mem-alice", content="Alice is an engineer"))
+        store.add(MemoryEntry(id="mem-villain", content="The villain's secret plan"))
+        graph.link_item("alice", "mem-alice", "/public")
+        graph.link_item("villain", "mem-villain", "/secret")
+        return graph, store
+
+    def test_static_scope_hides_secret_memory(self) -> None:
+        from anchor.models.scope import RetrievalScope
+
+        graph, store = self._graph_with_secret()
+        step = graph_retrieval_step(
+            graph=graph,
+            store=store,
+            entity_extractor=lambda q: ["alice"],
+            scope=RetrievalScope(exclude=("/secret",)),
+        )
+        contents = [item.content for item in step.execute([], _make_query("alice"))]
+        assert contents == ["Alice is an engineer"]
+
+    def test_published_scope_narrows_the_walk(self) -> None:
+        from anchor.models.scope import ACTIVE_SCOPE, RetrievalScope
+
+        graph, store = self._graph_with_secret()
+        step = graph_retrieval_step(graph=graph, store=store, entity_extractor=lambda q: ["alice"])
+        unscoped = [item.content for item in step.execute([], _make_query("alice"))]
+        assert "The villain's secret plan" in unscoped
+
+        token = ACTIVE_SCOPE.set(RetrievalScope(exclude=("/secret",)))
+        try:
+            scoped = [item.content for item in step.execute([], _make_query("alice"))]
+        finally:
+            ACTIVE_SCOPE.reset(token)
+        assert scoped == ["Alice is an engineer"]

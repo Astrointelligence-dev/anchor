@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from anchor.agent.skills.models import Skill
+from anchor.models.scope import RetrievalScope
 
 from .tools import rag_tools
 
@@ -12,6 +13,8 @@ from .tools import rag_tools
 def rag_skill(
     retriever: object,
     embed_fn: Callable[[str], list[float]] | None = None,
+    *,
+    scope: RetrievalScope | None = None,
 ) -> Skill:
     """Create a Skill that wraps :func:`rag_tools`.
 
@@ -24,7 +27,7 @@ def rag_skill(
     embed_fn:
         Optional embedding function for the query bundle.
     """
-    tools = rag_tools(retriever, embed_fn)
+    tools = rag_tools(retriever, embed_fn, scope=scope)
     return Skill(
         name="rag",
         description="Search documentation for relevant information.",

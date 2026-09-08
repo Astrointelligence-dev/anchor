@@ -11,7 +11,7 @@ We welcome contributions to anchor! This guide explains how to set up your devel
 ### Getting Started
 
 ```bash
-git clone https://github.com/artcgranja/anchor.git
+git clone https://github.com/Astrointelligence-dev/anchor.git
 cd anchor
 uv sync
 ```
@@ -202,7 +202,7 @@ See [Architecture](concepts/architecture.md) for details.
 - **Questions**: Check [Getting Started](getting-started/index.md)
 - **API Reference**: See [API Docs](api/pipeline.md)
 - **Guides**: Browse [Guides](guides/pipeline.md)
-- **Issues**: [GitHub Issues](https://github.com/artcgranja/anchor/issues)
+- **Issues**: [GitHub Issues](https://github.com/Astrointelligence-dev/anchor/issues)
 
 ## Code Review Expectations
 

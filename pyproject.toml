@@ -1,6 +1,6 @@
 [project]
 name = "astro-anchor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Context engineering toolkit for AI applications"
 readme = "README.md"
 license = "MIT"
@@ -22,16 +22,34 @@ license-files = ["LICENSE"]
 
 dependencies = [
     "pydantic>=2.8,<3",
+    "pyyaml>=6.0,<7",
 ]
 
 [project.optional-dependencies]
 tiktoken = ["tiktoken>=0.7,<1"]
-bm25 = ["rank-bm25>=0.2.2,<1"]
+bm25 = ["bm25s>=0.2,<1", "PyStemmer>=2.2,<4", "rank-bm25>=0.2.2,<1"]
 flashrank = ["flashrank>=0.2,<1"]
+graph = ["igraph>=0.11,<1"]
 cli = ["typer>=0.12,<1", "rich>=13,<14"]
 anthropic = ["anthropic>=0.40,<1"]
+claude-cli = ["claude-agent-sdk>=0.2,<1"]
 agents = ["anthropic>=0.40,<1"]
+all-providers = ["astro-anchor[anthropic,claude-cli,openai,gemini,grok,ollama,litellm]"]
+gemini = ["google-genai>=1.0.0"]
+grok = ["openai>=1.50.0"]
+litellm = ["litellm>=1.50.0"]
+mcp = ["fastmcp>=3.4,<4"]
+ollama = ["openai>=1.50.0"]
+openai = ["openai>=1.50.0"]
 pdf = ["pypdf>=4,<5"]
+pricing = ["genai-prices>=0.1,<1"]
+sqlite = ["aiosqlite>=0.20,<1"]
+sqlite-vec = ["sqlite-vec>=0.1.9,<1"]
+postgres = ["asyncpg>=0.29,<1"]
+voyage = ["voyageai>=0.3,<1"]
+local-embeddings = ["sentence-transformers>=3,<6"]
+redis = ["redis>=5.0,<8"]
+all-storage = ["astro-anchor[sqlite,sqlite-vec,postgres,redis]"]
 otlp = [
     "opentelemetry-exporter-otlp-proto-http>=1.20,<2",
     "opentelemetry-sdk>=1.20,<2",
@@ -42,16 +60,16 @@ docs = [
     "mkdocs-minify-plugin>=0.8,<1",
     "mkdocstrings[python]>=0.25,<1",
 ]
-all = ["astro-anchor[bm25,cli,anthropic,tiktoken,agents,pdf,flashrank,otlp]"]
+all = ["astro-anchor[bm25,cli,anthropic,claude-cli,gemini,grok,litellm,ollama,openai,tiktoken,agents,pdf,pricing,flashrank,graph,otlp,sqlite,postgres,redis]"]
 
 [project.scripts]
 anchor = "anchor.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/artcgranja/anchor"
-Repository = "https://github.com/artcgranja/anchor"
-Documentation = "https://artcgranja.github.io/anchor"
-"Bug Tracker" = "https://github.com/artcgranja/anchor/issues"
+Homepage = "https://github.com/Astrointelligence-dev/anchor"
+Repository = "https://github.com/Astrointelligence-dev/anchor"
+Documentation = "https://astrointelligence-dev.github.io/anchor"
+"Bug Tracker" = "https://github.com/Astrointelligence-dev/anchor/issues"
 
 [dependency-groups]
 dev = [
@@ -64,7 +82,13 @@ dev = [
     "typer>=0.12,<1",
     "rich>=13,<14",
     "tiktoken>=0.7,<1",
+    "genai-prices>=0.1,<1",
     "mkdocs-material>=9.7.2",
+    "fakeredis>=2.37.1",
+    "igraph>=0.11,<1",
+]
+docs = [
+    "mkdocs-minify-plugin>=0.8.0",
 ]
 
 [tool.uv.build-backend]
@@ -82,7 +106,7 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM", "RUF", "C90", "PT", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "PT011"]
+"tests/**/*.py" = ["S101", "PT011", "N806"]
 "examples/**/*.py" = ["S101", "T201"]
 
 [tool.ruff.lint.isort]
@@ -91,6 +115,10 @@ known-first-party = ["anchor"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+[[tool.mypy.overrides]]
+module = "igraph.*"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "rank_bm25.*"
@@ -106,6 +134,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "opentelemetry.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["anthropic.*", "openai.*", "google.genai.*", "litellm.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["aiosqlite.*", "asyncpg.*", "redis.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

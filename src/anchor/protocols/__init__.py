@@ -2,9 +2,9 @@
 
 from .cache import CacheBackend
 from .classifier import QueryClassifier
+from .embeddings import EmbeddingProvider
 from .evaluation import HumanEvaluator, RAGEvaluator, RetrievalEvaluator
 from .ingestion import Chunker, DocumentParser
-from .late_interaction import TokenLevelEncoder
 from .memory import (
     AsyncCompactionStrategy,
     AsyncMemoryExtractor,
@@ -28,9 +28,11 @@ from .reranker import AsyncReranker, Reranker
 from .retriever import AsyncRetriever, Retriever
 from .router import QueryRouter
 from .storage import (
+    AsyncGraphStore,
     ContextStore,
     DocumentStore,
     GarbageCollectableStore,
+    GraphStore,
     MemoryEntryStore,
     VectorStore,
 )
@@ -38,6 +40,7 @@ from .tokenizer import Tokenizer
 
 __all__ = [
     "AsyncCompactionStrategy",
+    "AsyncGraphStore",
     "AsyncMemoryExtractor",
     "AsyncPostProcessor",
     "AsyncQueryTransformer",
@@ -50,8 +53,10 @@ __all__ = [
     "ConversationMemory",
     "DocumentParser",
     "DocumentStore",
+    "EmbeddingProvider",
     "EvictionPolicy",
     "GarbageCollectableStore",
+    "GraphStore",
     "HumanEvaluator",
     "MemoryConsolidator",
     "MemoryDecay",
@@ -74,7 +79,6 @@ __all__ = [
     "Retriever",
     "SpanExporter",
     "TableExtractor",
-    "TokenLevelEncoder",
     "Tokenizer",
     "VectorStore",
 ]

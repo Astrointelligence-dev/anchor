@@ -5,11 +5,13 @@ decorator and `SkillRegistry`.
 
 ---
 
-!!! warning "API Key Required"
-    The `Agent` class requires the `anthropic` SDK and a valid API key.
-    Install with `pip install astro-anchor[anthropic]`. The tool creation
-    and skill registration sections below run without an API key. The
-    `agent.chat()` call at the end requires `ANTHROPIC_API_KEY` to be set.
+!!! warning "LLM Provider Required"
+    The `Agent` class requires at least one LLM provider SDK. The default
+    provider is Anthropic: `pip install astro-anchor[anthropic]`. See the
+    [LLM Providers Guide](../guides/llm-providers.md) for all supported
+    providers. The tool creation and skill registration sections below run
+    without any provider SDK. The `agent.chat()` call at the end requires
+    a configured provider (e.g. `ANTHROPIC_API_KEY`).
 
 ## Overview
 
@@ -84,8 +86,9 @@ print(f"Direct call: {result}")
 # 5. Export to different provider formats
 # ---------------------------------------------------------------
 print("\n=== Provider Schemas ===\n")
-print(f"Anthropic: {calculate.to_anthropic_schema()}")
-print(f"OpenAI:    {calculate.to_openai_schema()}")
+schema = calculate.to_tool_schema()
+print(f"ToolSchema: name={schema.name}, description={schema.description}")
+print(f"Input schema: {schema.input_schema}")
 ```
 
 ## Skills and SkillRegistry (No API Key Needed)
@@ -329,11 +332,12 @@ else:
     function name, docstring, and type hints to auto-generate the JSON
     Schema used by the LLM.
 
-!!! note "Agent is Anthropic-Specific"
-    The `Agent` class uses `AnthropicFormatter` internally and calls the
-    Anthropic Messages API. The tool creation system (`@tool`, `AgentTool`,
-    `Skill`) is provider-agnostic and can be used with any API via
-    `to_openai_schema()` or `to_generic_schema()`.
+!!! note "Multi-Provider Agent"
+    The `Agent` class supports any LLM provider via the `LLMProvider`
+    protocol. Use `Agent(model="openai/gpt-4o")` or any other supported
+    provider. Tools are converted to a provider-agnostic `ToolSchema` via
+    `to_tool_schema()`. See the [LLM Providers Guide](../guides/llm-providers.md)
+    for details.
 
 ## Next Steps
 

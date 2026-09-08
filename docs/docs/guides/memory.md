@@ -13,8 +13,8 @@ The memory system has three tiers:
    (`SlidingWindowMemory` or `SummaryBufferMemory`).
 2. **Persistent facts** -- long-term entries in a `MemoryEntryStore`,
    managed through `MemoryManager`.
-3. **Graph memory** -- an optional entity-relationship graph
-   (`SimpleGraphMemory`) for structured knowledge.
+3. **Knowledge graph** -- an optional graph over memory *and* documents
+   (`KnowledgeGraph`), see the [Knowledge Graph guide](knowledge-graph.md).
 
 `MemoryManager` sits on top, producing `ContextItem` objects for the pipeline.
 
@@ -140,36 +140,31 @@ mem = SummaryBufferMemory(max_tokens=512, progressive_compact_fn=progressive)
     If the compaction function raises an exception, the raw turn content
     is used as a fallback so evicted data is never lost.
 
-## SimpleGraphMemory
+## Knowledge graph
 
-An in-memory directed graph for entity-relationship tracking without an
-external graph database.
+Memory facts can feed the same knowledge graph as your documents. Give the
+`MemoryManager` a `GraphIndexer` and every fact added is indexed (the item
+id is the entry id), an updated fact is re-extracted, and a deleted fact
+takes its evidence with it:
 
 ```python
-from anchor import SimpleGraphMemory
+from anchor import GraphIndexer, KnowledgeGraph, LLMGraphExtractor, MemoryManager
 
-graph = SimpleGraphMemory()
-graph.add_entity("alice", {"type": "person", "role": "engineer"})
-graph.add_entity("project-x", {"type": "project"})
-graph.add_relationship("alice", "works_on", "project-x")
+graph = KnowledgeGraph()
+manager = MemoryManager(
+    persistent_store=store,
+    graph=GraphIndexer(graph, extractors=[LLMGraphExtractor(llm)]),
+)
+manager.add_fact("Alice works on Project X with Bob.")
 
-graph.add_entity("bob", {"type": "person"})
-graph.add_relationship("bob", "works_on", "project-x")
-graph.link_memory("alice", "mem-001")
-graph.link_memory("project-x", "mem-002")
-
-# BFS traversal: find related entities within 2 hops
-related = graph.get_related_entities("alice", max_depth=2)
-print(related)  # ['project-x', 'bob']
-
-# Collect memory IDs for entity and its neighborhood
-memory_ids = graph.get_related_memory_ids("alice", max_depth=2)
-print(memory_ids)  # ['mem-001', 'mem-002']
+graph.neighbors("alice", max_depth=2)      # ['project_x', 'bob']
+graph.related_items("Project X")           # [<entry id>]
 ```
 
-!!! tip
-    `add_relationship` auto-creates nodes for source and target if they
-    do not already exist. `link_memory` requires the entity to exist.
+`graph_retrieval_step(graph, store, entity_extractor)` pulls the memory
+entries a query's entities lead to into the pipeline. The full API, the
+scope rules and the wikilink extractors for documents are in the
+[Knowledge Graph guide](knowledge-graph.md).
 
 ## Eviction Policies
 
@@ -265,8 +260,68 @@ for action, entry in results:
 ```
 
 !!! warning
-    The library never calls an LLM. You provide the `embed_fn` which
-    can use any embedding provider (OpenAI, Cohere, local models, etc.).
+    `SimilarityConsolidator` never calls an LLM — you provide the `embed_fn`
+    (OpenAI, Cohere, local models, etc.). It also cannot tell a
+    contradiction from a paraphrase: "moved to Rio" is *similar* to "lives
+    in São Paulo" and gets merged, not corrected. For that, opt into the
+    LLM pair below.
+
+## LLMExtractor and LLMConsolidator
+
+The two-phase update of the mem0 paper, opt-in: an `LLMExtractor` turns the
+recent turns into facts, an `LLMConsolidator` decides `ADD` / `UPDATE` /
+`DELETE` / `NONE` for each fact against the most similar memories. Both take
+the agent's own provider — never a new client — and fail soft (a bad answer
+logs a warning and adds the facts as-is).
+
+```python
+from anchor import Agent, LLMConsolidator, LLMExtractor, MemoryManager, InMemoryEntryStore
+
+agent = Agent(llm=...)
+memory = MemoryManager(
+    persistent_store=InMemoryEntryStore(),
+    extractor=LLMExtractor(agent.llm),
+    consolidator=LLMConsolidator(agent.llm, embed_fn=my_embed),  # embed_fn optional
+    remember_every=1,  # run after every completed turn (5 = Letta-style batching)
+)
+agent.with_memory(memory)
+
+list(agent.chat("Me mudei pro Rio de Janeiro mês passado."))
+memory.get_all_facts()  # "User lives in São Paulo" became "User lives in Rio de Janeiro"
+```
+
+What happens on `remember()` (the `Agent` calls `after_turn()` after every
+completed turn — not on an abandoned stream — and in `astream` off the event
+loop):
+
+1. The extractor reads the user/assistant turns not yet remembered (at most
+   `extract_window`, the newest; tool turns are noise) and returns facts. A
+   provider error propagates and the turns wait for the next attempt.
+2. Cheap gates first: an exact content-hash match is `NONE` without a model
+   call; an empty store makes everything `ADD`; with `embed_fn`, a fact whose
+   best cosine against the store is below `new_threshold` is `ADD` without a
+   call. **High similarity never decides `NONE` on its own** — cosine cannot
+   separate a contradiction from a paraphrase, so that band goes to the model.
+3. One model call with the `top_k` most similar memories per fact (word
+   overlap without `embed_fn`), at most `max_candidates` in total — a fact
+   none of whose candidates made the cap is `ADD` without a call — referenced
+   by index.
+   `UPDATE` keeps the memory's id, recomputes the hash and records
+   `metadata["previous_content"]`; `DELETE` is a **soft delete** — the entry
+   gets `expires_at=now` (`MemoryEntry.invalidate`), drops out of
+   `search`/`list_all` in every backend, and stays readable through
+   `list_all_unfiltered` until the garbage collector's `retention` elapses.
+   An unknown `update` target degrades to `ADD`, an unknown `delete` target
+   is ignored, a fact the model leaves out is `ADD`.
+
+The two calls per turn go to the provider you injected but run outside the
+agent's own loop: they are not counted by `with_usage_limits` or
+`TurnDiagnostics`. Call `memory.remember()` yourself for a manual flush (end
+of session, or with `remember_every=0`). `MemoryCallback.on_extraction` /
+`on_consolidation` observe every step. The consolidation golden set in
+`tests/fixtures/consolidation_golden.jsonl` (48 cases: fact changes,
+preference flips, paraphrases, temporary facts, false contradictions,
+re-affirmations) measures the pair — see the [evaluation guide](evaluation.md).
 
 ## MemoryGarbageCollector and GCStats
 
@@ -277,6 +332,7 @@ from anchor import MemoryGarbageCollector, EbbinghausDecay, InMemoryEntryStore
 
 store = InMemoryEntryStore()
 gc = MemoryGarbageCollector(store=store, decay=EbbinghausDecay())
+# retention=timedelta(days=30) keeps invalidated (soft-deleted) facts as history that long
 
 stats = gc.collect(retention_threshold=0.1)
 print(stats)  # GCStats(applied: expired_pruned=0, decayed_pruned=0, ...)
@@ -314,7 +370,7 @@ entry = manager.add_fact(
 # Search, update, delete
 results = manager.get_relevant_facts("theme preference", top_k=3)
 manager.update_fact(entry.id, "User prefers dark mode with blue accent")
-manager.delete_fact(entry.id)
+manager.delete_fact(entry.id)  # hard delete; a consolidator's DELETE is the soft one
 all_facts = manager.get_all_facts()
 ```
 

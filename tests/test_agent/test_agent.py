@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
-import sys
-import types
+import json
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
-from unittest.mock import patch
 
 from anchor.agent.agent import Agent
 from anchor.agent.tools import AgentTool
+from anchor.llm.models import (
+    LLMResponse,
+    Message,
+    StopReason,
+    StreamChunk,
+    ToolCallDelta,
+    ToolSchema,
+)
 from anchor.memory.manager import MemoryManager
 from anchor.storage.json_memory_store import InMemoryEntryStore
 
 # ---------------------------------------------------------------------------
-# Fake Anthropic types for testing (no anthropic dependency needed)
+# Fake LLM provider for testing (no SDK dependency needed)
 # ---------------------------------------------------------------------------
 
 
@@ -28,114 +34,105 @@ class _Tok:
         return " ".join(text.split()[:max_tokens])
 
 
-class FakeTextBlock:
-    """Mock Anthropic TextBlock."""
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.type = "text"
-
-
-class FakeToolUseBlock:
-    """Mock Anthropic ToolUseBlock."""
-
-    def __init__(self, block_id: str, name: str, block_input: dict[str, Any]) -> None:
-        self.id = block_id
-        self.name = name
-        self.input = block_input
-        self.type = "tool_use"
+def _text_response(text: str) -> list[StreamChunk]:
+    """Build stream chunks for a simple text response."""
+    chunks: list[StreamChunk] = []
+    if text:
+        chunks.append(StreamChunk(content=text))
+    chunks.append(StreamChunk(stop_reason=StopReason.STOP))
+    return chunks
 
 
-class FakeMessage:
-    """Mock Anthropic Message."""
-
-    def __init__(
-        self, content: list[Any], stop_reason: str = "end_turn",
-    ) -> None:
-        self.content = content
-        self.stop_reason = stop_reason
-
-
-class FakeStream:
-    """Mock Anthropic MessageStream context manager (sync)."""
-
-    def __init__(self, text: str, message: FakeMessage) -> None:
-        self._text = text
-        self._message = message
-
-    @property
-    def text_stream(self) -> Iterator[str]:
-        if self._text:
-            yield self._text
-
-    def get_final_message(self) -> FakeMessage:
-        return self._message
-
-    def __enter__(self) -> FakeStream:
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        pass
+def _tool_use_response(
+    tool_id: str,
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    text_before: str = "",
+) -> list[StreamChunk]:
+    """Build stream chunks for a tool call response."""
+    chunks: list[StreamChunk] = []
+    if text_before:
+        chunks.append(StreamChunk(content=text_before))
+    args_json = json.dumps(arguments)
+    chunks.append(StreamChunk(
+        tool_call_delta=ToolCallDelta(index=0, id=tool_id, name=name),
+    ))
+    chunks.append(StreamChunk(
+        tool_call_delta=ToolCallDelta(index=0, arguments_fragment=args_json),
+    ))
+    chunks.append(StreamChunk(stop_reason=StopReason.TOOL_USE))
+    return chunks
 
 
-class FakeAsyncStream:
-    """Mock Anthropic MessageStream context manager (async)."""
+class FakeLLMProvider:
+    """Mock LLMProvider that returns canned StreamChunk sequences.
 
-    def __init__(self, text: str, message: FakeMessage) -> None:
-        self._text = text
-        self._message = message
+    Records the ``messages`` and ``tools`` passed to each call in
+    ``seen_messages`` / ``seen_tools`` for loop-level assertions.
+    """
 
-    @property
-    async def text_stream(self) -> AsyncIterator[str]:
-        if self._text:
-            yield self._text
-
-    def get_final_message(self) -> FakeMessage:
-        return self._message
-
-    async def __aenter__(self) -> FakeAsyncStream:
-        return self
-
-    async def __aexit__(self, *args: Any) -> None:
-        pass
-
-
-class FakeMessages:
-    """Mock for client.messages with stream() support."""
-
-    def __init__(
-        self,
-        responses: list[tuple[str, FakeMessage]],
-        *,
-        use_async: bool = False,
-    ) -> None:
-        self._responses = list(responses)
+    def __init__(self, responses: list[list[StreamChunk]]) -> None:
+        self._responses = responses
         self._call_index = 0
-        self._use_async = use_async
+        self.seen_messages: list[list[Message]] = []
+        self.seen_tools: list[list[ToolSchema] | None] = []
+        self.seen_kwargs: list[dict[str, Any]] = []
 
-    def stream(self, **kwargs: Any) -> FakeStream | FakeAsyncStream:
-        if self._call_index < len(self._responses):
-            text, msg = self._responses[self._call_index]
-            self._call_index += 1
-            if self._use_async:
-                return FakeAsyncStream(text, msg)
-            return FakeStream(text, msg)
-        empty = FakeMessage(content=[FakeTextBlock(text="")])
-        if self._use_async:
-            return FakeAsyncStream("", empty)
-        return FakeStream("", empty)
+    @property
+    def model_id(self) -> str:
+        return "mock/test-model"
 
+    @property
+    def provider_name(self) -> str:
+        return "mock"
 
-class FakeAnthropicClient:
-    """Mock Anthropic client that returns canned responses."""
-
-    def __init__(
+    def stream(
         self,
-        responses: list[tuple[str, FakeMessage]],
+        messages: list[Message],
         *,
-        use_async: bool = False,
-    ) -> None:
-        self.messages = FakeMessages(responses, use_async=use_async)
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int | None = None,
+        **kwargs: Any,
+    ) -> Iterator[StreamChunk]:
+        self.seen_messages.append(list(messages))
+        self.seen_tools.append(tools)
+        self.seen_kwargs.append(dict(kwargs))
+        if self._call_index < len(self._responses):
+            chunks = self._responses[self._call_index]
+            self._call_index += 1
+            yield from chunks
+        else:
+            yield StreamChunk(stop_reason=StopReason.STOP)
+
+    async def astream(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamChunk]:
+        self.seen_messages.append(list(messages))
+        self.seen_tools.append(tools)
+        self.seen_kwargs.append(dict(kwargs))
+        if self._call_index < len(self._responses):
+            chunks = self._responses[self._call_index]
+            self._call_index += 1
+            for chunk in chunks:
+                yield chunk
+        else:
+            yield StreamChunk(stop_reason=StopReason.STOP)
+
+    def invoke(
+        self, messages: list[Message], **kwargs: Any,
+    ) -> LLMResponse:
+        raise NotImplementedError
+
+    async def ainvoke(
+        self, messages: list[Message], **kwargs: Any,
+    ) -> LLMResponse:
+        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -144,21 +141,16 @@ class FakeAnthropicClient:
 
 
 def _make_agent(
-    responses: list[tuple[str, FakeMessage]],
+    responses: list[list[StreamChunk]],
     *,
     tools: list[AgentTool] | None = None,
     memory: MemoryManager | None = None,
     max_rounds: int = 10,
-    max_retries: int = 3,
     system_prompt: str = "You are helpful.",
-    use_async: bool = False,
 ) -> Agent:
-    """Create an Agent with a fake Anthropic client."""
-    client = FakeAnthropicClient(responses, use_async=use_async)
-    agent = Agent(
-        model="test-model", client=client,
-        max_rounds=max_rounds, max_retries=max_retries,
-    )
+    """Create an Agent with a fake LLM provider."""
+    provider = FakeLLMProvider(responses)
+    agent = Agent(llm=provider, max_rounds=max_rounds)
     agent.with_system_prompt(system_prompt)
     if memory is not None:
         agent.with_memory(memory)
@@ -174,12 +166,7 @@ def _make_agent(
 
 def test_basic_chat():
     """Agent returns streamed text for a simple response."""
-    responses = [
-        ("Hello there!", FakeMessage(
-            content=[FakeTextBlock(text="Hello there!")],
-            stop_reason="end_turn",
-        )),
-    ]
+    responses = [_text_response("Hello there!")]
     agent = _make_agent(responses)
     chunks = list(agent.chat("Hi"))
     assert "".join(chunks) == "Hello there!"
@@ -188,12 +175,7 @@ def test_basic_chat():
 def test_memory_user_and_assistant_recorded():
     """User and assistant messages are recorded in memory."""
     memory = MemoryManager(conversation_tokens=2000, tokenizer=_Tok())
-    responses = [
-        ("Hi!", FakeMessage(
-            content=[FakeTextBlock(text="Hi!")],
-            stop_reason="end_turn",
-        )),
-    ]
+    responses = [_text_response("Hi!")]
     agent = _make_agent(responses, memory=memory)
     list(agent.chat("Hello"))
 
@@ -224,18 +206,10 @@ def test_tool_loop():
         fn=echo_tool,
     )
 
-    # First response: model calls tool
-    tool_use_msg = FakeMessage(
-        content=[FakeToolUseBlock(block_id="tu_1", name="echo", block_input={"text": "hello"})],
-        stop_reason="tool_use",
-    )
-    # Second response: model returns text
-    text_msg = FakeMessage(
-        content=[FakeTextBlock(text="Done!")],
-        stop_reason="end_turn",
-    )
-
-    responses = [("", tool_use_msg), ("Done!", text_msg)]
+    responses = [
+        _tool_use_response("tu_1", "echo", {"text": "hello"}),
+        _text_response("Done!"),
+    ]
     agent = _make_agent(responses, tools=[tool])
     chunks = list(agent.chat("Test tool"))
 
@@ -254,20 +228,10 @@ def test_tool_loop_with_text_before_tool():
         fn=noop,
     )
 
-    # First response: text + tool_use
-    msg1 = FakeMessage(
-        content=[
-            FakeTextBlock(text="Thinking..."),
-            FakeToolUseBlock(block_id="tu_1", name="noop", block_input={"x": "1"}),
-        ],
-        stop_reason="tool_use",
-    )
-    msg2 = FakeMessage(
-        content=[FakeTextBlock(text=" All done.")],
-        stop_reason="end_turn",
-    )
-
-    responses = [("Thinking...", msg1), (" All done.", msg2)]
+    responses = [
+        _tool_use_response("tu_1", "noop", {"x": "1"}, text_before="Thinking..."),
+        _text_response(" All done."),
+    ]
     agent = _make_agent(responses, tools=[tool])
     chunks = list(agent.chat("Go"))
     assert "".join(chunks) == "Thinking... All done."
@@ -293,38 +257,26 @@ def test_max_rounds_stops_loop():
 
     # Always return tool_use (more responses than max_rounds)
     responses = [
-        (
-            "",
-            FakeMessage(
-                content=[FakeToolUseBlock(
-                    block_id=f"tu_{i}", name="counter", block_input={"x": "go"},
-                )],
-                stop_reason="tool_use",
-            ),
-        )
+        _tool_use_response(f"tu_{i}", "counter", {"x": "go"})
         for i in range(5)
     ]
 
     agent = _make_agent(responses, tools=[tool], max_rounds=3)
     list(agent.chat("Go"))
 
-    assert call_count[0] == 3
+    # Rounds 0 and 1 execute tools; the final round's calls are not
+    # executed (their results would never reach the model).
+    assert call_count[0] == 2
+    assert agent.last_turn is not None
+    assert agent.last_turn.stopped_by == "max_rounds"
 
 
 def test_unknown_tool_returns_error():
     """Calling an unknown tool returns an error message instead of crashing."""
-    msg = FakeMessage(
-        content=[FakeToolUseBlock(
-            block_id="tu_1", name="nonexistent", block_input={"q": "x"},
-        )],
-        stop_reason="tool_use",
-    )
-    text_msg = FakeMessage(
-        content=[FakeTextBlock(text="OK")],
-        stop_reason="end_turn",
-    )
-
-    responses = [("", msg), ("OK", text_msg)]
+    responses = [
+        _tool_use_response("tu_1", "nonexistent", {"q": "x"}),
+        _text_response("OK"),
+    ]
     # No tools registered
     agent = _make_agent(responses)
     chunks = list(agent.chat("Test"))
@@ -343,16 +295,10 @@ def test_tool_exception_handled():
         fn=failing_tool,
     )
 
-    msg1 = FakeMessage(
-        content=[FakeToolUseBlock(block_id="tu_1", name="fail", block_input={"x": "go"})],
-        stop_reason="tool_use",
-    )
-    msg2 = FakeMessage(
-        content=[FakeTextBlock(text="Recovered.")],
-        stop_reason="end_turn",
-    )
-
-    responses = [("", msg1), ("Recovered.", msg2)]
+    responses = [
+        _tool_use_response("tu_1", "fail", {"x": "go"}),
+        _text_response("Recovered."),
+    ]
     agent = _make_agent(responses, tools=[tool])
     chunks = list(agent.chat("Go"))
     assert "".join(chunks) == "Recovered."
@@ -360,12 +306,7 @@ def test_tool_exception_handled():
 
 def test_no_memory_still_works():
     """Agent works without memory attached."""
-    responses = [
-        ("Hi!", FakeMessage(
-            content=[FakeTextBlock(text="Hi!")],
-            stop_reason="end_turn",
-        )),
-    ]
+    responses = [_text_response("Hi!")]
     agent = _make_agent(responses)
     assert agent.memory is None
     chunks = list(agent.chat("Hello"))
@@ -375,12 +316,7 @@ def test_no_memory_still_works():
 def test_empty_response_no_memory_write():
     """Empty response text is not written to memory."""
     memory = MemoryManager(conversation_tokens=2000, tokenizer=_Tok())
-    responses = [
-        ("", FakeMessage(
-            content=[FakeTextBlock(text="")],
-            stop_reason="end_turn",
-        )),
-    ]
+    responses = [_text_response("")]
     agent = _make_agent(responses, memory=memory)
     list(agent.chat("Hello"))
 
@@ -408,9 +344,7 @@ def test_with_tools_is_additive():
         input_schema={"type": "object"}, fn=t2,
     )
 
-    responses = [
-        ("ok", FakeMessage(content=[FakeTextBlock(text="ok")], stop_reason="end_turn")),
-    ]
+    responses = [_text_response("ok")]
     agent = _make_agent(responses)
     agent.with_tools([tool_a])
     agent.with_tools([tool_b])
@@ -423,9 +357,7 @@ def test_with_tools_is_additive():
 
 def test_pipeline_property():
     """Pipeline is accessible via property."""
-    responses = [
-        ("ok", FakeMessage(content=[FakeTextBlock(text="ok")], stop_reason="end_turn")),
-    ]
+    responses = [_text_response("ok")]
     agent = _make_agent(responses, system_prompt="Be helpful.")
     pipeline = agent.pipeline
     assert pipeline is not None
@@ -453,20 +385,10 @@ def test_memory_with_persistent_store():
         ),
     ]
 
-    # Model calls save_fact then responds
-    msg1 = FakeMessage(
-        content=[FakeToolUseBlock(
-            block_id="tu_1", name="save_fact",
-            block_input={"fact": "User's name is Arthur"},
-        )],
-        stop_reason="tool_use",
-    )
-    msg2 = FakeMessage(
-        content=[FakeTextBlock(text="Got it!")],
-        stop_reason="end_turn",
-    )
-
-    responses = [("", msg1), ("Got it!", msg2)]
+    responses = [
+        _tool_use_response("tu_1", "save_fact", {"fact": "User's name is Arthur"}),
+        _text_response("Got it!"),
+    ]
     agent = _make_agent(responses, tools=tools, memory=memory)
     list(agent.chat("My name is Arthur"))
 
@@ -482,13 +404,8 @@ def test_memory_with_persistent_store():
 
 async def test_achat_basic():
     """Async chat returns text via async iteration."""
-    responses = [
-        ("Hello async!", FakeMessage(
-            content=[FakeTextBlock(text="Hello async!")],
-            stop_reason="end_turn",
-        )),
-    ]
-    agent = _make_agent(responses, use_async=True)
+    responses = [_text_response("Hello async!")]
+    agent = _make_agent(responses)
     chunks: list[str] = []
     async for chunk in agent.achat("Hi"):
         chunks.append(chunk)
@@ -498,13 +415,8 @@ async def test_achat_basic():
 async def test_achat_with_memory():
     """Async chat records user and assistant messages in memory."""
     memory = MemoryManager(conversation_tokens=2000, tokenizer=_Tok())
-    responses = [
-        ("Hi!", FakeMessage(
-            content=[FakeTextBlock(text="Hi!")],
-            stop_reason="end_turn",
-        )),
-    ]
-    agent = _make_agent(responses, memory=memory, use_async=True)
+    responses = [_text_response("Hi!")]
+    agent = _make_agent(responses, memory=memory)
     chunks: list[str] = []
     async for chunk in agent.achat("Hello"):
         chunks.append(chunk)
@@ -536,105 +448,17 @@ async def test_achat_tool_loop():
         fn=echo_tool,
     )
 
-    # First response: model calls tool (async stream)
-    tool_use_msg = FakeMessage(
-        content=[FakeToolUseBlock(block_id="tu_1", name="echo", block_input={"text": "hello"})],
-        stop_reason="tool_use",
-    )
-    # Second response: model returns text (async stream)
-    text_msg = FakeMessage(
-        content=[FakeTextBlock(text="Done!")],
-        stop_reason="end_turn",
-    )
-
-    responses = [("", tool_use_msg), ("Done!", text_msg)]
-    agent = _make_agent(responses, tools=[tool], use_async=True)
+    responses = [
+        _tool_use_response("tu_1", "echo", {"text": "hello"}),
+        _text_response("Done!"),
+    ]
+    agent = _make_agent(responses, tools=[tool])
     chunks: list[str] = []
     async for chunk in agent.achat("Test tool"):
         chunks.append(chunk)
 
     assert "".join(chunks) == "Done!"
     assert tool_calls == ["hello"]
-
-
-# ---------------------------------------------------------------------------
-# Tests — retry logic
-# ---------------------------------------------------------------------------
-
-
-def _ensure_mock_anthropic() -> types.ModuleType:
-    """Ensure a mock anthropic module is available for retry tests.
-
-    If the real ``anthropic`` package is installed, return it.
-    Otherwise, create a minimal mock module with the exception
-    classes needed by ``Agent._retryable_errors()``.
-    """
-    if "anthropic" in sys.modules:
-        return sys.modules["anthropic"]
-
-    mod = types.ModuleType("anthropic")
-
-    class _APIError(Exception):
-        """Base mock API error."""
-
-    class RateLimitError(_APIError):
-        pass
-
-    class APIConnectionError(_APIError):
-        pass
-
-    class APITimeoutError(_APIError):
-        pass
-
-    mod.RateLimitError = RateLimitError  # type: ignore[attr-defined]
-    mod.APIConnectionError = APIConnectionError  # type: ignore[attr-defined]
-    mod.APITimeoutError = APITimeoutError  # type: ignore[attr-defined]
-    sys.modules["anthropic"] = mod
-    return mod
-
-
-def test_retry_on_rate_limit():
-    """Agent retries on RateLimitError with exponential backoff."""
-
-    class _TransientError(Exception):
-        """Lightweight stand-in for a transient API error."""
-
-    call_count = [0]
-    responses = [
-        ("Success!", FakeMessage(
-            content=[FakeTextBlock(text="Success!")],
-            stop_reason="end_turn",
-        )),
-    ]
-    client = FakeAnthropicClient(responses)
-
-    # Wrap stream() to fail twice, then succeed
-    original_stream = client.messages.stream
-
-    def flaky_stream(**kwargs: Any) -> FakeStream:
-        call_count[0] += 1
-        if call_count[0] <= 2:
-            raise _TransientError("rate limited")
-        return original_stream(**kwargs)
-
-    client.messages.stream = flaky_stream  # type: ignore[assignment]
-
-    agent = Agent(model="test-model", client=client, max_retries=3)
-    agent.with_system_prompt("You are helpful.")
-
-    # Patch _retryable_errors to catch our lightweight error class
-    with (
-        patch.object(Agent, "_retryable_errors", return_value=(_TransientError,)),
-        patch("anchor.agent.agent.time.sleep") as mock_sleep,
-    ):
-        chunks = list(agent.chat("Hi"))
-
-    assert "".join(chunks) == "Success!"
-    assert call_count[0] == 3  # 2 failures + 1 success
-    # Verify exponential backoff: sleep(1), sleep(2)
-    assert mock_sleep.call_count == 2
-    mock_sleep.assert_any_call(1)
-    mock_sleep.assert_any_call(2)
 
 
 # ---------------------------------------------------------------------------
@@ -660,20 +484,10 @@ def test_tool_calls_recorded_in_memory():
         fn=greet,
     )
 
-    # First response: model calls tool
-    tool_use_msg = FakeMessage(
-        content=[FakeToolUseBlock(
-            block_id="tu_1", name="greet", block_input={"name": "Alice"},
-        )],
-        stop_reason="tool_use",
-    )
-    # Second response: model returns text
-    text_msg = FakeMessage(
-        content=[FakeTextBlock(text="Done greeting!")],
-        stop_reason="end_turn",
-    )
-
-    responses = [("", tool_use_msg), ("Done greeting!", text_msg)]
+    responses = [
+        _tool_use_response("tu_1", "greet", {"name": "Alice"}),
+        _text_response("Done greeting!"),
+    ]
     agent = _make_agent(responses, tools=[tool], memory=memory)
     list(agent.chat("Greet Alice"))
 
@@ -687,3 +501,57 @@ def test_tool_calls_recorded_in_memory():
     assert "Hello, Alice!" in turns[1].content
     assert turns[2].role == "assistant"
     assert turns[2].content == "Done greeting!"
+
+
+# ---------------------------------------------------------------------------
+# Tests — after_turn: the conversation becomes long-term memory (roadmap #5)
+# ---------------------------------------------------------------------------
+
+
+class _CountingExtractor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract(self, turns):
+        self.calls += 1
+        return []
+
+
+def _remembering_memory() -> tuple[MemoryManager, _CountingExtractor]:
+    from anchor.storage.json_memory_store import InMemoryEntryStore
+
+    extractor = _CountingExtractor()
+    memory = MemoryManager(
+        conversation_tokens=2000,
+        tokenizer=_Tok(),
+        persistent_store=InMemoryEntryStore(),
+        extractor=extractor,
+    )
+    return memory, extractor
+
+
+def test_stream_remembers_once_per_completed_turn():
+    memory, extractor = _remembering_memory()
+    agent = _make_agent([_text_response("Hi!"), _text_response("Again!")], memory=memory)
+    list(agent.stream("Hello"))
+    assert extractor.calls == 1
+    list(agent.stream("More"))
+    assert extractor.calls == 2
+
+
+def test_abandoned_stream_does_not_remember():
+    memory, extractor = _remembering_memory()
+    agent = _make_agent([_text_response("Hi!")], memory=memory)
+    events = agent.stream("Hello")
+    next(events)
+    events.close()
+    assert extractor.calls == 0
+    assert memory.conversation.turns[0].content == "Hello"  # the finally still ran
+
+
+async def test_astream_remembers_once_per_completed_turn():
+    memory, extractor = _remembering_memory()
+    agent = _make_agent([_text_response("Hi!")], memory=memory)
+    async for _ in agent.astream("Hello"):
+        pass
+    assert extractor.calls == 1

@@ -64,16 +64,16 @@ class TestBareDecorator:
         result = add.fn(a="hello")
         assert result == "added hello"
 
-    def test_anthropic_schema(self) -> None:
+    def test_tool_schema(self) -> None:
         @tool
         def ping(msg: str) -> str:
             """Ping."""
             return msg
 
-        schema = ping.to_anthropic_schema()
-        assert schema["name"] == "ping"
-        assert schema["description"] == "Ping."
-        assert "input_schema" in schema
+        schema = ping.to_tool_schema()
+        assert schema.name == "ping"
+        assert schema.description == "Ping."
+        assert schema.input_schema is not None
 
     def test_descriptions_from_docstring_args(self) -> None:
         @tool

@@ -126,12 +126,11 @@ class TestActiveTools:
         tools = reg.active_tools()
         assert sorted(t.name for t in tools) == ["tool_a", "tool_b"]
 
-    def test_duplicate_tool_names_raises(self) -> None:
+    def test_duplicate_tool_names_raise_at_registration(self) -> None:
         reg = SkillRegistry()
         reg.register(_always_skill("s1", "same_name"))
-        reg.register(_always_skill("s2", "same_name"))
-        with pytest.raises(ValueError, match="Duplicate tool name"):
-            reg.active_tools()
+        with pytest.raises(ValueError, match="Tool name collision"):
+            reg.register(_always_skill("s2", "same_name"))
 
     def test_empty_registry(self) -> None:
         reg = SkillRegistry()
@@ -161,12 +160,13 @@ class TestDiscoveryPrompt:
         assert "rag" in prompt
         assert "activate_skill" in prompt
 
-    def test_shows_active_marker(self) -> None:
+    def test_prompt_is_stable_across_activation(self) -> None:
+        """Discovery text must not change when a skill activates (cache-friendly)."""
         reg = SkillRegistry()
         reg.register(_on_demand_skill("rag", "search_docs"))
+        before = reg.skill_discovery_prompt()
         reg.activate("rag")
-        prompt = reg.skill_discovery_prompt()
-        assert "[active]" in prompt
+        assert reg.skill_discovery_prompt() == before
 
     def test_empty_registry_empty_prompt(self) -> None:
         reg = SkillRegistry()

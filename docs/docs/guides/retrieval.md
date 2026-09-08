@@ -331,7 +331,7 @@ for item in reranked:
 ## What's Next
 
 - [Advanced Retrieval](advanced-retrieval.md) -- reranker pipelines, async
-  retrievers, query routing, cross-modal search, and late interaction
+  retrievers, query routing, and cross-modal search
 - [Storage Guide](storage.md) -- store protocols and implementations
 - [Retrieval API Reference](../api/retrieval.md) -- full constructor and
   method signatures

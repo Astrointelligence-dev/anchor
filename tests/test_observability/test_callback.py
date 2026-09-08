@@ -12,6 +12,7 @@ from anchor.observability.tracer import Tracer
 from anchor.pipeline.callbacks import PipelineCallback
 from anchor.pipeline.pipeline import ContextPipeline
 from anchor.pipeline.step import PipelineStep
+from tests.conftest import FakeTokenizer
 
 
 def _make_item(content: str = "test", score: float = 0.5) -> ContextItem:
@@ -52,7 +53,7 @@ class TestTracingCallbackLifecycle:
         callback.on_step_end("retrieval", [_make_item(), _make_item()], 10.5)
 
         # Build a fake result to trigger export
-        pipeline = ContextPipeline(max_tokens=1000)
+        pipeline = ContextPipeline(max_tokens=1000, tokenizer=FakeTokenizer())
         result = pipeline.build(query)
         callback.on_pipeline_end(result)
 
@@ -69,7 +70,7 @@ class TestTracingCallbackLifecycle:
         callback.on_step_start("bad-step", [])
         callback.on_step_error("bad-step", RuntimeError("boom"))
 
-        pipeline = ContextPipeline(max_tokens=1000)
+        pipeline = ContextPipeline(max_tokens=1000, tokenizer=FakeTokenizer())
         result = pipeline.build(query)
         callback.on_pipeline_end(result)
 
@@ -87,7 +88,7 @@ class TestTracingCallbackLifecycle:
         callback.on_step_start("retrieval", [])
         callback.on_step_end("retrieval", [_make_item()], 15.0)
 
-        pipeline = ContextPipeline(max_tokens=1000)
+        pipeline = ContextPipeline(max_tokens=1000, tokenizer=FakeTokenizer())
         result = pipeline.build(query)
         callback.on_pipeline_end(result)
 
@@ -116,7 +117,7 @@ class TestTracingCallbackWithPipeline:
             return existing + items
 
         step = PipelineStep(name="search", fn=retriever_fn)
-        pipeline = ContextPipeline(max_tokens=1000)
+        pipeline = ContextPipeline(max_tokens=1000, tokenizer=FakeTokenizer())
         pipeline.add_step(step)
         pipeline.add_callback(callback)
 
@@ -151,7 +152,7 @@ class TestTracingCallbackWithPipeline:
         def step2(items: list[ContextItem], q: QueryBundle) -> list[ContextItem]:
             return items
 
-        pipeline = ContextPipeline(max_tokens=1000)
+        pipeline = ContextPipeline(max_tokens=1000, tokenizer=FakeTokenizer())
         pipeline.add_step(PipelineStep(name="fetch", fn=step1))
         pipeline.add_step(PipelineStep(name="rerank", fn=step2))
         pipeline.add_callback(callback)
@@ -172,7 +173,7 @@ class TestTracingCallbackWithPipeline:
             msg = "intentional failure"
             raise RuntimeError(msg)
 
-        pipeline = ContextPipeline(max_tokens=1000)
+        pipeline = ContextPipeline(max_tokens=1000, tokenizer=FakeTokenizer())
         pipeline.add_step(PipelineStep(name="bad", fn=bad_step, on_error="skip"))
         pipeline.add_callback(callback)
 
@@ -234,7 +235,7 @@ class TestTracingCallbackEdgeCases:
 
     def test_pipeline_end_without_start(self) -> None:
         callback = TracingCallback()
-        pipeline = ContextPipeline(max_tokens=1000)
+        pipeline = ContextPipeline(max_tokens=1000, tokenizer=FakeTokenizer())
         result = pipeline.build("test")
         # Calling on_pipeline_end without on_pipeline_start — should not raise
         callback.on_pipeline_end(result)

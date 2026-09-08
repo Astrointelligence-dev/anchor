@@ -452,3 +452,28 @@ class TestABTestRunnerIntegration:
         assert result.winner == "a"
         assert result.metrics_a.mean_precision > 0.0
         assert result.metrics_b.mean_precision == 0.0
+
+
+class TestABScopeForwarding:
+    def test_scope_reaches_both_retrievers(self) -> None:
+        from anchor.evaluation import (
+            ABTestRunner,
+            EvaluationDataset,
+            EvaluationSample,
+            PipelineEvaluator,
+        )
+        from anchor.models.scope import RetrievalScope
+
+        seen: list[object] = []
+
+        class Spy:
+            def retrieve(self, query, top_k=10, **kwargs):
+                seen.append(kwargs.get("scope", "absent"))
+                return []
+
+        dataset = EvaluationDataset(samples=[EvaluationSample(query="q", relevant_ids=["a"])])
+        runner = ABTestRunner(PipelineEvaluator(), dataset)
+        runner.run(Spy(), Spy(), k=3)
+        scope = RetrievalScope(include=("/y",))
+        runner.run(Spy(), Spy(), k=3, scope=scope)
+        assert seen == ["absent", "absent", scope, scope]

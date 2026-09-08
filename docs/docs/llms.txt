@@ -8,8 +8,8 @@ memory management, token budgeting, formatting, query transformation, ingestion,
 evaluation, observability, and an agent framework -- all through a composable,
 protocol-driven architecture.
 
-- Repo: https://github.com/artcgranja/anchor
-- Docs: https://artcgranja.github.io/anchor
+- Repo: https://github.com/Astrointelligence-dev/anchor
+- Docs: https://astrointelligence-dev.github.io/anchor
 - License: MIT
 - Python: >=3.11
 - Core dependency: pydantic>=2.8
@@ -96,8 +96,8 @@ Implement any protocol to plug custom logic into the pipeline.
   RecencyScorer        -- score(entry) -> float
   EvictionPolicy       -- select_for_eviction(entries, count) -> list[str]
   CompactionStrategy   -- compact(entries) -> list[MemoryEntry]
-  MemoryExtractor      -- extract(turn) -> list[MemoryEntry]
-  MemoryConsolidator   -- consolidate(entries) -> list[MemoryEntry]
+  MemoryExtractor      -- extract(turns) -> list[MemoryEntry]
+  MemoryConsolidator   -- consolidate(new_entries, existing) -> list[(MemoryOperation, MemoryEntry | None)]
   MemoryDecay          -- decay(entry) -> float
   QueryRouter          -- route(query) -> str
   QueryClassifier      -- classify(query) -> str
@@ -115,7 +115,7 @@ Create PipelineStep instances for use with pipeline.add_step():
   reranker_step(name, reranker)                -- run a Reranker
   query_transform_step(name, transformer)       -- transform the query
   classified_retriever_step(name, classifier, retriever_map)
-  graph_retrieval_step(name, graph_memory)      -- retrieve from graph memory
+  graph_retrieval_step(graph, store, extractor) -- memory entries reached through the knowledge graph
   auto_promotion_step(name, promoter)           -- promote items by importance
   create_eviction_promoter(memory, threshold)   -- factory for auto-promotion
 
@@ -138,18 +138,18 @@ Requires a CompactionStrategy.
       compaction_strategy=my_strategy,
   )
 
-### SimpleGraphMemory
-Entity-relation-entity triples extracted from conversation. Supports
-graph traversal queries.
+### KnowledgeGraph (see "Knowledge Graph" below)
+Entities, notes and typed evidenced relations over memory AND documents;
+memory facts enter it through MemoryManager(graph=GraphIndexer(...)).
 
-  graph = SimpleGraphMemory()
-  graph.add_triple("Alice", "works_at", "Acme Corp")
-  items = graph.query("Alice")
+  graph = KnowledgeGraph()
+  graph.add_edge("Alice", "works_at", "Acme Corp", evidence=["mem-1"])
+  graph.related_items("Alice")
 
 ### MemoryManager
 Orchestrates one or more memory backends. Implements MemoryProvider.
 
-  manager = MemoryManager(backends=[sliding, summary, graph])
+  manager = MemoryManager(persistent_store=store, graph=GraphIndexer(graph))
 
 ## Retrieval Types
 
@@ -320,3 +320,19 @@ Collectors: InMemoryMetricsCollector, LoggingMetricsCollector
   # Execute
   result = pipeline.build(QueryBundle(query_str="How does context engineering work?"))
   print(result.formatted_output)  # Ready for LLM API call
+
+## Knowledge Graph (anchor.graph)
+
+  KnowledgeGraph(store=None)   -- nodes (canonical keys), typed evidenced edges, bi-temporal
+  .add_node / .add_edge / .link_item / .unlink_item / .invalidate_edge
+  .neighbors / .backlinks / .path / .explain / .related_items / .mentions
+  .query(seeds, top_k)         -- personalized PageRank, scores land on items
+  .hubs(k) / .communities()    -- degree ranking; Louvain (igraph Leiden with [graph])
+  Every read takes scope=RetrievalScope and as_of=datetime; a node without
+  visible evidence does not exist for the scope and is never crossed.
+  Stores: InMemoryGraphStore, SqliteGraphStore (sync), PostgresGraphStore (async)
+  Extractors: StructureExtractor, WikilinkExtractor (free), LLMGraphExtractor(llm) (opt-in)
+  GraphIndexer(graph, extractors).index(items) / .index_entries(memory_entries)
+  GraphRetriever(graph, context_store, vector_store=None)  -- first-class Retriever
+  MemoryManager(graph=GraphIndexer(...))                  -- wraps the store in GraphIndexingEntryStore
+  CLI: anchor index --graph; anchor graph query|path|explain|hubs|communities|backlinks

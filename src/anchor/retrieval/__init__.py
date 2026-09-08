@@ -5,14 +5,9 @@ from .async_reranker import AsyncCohereReranker, AsyncCrossEncoderReranker
 from .async_retriever import AsyncDenseRetriever, AsyncHybridRetriever
 from .cross_modal import CrossModalEncoder, SharedSpaceRetriever
 from .dense import DenseRetriever
+from .graph import GraphRetriever
 from .hybrid import HybridRetriever
-from .late_interaction import (
-    LateInteractionRetriever,
-    LateInteractionScorer,
-    MaxSimScorer,
-)
 from .memory_retriever import MemoryRetrieverAdapter, ScoredMemoryRetriever
-from .reranker import ScoreReranker
 from .rerankers import (
     CohereReranker,
     CrossEncoderReranker,
@@ -34,17 +29,14 @@ __all__ = [
     "CrossModalEncoder",
     "DenseRetriever",
     "FlashRankReranker",
+    "GraphRetriever",
     "HybridRetriever",
     "KeywordRouter",
-    "LateInteractionRetriever",
-    "LateInteractionScorer",
-    "MaxSimScorer",
     "MemoryRetrieverAdapter",
     "MetadataRouter",
     "RerankerPipeline",
     "RoundRobinReranker",
     "RoutedRetriever",
-    "ScoreReranker",
     "ScoredMemoryRetriever",
     "SharedSpaceRetriever",
     "SparseRetriever",

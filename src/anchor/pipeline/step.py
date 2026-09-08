@@ -10,6 +10,7 @@ from typing import Any, Literal, cast
 from anchor.exceptions import AstroContextError, RetrieverError
 from anchor.models.context import ContextItem
 from anchor.models.query import QueryBundle
+from anchor.models.scope import RetrievalScope, effective_scope, scope_kwargs
 from anchor.protocols.postprocessor import AsyncPostProcessor, PostProcessor
 from anchor.protocols.query_transform import QueryTransformer
 from anchor.protocols.reranker import AsyncReranker, Reranker
@@ -81,21 +82,42 @@ class PipelineStep:
         return self._validate_result(result)
 
 
-def retriever_step(name: str, retriever: Retriever, top_k: int = 10) -> PipelineStep:
-    """Create a pipeline step from a Retriever protocol implementation."""
+def retriever_step(
+    name: str,
+    retriever: Retriever,
+    top_k: int = 10,
+    *,
+    scope: RetrievalScope | None = None,
+) -> PipelineStep:
+    """Create a pipeline step from a Retriever protocol implementation.
+
+    ``scope`` is intersected with the scope published by the running agent
+    turn (``Agent.with_scope``, a parent's scope seen by a subagent), so
+    pipeline retrieval can only narrow — the same doctrine as the tools.
+    """
 
     def _retrieve(items: list[ContextItem], query: QueryBundle) -> list[ContextItem]:
-        retrieved = retriever.retrieve(query, top_k=top_k)
+        retrieved = retriever.retrieve(
+            query, top_k=top_k, **scope_kwargs(effective_scope(scope)),
+        )
         return items + retrieved
 
     return PipelineStep(name=name, fn=_retrieve)
 
 
-def async_retriever_step(name: str, retriever: AsyncRetriever, top_k: int = 10) -> PipelineStep:
+def async_retriever_step(
+    name: str,
+    retriever: AsyncRetriever,
+    top_k: int = 10,
+    *,
+    scope: RetrievalScope | None = None,
+) -> PipelineStep:
     """Create an async pipeline step from an AsyncRetriever implementation."""
 
     async def _aretrieve(items: list[ContextItem], query: QueryBundle) -> list[ContextItem]:
-        retrieved = await retriever.aretrieve(query, top_k=top_k)
+        retrieved = await retriever.aretrieve(
+            query, top_k=top_k, **scope_kwargs(effective_scope(scope)),
+        )
         return items + retrieved
 
     return PipelineStep(name=name, fn=_aretrieve, is_async=True)
@@ -119,7 +141,9 @@ def async_postprocessor_step(name: str, processor: AsyncPostProcessor) -> Pipeli
     return PipelineStep(name=name, fn=_aprocess, is_async=True)
 
 
-def reranker_step(name: str, reranker: Reranker, top_k: int = 10) -> PipelineStep:
+def reranker_step(
+    name: str, reranker: Reranker, top_k: int | None = None
+) -> PipelineStep:
     """Create a pipeline step from a Reranker protocol implementation.
 
     The reranker receives the current items and query, scores them,
@@ -129,6 +153,7 @@ def reranker_step(name: str, reranker: Reranker, top_k: int = 10) -> PipelineSte
         name: Human-readable name for the step.
         reranker: Any object implementing the Reranker protocol.
         top_k: Maximum number of items the reranker should return.
+            ``None`` defers to the reranker's own configured ``top_k``.
 
     Returns:
         A ``PipelineStep`` that applies the reranker to the pipeline items.
@@ -140,13 +165,16 @@ def reranker_step(name: str, reranker: Reranker, top_k: int = 10) -> PipelineSte
     return PipelineStep(name=name, fn=_rerank)
 
 
-def async_reranker_step(name: str, reranker: AsyncReranker, top_k: int = 10) -> PipelineStep:
+def async_reranker_step(
+    name: str, reranker: AsyncReranker, top_k: int | None = None
+) -> PipelineStep:
     """Create an async pipeline step from an AsyncReranker implementation.
 
     Parameters:
         name: Human-readable name for the step.
         reranker: Any object implementing the AsyncReranker protocol.
         top_k: Maximum number of items the reranker should return.
+            ``None`` defers to the reranker's own configured ``top_k``.
 
     Returns:
         An async ``PipelineStep`` that applies the reranker.

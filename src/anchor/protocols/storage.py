@@ -6,10 +6,13 @@ Users can provide any object that matches the interface -- no inheritance requir
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from datetime import datetime
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from anchor.models.context import ContextItem
+from anchor.models.graph import GraphEdge, GraphNode, Subgraph
 from anchor.models.memory import MemoryEntry
+from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope
 
 
 @runtime_checkable
@@ -84,7 +87,12 @@ class VectorStore(Protocol):
     """
 
     def add_embedding(
-        self, item_id: str, embedding: list[float], metadata: dict[str, Any] | None = None
+        self,
+        item_id: str,
+        embedding: list[float],
+        metadata: dict[str, Any] | None = None,
+        *,
+        namespace: str = ROOT_NAMESPACE,
     ) -> None:
         """Store an embedding vector associated with an item id.
 
@@ -94,6 +102,8 @@ class VectorStore(Protocol):
             embedding: The dense vector representation of the item.
             metadata: Optional key-value metadata attached to the vector
                 entry (e.g., source filename, chunk index).
+            namespace: Hierarchical path the entry lives under inside the
+                store's vault (canonical form, e.g. ``/contratos/2026``).
 
         Side Effects:
             The embedding is persisted in the vector index.  If an entry
@@ -103,7 +113,12 @@ class VectorStore(Protocol):
         ...
 
     def search(
-        self, query_embedding: list[float], top_k: int = 10
+        self,
+        query_embedding: list[float],
+        top_k: int = 10,
+        where: dict[str, Any] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
     ) -> list[tuple[str, float]]:
         """Find the most similar embeddings to a query vector.
 
@@ -111,6 +126,16 @@ class VectorStore(Protocol):
             query_embedding: The dense vector to compare against stored
                 embeddings.
             top_k: Maximum number of results to return.
+            where: Optional metadata filter, PRE-applied before top_k.
+                Plain ``key: value`` pairs mean equality; a value may
+                instead be an operator dict —
+                ``{"year": {"$gte": 2024, "$lt": 2026}}`` — with the
+                operator core ``$eq $ne $in $nin $gt $gte $lt $lte``.
+                Unknown operators raise ``ValueError``.
+            scope: Optional namespace scope (include/exclude prefixes,
+                exclude wins), PRE-applied before top_k. The vault is
+                never part of the scope — stores are bound to their
+                vault at construction.
 
         Returns:
             A list of ``(item_id, score)`` tuples ordered by descending
@@ -298,3 +323,253 @@ class GarbageCollectableStore(Protocol):
             ``True`` if found and deleted, ``False`` otherwise.
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# Async protocol variants
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class AsyncContextStore(Protocol):
+    """Async variant of :class:`ContextStore`.
+
+    All methods mirror their sync counterparts.  See :class:`ContextStore`
+    for full parameter documentation.
+    """
+
+    async def add(self, item: ContextItem) -> None: ...
+    async def get(self, item_id: str) -> ContextItem | None: ...
+    async def get_all(self) -> list[ContextItem]: ...
+    async def delete(self, item_id: str) -> bool: ...
+    async def clear(self) -> None: ...
+
+
+@runtime_checkable
+class AsyncVectorStore(Protocol):
+    """Async variant of :class:`VectorStore`.
+
+    All methods mirror their sync counterparts.  See :class:`VectorStore`
+    for full parameter documentation.
+    """
+
+    async def add_embedding(
+        self,
+        item_id: str,
+        embedding: list[float],
+        metadata: dict[str, Any] | None = None,
+        *,
+        namespace: str = ROOT_NAMESPACE,
+    ) -> None: ...
+    async def search(
+        self,
+        query_embedding: list[float],
+        top_k: int = 10,
+        where: dict[str, Any] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[tuple[str, float]]: ...
+    async def delete(self, item_id: str) -> bool: ...
+
+
+@runtime_checkable
+class AsyncDocumentStore(Protocol):
+    """Async variant of :class:`DocumentStore`.
+
+    All methods mirror their sync counterparts.  See :class:`DocumentStore`
+    for full parameter documentation.
+    """
+
+    async def add_document(
+        self, doc_id: str, content: str, metadata: dict[str, Any] | None = None
+    ) -> None: ...
+    async def get_document(self, doc_id: str) -> str | None: ...
+    async def list_documents(self) -> list[str]: ...
+    async def delete_document(self, doc_id: str) -> bool: ...
+
+
+@runtime_checkable
+class AsyncMemoryEntryStore(Protocol):
+    """Async variant of :class:`MemoryEntryStore`.
+
+    All methods mirror their sync counterparts.  See :class:`MemoryEntryStore`
+    for full parameter documentation.
+    """
+
+    async def add(self, entry: MemoryEntry) -> None: ...
+    async def search(self, query: str, top_k: int = 5) -> list[MemoryEntry]: ...
+    async def list_all(self) -> list[MemoryEntry]: ...
+    async def delete(self, entry_id: str) -> bool: ...
+    async def clear(self) -> None: ...
+
+
+@runtime_checkable
+class AsyncGarbageCollectableStore(Protocol):
+    """Async variant of :class:`GarbageCollectableStore`.
+
+    All methods mirror their sync counterparts.  See
+    :class:`GarbageCollectableStore` for full parameter documentation.
+    """
+
+    async def list_all_unfiltered(self) -> list[MemoryEntry]: ...
+    async def delete(self, entry_id: str) -> bool: ...
+
+
+@runtime_checkable
+class GraphStore(Protocol):
+    """Protocol for the knowledge graph (roadmap #4).
+
+    Bound to one vault at construction like every store. ``scope`` narrows
+    namespaces through the evidence items; ``as_of`` is world time. The
+    visibility rule is the one stated in :mod:`anchor.models.graph` — every
+    backend applies the shared implementation in
+    :mod:`anchor.storage._graph_sql`. Edges are invalidated in place, never
+    deleted; an edge's evidence evidences both its endpoints.
+    """
+
+    @property
+    def vault(self) -> str:
+        """The mount this graph lives in."""
+        ...
+
+    @property
+    def version(self) -> int:
+        """Increments on every write; derived data (hubs, communities) caches on it."""
+        ...
+
+    def upsert_node(self, node: GraphNode) -> GraphNode:
+        """Insert or merge a node (aliases and metadata merge; the first label that
+        differs from the key wins — a node born as an edge endpoint carries its key
+        as a placeholder label until a real name arrives).
+
+        Returns:
+            The stored node.
+        """
+        ...
+
+    def get_node(self, node_id: str) -> GraphNode | None:
+        """The node under a canonical id, or ``None``."""
+        ...
+
+    def add_edge(self, edge: GraphEdge) -> GraphEdge:
+        """Insert an edge, creating missing endpoint nodes.
+
+        When a live edge with the same ``(source, relation, target)`` exists
+        the new one is merged into it (evidence union, max confidence, best
+        provenance, first fact). Evidence items must already be linked
+        (``ValueError`` otherwise — the graph needs their namespace).
+
+        Returns:
+            The stored (possibly merged) edge.
+        """
+        ...
+
+    def get_edge(self, edge_id: str) -> GraphEdge | None:
+        """An edge by id, invalidated ones included (history is kept)."""
+        ...
+
+    def invalidate_edge(self, edge_id: str, *, at: datetime | None = None) -> bool:
+        """Mark an edge obsolete at *at* (default now). ``False`` if unknown or already."""
+        ...
+
+    def remove_node(self, node_id: str) -> bool:
+        """Drop a node, invalidate its edges, forget its item links."""
+        ...
+
+    def link_item(self, node_id: str, item_id: str, namespace: str = ROOT_NAMESPACE) -> None:
+        """Record that an item evidences a node, under the item's namespace.
+
+        The latest link decides the item's namespace (a re-indexed, moved
+        document moves its evidence with it).
+
+        Raises:
+            KeyError: If the node does not exist.
+        """
+        ...
+
+    def unlink_item(self, item_id: str) -> int:
+        """Forget an item everywhere; edges left with no evidence are invalidated.
+
+        Returns:
+            The number of edges invalidated.
+        """
+        ...
+
+    def node_items(self, node_id: str, *, scope: RetrievalScope | None = None) -> list[str]:
+        """Evidence item ids of a node visible under *scope*, link order."""
+        ...
+
+    def edges_of(
+        self,
+        node_id: str,
+        *,
+        direction: Literal["out", "in", "both"] = "both",
+        scope: RetrievalScope | None = None,
+        as_of: datetime | None = None,
+    ) -> list[GraphEdge]:
+        """Visible live edges touching a node, in insertion order (directions mixed)."""
+        ...
+
+    def subgraph(
+        self,
+        *,
+        scope: RetrievalScope | None = None,
+        as_of: datetime | None = None,
+    ) -> Subgraph:
+        """Everything visible under *scope* at *as_of* — nodes, edges, node→items."""
+        ...
+
+    def clear(self) -> None:
+        """Remove every node, edge and link."""
+        ...
+
+
+@runtime_checkable
+class AsyncGraphStore(Protocol):
+    """Async twin of :class:`GraphStore` — same contract, awaited."""
+
+    @property
+    def vault(self) -> str: ...
+
+    @property
+    def version(self) -> int: ...
+
+    async def upsert_node(self, node: GraphNode) -> GraphNode: ...
+
+    async def get_node(self, node_id: str) -> GraphNode | None: ...
+
+    async def add_edge(self, edge: GraphEdge) -> GraphEdge: ...
+
+    async def get_edge(self, edge_id: str) -> GraphEdge | None: ...
+
+    async def invalidate_edge(self, edge_id: str, *, at: datetime | None = None) -> bool: ...
+
+    async def remove_node(self, node_id: str) -> bool: ...
+
+    async def link_item(
+        self, node_id: str, item_id: str, namespace: str = ROOT_NAMESPACE
+    ) -> None: ...
+
+    async def unlink_item(self, item_id: str) -> int: ...
+
+    async def node_items(
+        self, node_id: str, *, scope: RetrievalScope | None = None
+    ) -> list[str]: ...
+
+    async def edges_of(
+        self,
+        node_id: str,
+        *,
+        direction: Literal["out", "in", "both"] = "both",
+        scope: RetrievalScope | None = None,
+        as_of: datetime | None = None,
+    ) -> list[GraphEdge]: ...
+
+    async def subgraph(
+        self,
+        *,
+        scope: RetrievalScope | None = None,
+        as_of: datetime | None = None,
+    ) -> Subgraph: ...
+
+    async def clear(self) -> None: ...

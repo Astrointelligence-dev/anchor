@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from anchor.models.memory import MemoryType
 from anchor.storage._base import BaseEntryStoreMixin
 from tests.conftest import make_memory_entry as _make_entry
@@ -49,6 +51,35 @@ class TestSharedBasicCRUD:
             )
         results = entry_store.search("memory", top_k=3)
         assert len(results) == 3
+
+    def test_tagged_matches_beyond_top_k_rank_are_found(
+        self, entry_store: BaseEntryStoreMixin
+    ) -> None:
+        """Tags filtering must happen before top_k truncation.
+
+        Regression (2026-08-31 review): the sqlite backend applied the SQL
+        LIMIT first and the tags filter after, returning [] whenever
+        higher-relevance untagged entries filled the limit.
+        """
+        for i in range(10):
+            entry_store.add(  # type: ignore[attr-defined]
+                _make_entry(
+                    entry_id=f"plain{i}", content="memory note",
+                    relevance_score=0.9,
+                )
+            )
+        for i in range(5):
+            entry_store.add(  # type: ignore[attr-defined]
+                _make_entry(
+                    entry_id=f"tagged{i}", content="memory note",
+                    relevance_score=0.1, tags=["important"],
+                )
+            )
+
+        results = entry_store.search_filtered(
+            "memory", top_k=5, tags=["important"]
+        )
+        assert {e.id for e in results} == {f"tagged{i}" for i in range(5)}
 
     def test_search_sorts_by_relevance_score(
         self, entry_store: BaseEntryStoreMixin
@@ -410,6 +441,8 @@ class TestSharedMatchesFilters:
     def test_matches_filters_passes_matching_entry(
         self, entry_store: BaseEntryStoreMixin
     ) -> None:
+        if not hasattr(entry_store, "_matches_filters"):
+            pytest.skip("SqliteEntryStore does filtering in SQL")
         entry = _make_entry(entry_id="mf1", user_id="alice")
         assert entry_store._matches_filters(
             entry,
@@ -424,6 +457,8 @@ class TestSharedMatchesFilters:
     def test_matches_filters_rejects_non_matching_entry(
         self, entry_store: BaseEntryStoreMixin
     ) -> None:
+        if not hasattr(entry_store, "_matches_filters"):
+            pytest.skip("SqliteEntryStore does filtering in SQL")
         entry = _make_entry(entry_id="mf2", user_id="alice")
         assert not entry_store._matches_filters(
             entry,

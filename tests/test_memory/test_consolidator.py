@@ -243,3 +243,16 @@ class TestSimilarityConsolidatorValidation:
 
         with pytest.raises(ValueError, match="similarity_threshold"):
             SimilarityConsolidator(embed_fn=_fake_embed, similarity_threshold=-0.1)
+
+
+class TestMergedEntryHash:
+    def test_merge_recomputes_content_hash(self) -> None:
+        from anchor.memory.consolidator import SimilarityConsolidator
+        from anchor.models.memory import MemoryEntry, _compute_content_hash
+
+        existing = MemoryEntry(id="e1", content="alice likes tea")
+        newer = MemoryEntry(id="e2", content="alice likes tea and biscuits")
+        merged = SimilarityConsolidator._merge_entries(newer, existing)
+        assert merged.content == "alice likes tea and biscuits"
+        assert merged.content_hash == _compute_content_hash(merged.content)
+        assert merged.content_hash != existing.content_hash

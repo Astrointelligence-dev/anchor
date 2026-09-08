@@ -13,7 +13,7 @@ class TestLLMRAGEvaluator:
     """Test LLM-based RAG evaluation with mock callbacks."""
 
     def test_protocol_compliance(self) -> None:
-        evaluator = LLMRAGEvaluator()
+        evaluator = LLMRAGEvaluator(relevancy_fn=lambda q, a: 0.5)
         assert isinstance(evaluator, RAGEvaluator)
 
     def test_all_callbacks_provided(self) -> None:
@@ -36,20 +36,16 @@ class TestLLMRAGEvaluator:
         assert m.context_precision == pytest.approx(0.7)
         assert m.context_recall == pytest.approx(0.6)
 
-    def test_no_callbacks_defaults_to_zero(self) -> None:
-        evaluator = LLMRAGEvaluator()
+    def test_no_callbacks_raises(self) -> None:
+        with pytest.raises(ValueError, match="at least one metric callback"):
+            LLMRAGEvaluator()
 
-        m = evaluator.evaluate(
-            query="Q",
-            answer="A",
-            contexts=["c"],
-            ground_truth="gt",
-        )
-
-        assert m.faithfulness == 0.0
+    def test_zero_score_distinct_from_not_evaluated(self) -> None:
+        """A genuine 0.0 from a callback must not look like 'not configured'."""
+        evaluator = LLMRAGEvaluator(relevancy_fn=lambda q, a: 0.0)
+        m = evaluator.evaluate(query="Q", answer="A", contexts=["c"])
         assert m.answer_relevancy == 0.0
-        assert m.context_precision == 0.0
-        assert m.context_recall == 0.0
+        assert m.faithfulness is None
 
     def test_partial_callbacks(self) -> None:
         evaluator = LLMRAGEvaluator(
@@ -59,9 +55,9 @@ class TestLLMRAGEvaluator:
         m = evaluator.evaluate(query="Q", answer="A", contexts=["c"])
 
         assert m.faithfulness == pytest.approx(0.85)
-        assert m.answer_relevancy == 0.0
-        assert m.context_precision == 0.0
-        assert m.context_recall == 0.0
+        assert m.answer_relevancy is None  # not configured -> not evaluated
+        assert m.context_precision is None
+        assert m.context_recall is None
 
     def test_recall_requires_ground_truth(self) -> None:
         """Recall callback is skipped when ground_truth is None."""
@@ -77,7 +73,7 @@ class TestLLMRAGEvaluator:
         m = evaluator.evaluate(query="Q", answer="A", contexts=["c"], ground_truth=None)
 
         assert not recall_called
-        assert m.context_recall == 0.0
+        assert m.context_recall is None
 
     def test_recall_called_with_ground_truth(self) -> None:
         """Recall callback fires when ground_truth is provided."""
@@ -127,7 +123,7 @@ class TestLLMRAGEvaluator:
         assert captured["recall"] == ("the query", ["ctx1", "ctx2"], "the truth")
 
     def test_returns_frozen_model(self) -> None:
-        evaluator = LLMRAGEvaluator()
+        evaluator = LLMRAGEvaluator(relevancy_fn=lambda q, a: 0.5)
         m = evaluator.evaluate(query="Q", answer="A", contexts=[])
         assert isinstance(m, RAGMetrics)
         with pytest.raises(Exception):  # noqa: B017

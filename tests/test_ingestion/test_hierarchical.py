@@ -23,7 +23,8 @@ class TestParentChildChunker:
         assert parent_child_chunker.chunk("   ") == []
 
     def test_short_text_single_parent_single_child(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         text = "hello world"
         chunks = parent_child_chunker.chunk(text)
@@ -31,25 +32,28 @@ class TestParentChildChunker:
         assert chunks[0] == "hello world"
 
     def test_child_chunks_fit_within_parent(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         # 30 words => should produce multiple parents (parent_chunk_size=20)
         text = " ".join(f"word{i}" for i in range(30))
         pairs = parent_child_chunker.chunk_with_metadata(text)
 
-        # Collect unique parent texts
-        parent_texts = {m["parent_text"] for _, m in pairs}
-        assert len(parent_texts) >= 2
+        # Collect unique parent ids; text lives on the chunker, not metadata
+        parent_ids = {m["parent_id"] for _, m in pairs}
+        assert len(parent_ids) >= 2
 
         # Every child text should be a substring of its parent
         for child_text, meta in pairs:
-            parent_text = meta["parent_text"]
+            parent_text = parent_child_chunker.get_parent(meta["parent_id"])
+            assert parent_text is not None
             # Each word in the child should appear in the parent
             for word in child_text.split():
                 assert word in parent_text
 
     def test_chunk_with_metadata_includes_parent_info(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         text = " ".join(f"w{i}" for i in range(15))
         pairs = parent_child_chunker.chunk_with_metadata(text)
@@ -57,14 +61,15 @@ class TestParentChildChunker:
 
         for _child_text, meta in pairs:
             assert "parent_id" in meta
-            assert "parent_text" in meta
+            assert "parent_text" not in meta  # stored once on the chunker
             assert "parent_index" in meta
             assert "child_index" in meta
             assert meta["is_child_chunk"] is True
-            assert meta["parent_id"].startswith("parent-")
+            assert parent_child_chunker.get_parent(meta["parent_id"]) is not None
 
     def test_chunk_returns_strings_only(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         text = " ".join(f"w{i}" for i in range(15))
         chunks = parent_child_chunker.chunk(text)
@@ -84,7 +89,9 @@ class TestParentChildChunker:
         # Collect parent texts by index
         parents_by_idx: dict[int, str] = {}
         for _, meta in pairs:
-            parents_by_idx[meta["parent_index"]] = meta["parent_text"]
+            text_val = chunker.get_parent(meta["parent_id"])
+            assert text_val is not None
+            parents_by_idx[meta["parent_index"]] = text_val
 
         if len(parents_by_idx) >= 2:
             p0_words = set(parents_by_idx[0].split())
@@ -112,7 +119,8 @@ class TestParentChildChunker:
         assert "child_chunk_size=5" in r
 
     def test_chunk_with_metadata_empty_input(
-        self, parent_child_chunker: ParentChildChunker,
+        self,
+        parent_child_chunker: ParentChildChunker,
     ) -> None:
         assert parent_child_chunker.chunk_with_metadata("") == []
         assert parent_child_chunker.chunk_with_metadata("   ") == []
@@ -156,7 +164,8 @@ class TestParentExpander:
         assert result[0].content == "full parent text here"
 
     def test_deduplicates_by_parent_id(
-        self, parent_expander: ParentExpander,
+        self,
+        parent_expander: ParentExpander,
     ) -> None:
         items = [
             ContextItem(
@@ -175,7 +184,8 @@ class TestParentExpander:
         assert result[0].content == "same parent text"
 
     def test_passthrough_non_child_items(
-        self, parent_expander: ParentExpander,
+        self,
+        parent_expander: ParentExpander,
     ) -> None:
         item = ContextItem(
             content="regular item",

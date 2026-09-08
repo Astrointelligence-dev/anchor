@@ -24,8 +24,8 @@ class TestActivateSkillTool:
         reg = SkillRegistry()
         tool = _make_activate_skill_tool(reg)
         assert tool.name == "activate_skill"
-        schema = tool.to_anthropic_schema()
-        assert "skill_name" in schema["input_schema"]["properties"]
+        schema = tool.to_tool_schema()
+        assert "skill_name" in schema.input_schema["properties"]
 
     def test_activates_skill(self) -> None:
         reg = SkillRegistry()

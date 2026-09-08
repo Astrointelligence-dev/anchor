@@ -70,16 +70,29 @@ class AnthropicFormatter:
             context_block = "Here is relevant context:\n\n" + "\n\n---\n\n".join(
                 classified.context_parts
             )
-            context_msg: dict[str, Any] = {"role": "user", "content": context_block}
-            if self._enable_caching:
-                context_msg["cache_control"] = {"type": "ephemeral"}
-            messages.insert(0, context_msg)
+            messages.insert(0, {"role": "user", "content": context_block})
 
         # Enforce strict user/assistant alternation required by the
         # Anthropic Messages API.  The context block above is always
         # role="user"; if the first memory item is also role="user",
         # the two consecutive user messages would be rejected.
         messages = ensure_alternating_roles(messages)
+
+        # Cache breakpoint on the context message, in valid wire format:
+        # cache_control lives on a content block, never on the message
+        # dict. Applied after merging (merging concatenates str content).
+        if self._enable_caching and classified.context_parts and messages:
+            first = messages[0]
+            messages[0] = {
+                "role": first["role"],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": first["content"],
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
 
         return {
             "system": system_blocks,

@@ -468,7 +468,8 @@ Now that you have the basics, dive deeper into specific topics:
 
 - [Pipeline Guide](../guides/pipeline.md) -- Steps, callbacks, decorators, and error handling
 - [Retrieval Guide](../guides/retrieval.md) -- Dense, sparse, hybrid retrieval and reranking
-- [Memory Guide](../guides/memory.md) -- Sliding window, summary buffer, and graph memory
+- [Memory Guide](../guides/memory.md) -- Sliding window, summary buffer, and long-term facts
+- [Knowledge Graph Guide](../guides/knowledge-graph.md) -- Entities, evidenced relations, scope-aware navigation
 - [Ingestion Guide](../guides/ingestion.md) -- Parsing, chunking, and indexing documents
 - [Query Transformation Guide](../guides/query-transform.md) -- HyDE, multi-query, decomposition
 - [Evaluation Guide](../guides/evaluation.md) -- Measuring retrieval and RAG quality

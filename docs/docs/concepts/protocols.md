@@ -63,7 +63,6 @@ For fetching and ranking context items.
 | `AsyncReranker` | `arerank(query, items, top_k)` | Async reranking |
 | `PostProcessor` | `process(items, query)` | Post-retrieval transformation |
 | `AsyncPostProcessor` | `aprocess(items, query)` | Async post-processing |
-| `TokenLevelEncoder` | `encode_tokens(text)` | Per-token embeddings (ColBERT-style) |
 
 ### Memory Protocols
 

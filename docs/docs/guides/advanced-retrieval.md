@@ -1,7 +1,7 @@
 # Advanced Retrieval
 
 This guide covers advanced retrieval features: reranker pipelines, async
-retrievers, query routing, cross-modal search, late interaction, and
+retrievers, query routing, cross-modal search, and
 memory-aware retrieval. For core retrieval, see [Retrieval Guide](retrieval.md).
 
 ---
@@ -254,67 +254,6 @@ results = retriever.retrieve(query, top_k=5)
 
 Items can specify their modality via `metadata["modality"]`. When no modality
 is provided to `index()`, it defaults to `"text"`.
-
----
-
-## Late Interaction
-
-Late interaction models (ColBERT-style) produce per-token embeddings and
-compute fine-grained relevance via MaxSim scoring.
-
-### MaxSimScorer
-
-ColBERT-style scorer: for each query token, finds the maximum cosine
-similarity across all document tokens, then sums the maxima.
-
-```python
-from anchor.retrieval import MaxSimScorer
-
-scorer = MaxSimScorer()
-score = scorer.score(query_tokens, doc_tokens)
-```
-
-### LateInteractionScorer
-
-Configurable wrapper that defaults to `MaxSimScorer` but accepts a custom
-scoring function.
-
-```python
-from anchor.retrieval import LateInteractionScorer
-
-scorer = LateInteractionScorer(score_fn=None)  # uses MaxSim
-```
-
-### LateInteractionRetriever
-
-Two-stage retriever: a first-stage retriever generates candidates, then a
-token-level encoder re-scores each candidate.
-
-```python
-from anchor.retrieval import LateInteractionRetriever, LateInteractionScorer
-
-retriever = LateInteractionRetriever(
-    first_stage=dense_retriever,
-    encoder=token_level_encoder,  # implements TokenLevelEncoder protocol
-    scorer=LateInteractionScorer(),
-    first_stage_k=100,
-)
-results = retriever.retrieve(query, top_k=10)
-```
-
-| Parameter | Type | Description |
-|---|---|---|
-| `first_stage` | `Retriever` | Candidate generation retriever. |
-| `encoder` | `TokenLevelEncoder` | Produces per-token embeddings. |
-| `scorer` | `LateInteractionScorer \| None` | Scoring function. Defaults to MaxSim. |
-| `first_stage_k` | `int` | Number of candidates from the first stage (default `100`). |
-
-The `TokenLevelEncoder` protocol requires a single method:
-
-```python
-class TokenLevelEncoder(Protocol):
-    def encode_tokens(self, text: str) -> list[list[float]]: ...
-```
 
 ---
 

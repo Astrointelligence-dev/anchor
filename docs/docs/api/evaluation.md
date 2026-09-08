@@ -365,3 +365,37 @@ from anchor.evaluation import HumanEvaluationCollector
 **`to_dataset(threshold: int = 2) -> EvaluationDataset`** -- converts judgments into an `EvaluationDataset`. Items with mean relevance at or above `threshold` are considered relevant.
 
 **`compute_metrics() -> dict[str, float]`** -- returns `mean_relevance`, `agreement`, `num_judgments`, `num_annotators`, `num_queries`.
+
+---
+
+## Consolidation golden set
+
+Does memory get *better*, not just smaller? No public benchmark labels memory
+operations; the ones that measure consolidation (ForgetEval, MemStrata,
+MemConflict — 2026) score the state of the store and whether a stale fact
+still comes back. `anchor.evaluation.consolidation` does the same with
+deterministic substring checks — an in-place `UPDATE` and a `DELETE` + `ADD`
+are the same final state.
+
+```python
+from anchor.evaluation import (
+    ConsolidationCase, ConsolidationReport, Probe,
+    evaluate_consolidator, load_consolidation_set, assert_metric_floor,
+)
+```
+
+| Class / function | Description |
+|---|---|
+| `ConsolidationCase(name, existing, turns, live_contains, live_not_contains, expected_live, probes)` | One case: the store before (`existing`, seeded as `e0`, `e1`, …), the conversation (`turns` — a flat list is one step; nested lists are steps remembered one at a time), what must / must not stay live, the live count (an `int` or an inclusive `[min, max]`), and `Probe(query, must_hit, must_not_hit)` searches. |
+| `load_consolidation_set(path)` | JSONL loader, one case per line. |
+| `evaluate_consolidator(extractor, consolidator, cases)` | Replays every case through one `MemoryManager` per case (in-memory store, `remember()` per step) and scores the store. `consolidator=None` is the "add everything" baseline. |
+| `ConsolidationMetrics` | Per case: `state_ok`, `size_ok`, `probes_ok` and `passed` (all three); report means over them are pass rates. |
+| `ConsolidationReport` | `mean(metric)`, `summary()`, `failures()`; results carry the live contents and the operations applied. Works with `assert_metric_floor`. |
+
+The repository ships `tests/fixtures/consolidation_golden.jsonl` — 48 cases
+in 10 scenarios (fact change, preference flip, paraphrase, new fact,
+enrichment, temporary vs permanent, several facts with one contradiction,
+partial contradiction, false contradiction, re-affirmation after
+invalidation). The deterministic baselines pass ~27–35% of it by design
+(they cannot see a contradiction); the `LLMExtractor` + `LLMConsolidator`
+pair is measured live in `tests/live/test_memory_llm_live.py`.

@@ -334,6 +334,41 @@ print(f"Num queries:     {int(metrics['num_queries'])}")
 
 ---
 
+## Consolidation Golden Set
+
+Retrieval golden sets ask "did the right chunk come back?". The consolidation
+golden set asks "after the conversation, is the memory store right?" — the
+question behind `LLMExtractor` + `LLMConsolidator` (see the
+[memory guide](memory.md)). Each case seeds a store, replays a conversation
+through `MemoryManager.remember()`, and checks the result with substrings: what
+must stay live, what must not, how many entries remain, and what a probe
+search must or must not return.
+
+```python
+from anchor.evaluation import evaluate_consolidator, load_consolidation_set, assert_metric_floor
+from anchor import LLMConsolidator, LLMExtractor
+
+cases = load_consolidation_set("tests/fixtures/consolidation_golden.jsonl")
+report = evaluate_consolidator(LLMExtractor(llm), LLMConsolidator(llm), cases)
+print(report.summary())     # {"passed": ..., "state_ok": ..., "size_ok": ..., "probes_ok": ...}
+print(report.failures())    # case names to look at
+assert_metric_floor(report, "passed", 0.8)
+```
+
+A case in JSONL (`turns` may also be a list of lists — steps remembered one
+at a time, for "moved to Rio" then "moved back"):
+
+```json
+{"name": "move_city", "existing": ["User lives in São Paulo"],
+ "turns": [{"role": "user", "content": "Me mudei pro Rio de Janeiro mês passado."}],
+ "live_contains": ["Rio"], "live_not_contains": ["São Paulo"], "expected_live": 1,
+ "probes": [{"query": "São Paulo", "must_not_hit": ["São Paulo"]}]}
+```
+
+The shipped set has 48 cases in 10 scenarios. `SimilarityConsolidator` and
+the "add everything" baseline pass ~27–35% of it — by design, since neither
+can see a contradiction — which is the floor the LLM pair has to beat.
+
 ## Putting It All Together
 
 A typical evaluation workflow combines human-labeled data, batch evaluation,

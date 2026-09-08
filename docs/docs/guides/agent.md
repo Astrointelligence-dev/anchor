@@ -1,7 +1,7 @@
 # Agent Guide
 
 The Agent module provides a high-level, batteries-included interface that combines
-the context pipeline with Anthropic's API. It handles streaming chat, automatic
+the context pipeline with any LLM provider. It handles streaming chat, automatic
 tool use loops, memory management, and agentic RAG -- all through a fluent builder
 API.
 
@@ -10,7 +10,7 @@ API.
 The `Agent` class wraps three systems into a single entry point:
 
 1. **ContextPipeline** -- assembles system prompts, memory, and retrieval context
-2. **Anthropic Messages API** -- streams responses with automatic retries
+2. **LLM Provider** -- streams responses via the [`LLMProvider`](../api/llm.md#llmprovider-protocol) protocol with automatic retries
 3. **Tool loop** -- executes tools and feeds results back to the model
 
 ```
@@ -20,7 +20,7 @@ User message
 ContextPipeline.build()  -->  system + messages
     |
     v
-Anthropic API (streaming)
+LLM Provider (streaming)
     |
     v
 Tool use?  -- yes --> execute tools --> feed back --> loop
@@ -45,33 +45,34 @@ for chunk in agent.chat("What is context engineering?"):
 ```
 
 !!! note
-    The Agent requires the `anthropic` package. Install it with
-    `pip install astro-anchor[anthropic]`.
+    The Agent requires at least one LLM provider SDK. The default is Anthropic:
+    `pip install astro-anchor[anthropic]`. See the
+    [LLM Providers Guide](llm-providers.md) for all supported providers.
 
 ## Constructor
 
 ```python
 Agent(
-    model: str,
+    model: str = "claude-haiku-4-5-20251001",
     *,
     api_key: str | None = None,
-    client: Any = None,
+    llm: LLMProvider | None = None,
+    fallbacks: list[str] | None = None,
     max_tokens: int = 16384,
     max_response_tokens: int = 1024,
     max_rounds: int = 10,
-    max_retries: int = 3,
 )
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `model` | `str` | required | Anthropic model identifier (e.g. `"claude-haiku-4-5-20251001"`) |
-| `api_key` | `str \| None` | `None` | Anthropic API key. Uses `ANTHROPIC_API_KEY` env var if omitted |
-| `client` | `Any` | `None` | Pre-configured `anthropic.Anthropic` client instance |
+| `model` | `str` | `"claude-haiku-4-5-20251001"` | Model string in `"provider/model"` format. No prefix defaults to `anthropic/`. |
+| `api_key` | `str \| None` | `None` | API key (falls back to provider-specific env var) |
+| `llm` | `LLMProvider \| None` | `None` | Pre-built provider instance. Overrides `model`/`api_key`. |
+| `fallbacks` | `list[str] \| None` | `None` | Fallback model strings (e.g. `["openai/gpt-4o"]`) |
 | `max_tokens` | `int` | `16384` | Token budget for the context pipeline |
 | `max_response_tokens` | `int` | `1024` | Maximum tokens in each API response |
 | `max_rounds` | `int` | `10` | Maximum tool-use rounds per chat call |
-| `max_retries` | `int` | `3` | Maximum API retries on transient errors |
 
 ## Fluent Configuration
 
@@ -151,6 +152,180 @@ async for chunk in agent.achat("Explain quantum computing"):
 
 `achat()` is the async counterpart. It uses `pipeline.abuild()` and async
 iteration over the streaming API.
+
+### Event Stream
+
+`chat()`/`achat()` are text-only projections of a richer stream.
+`stream()`/`astream()` expose the full tool-use loop as one ordered
+sequence of typed events (`AgentEvent`, discriminated by `.type`) —
+built for UIs that need more than text:
+
+```python
+from anchor import (
+    RoundStarted, TextDelta, ToolStarted, ToolFinished,
+    RoundFinished, TurnFinished,
+)
+
+async for event in agent.astream("Find and summarize the report"):
+    match event:
+        case RoundStarted(round=r, max_rounds=n):
+            status.update(f"round {r + 1}/{n}")
+        case TextDelta(text=text):
+            log.write(text)
+        case ToolStarted(tool_call_id=cid, name=name):
+            spinners[cid] = show_spinner(name)
+        case ToolFinished(tool_call_id=cid, is_error=err):
+            spinners.pop(cid).done(error=err)
+        case RoundFinished(usage=usage):
+            meter.add(usage.prompt_tokens, usage.completion_tokens)
+        case TurnFinished(diagnostics=diag):
+            status.update(f"done ({diag.stopped_by})")
+```
+
+The event vocabulary: `TurnStarted`, `RoundStarted`, `TextDelta`,
+`ToolStarted`/`ToolFinished` (correlated by `tool_call_id` — in the
+async path, consecutive `read_only` tool calls run concurrently and
+writes run alone, with finish events arriving live in completion
+order), `CompactionStarted`/`CompactionFinished`,
+`RoundFinished` (with per-round `RoundUsage`), `UsageLimitReached`
+(a usage limit was crossed; see below), and a terminal `TurnFinished`
+carrying the final text and `TurnDiagnostics`.
+
+Tool failures surface as `ToolFinished(is_error=True)`, not exceptions;
+only turn-level failures (provider, MCP) raise. Events forwarded from a
+subagent's run arrive flat in the same stream with `parent_tool_call_id`
+set to the invoking tool call — top-level events leave it `None`, which
+is also how the text projections filter subagent text out.
+
+### Usage Limits
+
+`with_usage_limits` caps what the whole run may spend — the turn
+**and every subagent it spawns** debit one shared pool. The loop-level
+complement to the pipeline's `TokenBudget`:
+
+```python
+from anchor import UsageLimits
+
+agent.with_usage_limits(UsageLimits(
+    total_tokens_limit=50_000,   # prompt+completion+cache, all rounds
+    tool_calls_limit=20,
+    cost_limit=2.50,             # USD (optional)
+))
+```
+
+Crossing a limit never raises, at any level. The loop emits a
+`UsageLimitReached` event (`scope="run"` for the shared pool,
+`scope="turn"` for an agent's own per-turn limit), gives the model one
+wrap-up round (the final-round notice plus `tool_choice="none"`), and
+ends the turn with `stopped_by="usage_limit"` in
+`TurnFinished.diagnostics` / `agent.last_turn`. A subagent cut
+mid-run wraps up the same way and returns its partial result, marked
+`[partial result]` on the plain-text path; a structured-output child's
+partiality is visible in `ChildTurn.diagnostics.stopped_by` (a marker
+would corrupt the JSON). A child that starts on an already exhausted
+pool gets exactly one wrap-up round. Checks are post-hoc, so a run can
+overshoot by the rounds in flight (one per concurrently running agent)
+plus the bounded wrap-up calls. Rounds themselves are capped by
+`max_rounds`.
+
+A subagent may carry its own narrower limits
+(`SubagentDefinition(usage_limits=...)`, or `with_usage_limits` on an
+agent wrapped with `as_tool`); both its per-turn limits and the run
+pool are enforced, so the effective budget only narrows. Aggregated
+accounting lands in `TurnDiagnostics.children` and the
+`run_total_tokens` / `run_total_tool_calls` / `run_total_cost_usd`
+properties.
+
+`cost_limit` is priced per round from, in order: the provider-reported
+billed cost (`claude_cli` sends it), the runtime-overridable
+`anchor.llm.pricing.MODEL_PRICING` table, and genai-prices when the
+`[pricing]` extra is installed. A model no source knows logs one
+warning and debits $0 — its tokens still count. In prompted output
+mode, `run()`/`arun()` hold one pool across the retry turns, so
+retries cannot re-arm the budget.
+
+On providers that do not report usage on the stream (all but Anthropic
+today), per-round `prompt_tokens`/`completion_tokens` are estimated
+with the agent's tokenizer, so the limit is enforced consistently on
+every provider. Compaction summarization calls are not counted (the
+summary is counted in the next round's prompt).
+
+### Approval (Human-in-the-Loop)
+
+Mark tools that need a human decision and register an approval
+callback — the tool call pauses until it resolves:
+
+```python
+from anchor import ApprovalDecision, ApprovalRequest, tool
+
+@tool(requires_approval=True)
+def delete_records(table: str) -> str:
+    """Delete all records from a table."""
+    ...
+
+async def approve(request: ApprovalRequest) -> ApprovalDecision:
+    ok = await show_dialog(request.name, request.tool_input)
+    return ApprovalDecision(
+        approved=ok, reason=None if ok else "user declined — suggest a dry run",
+    )
+
+agent.with_tools([delete_records]).with_approval(approve)
+```
+
+A pre-hook can also route any call to the callback with
+`HookResult(decision="ask")`. Deny becomes an `is_error` tool result
+carrying the reason, so the model adjusts instead of retrying blindly;
+approve may rewrite the input via `updated_input`. A gated call with no
+callback configured fails closed. Async callbacks require
+`astream()`/`achat()` and may stay pending indefinitely — approval
+timeouts are the application's decision. Approval resolves before a
+call takes an execution slot, and calls batched together (consecutive
+`read_only` tools) run their callbacks concurrently — serialize inside
+the callback if your UI needs one prompt at a time. Durable pause
+(ending the turn with pending approvals and resuming later) is planned
+on top of the conversation store.
+
+### Structured Output
+
+```python
+from pydantic import BaseModel
+
+class Report(BaseModel):
+    summary: str
+    severity: int
+
+report = agent.with_output_model(Report).run("Assess the incident.")
+```
+
+The default tool mode adds a synthetic `final_result` tool carrying the
+schema and forces `tool_choice="any"` — the model cannot stop in plain
+text; calling `final_result` with valid arguments ends the turn.
+Invalid arguments come back as an error tool result (the loop's own
+retry mechanic), bounded by `max_output_retries`; exhausting it ends
+the turn with `stopped_by="output_missing"` — `stream()`/`chat()` see
+that in the diagnostics, `run()` raises. Real tools still run
+in the same turn. The normalized JSON is also available in
+`TurnFinished.output` and `agent.last_output`. `mode="prompted"`
+injects the schema into the prompt instead and validates the text reply
+(the subagent mechanic) — the portable fallback for models without tool
+calling; it requires an agent without `with_memory`, since the schema
+and the retry turns would otherwise land in the persisted conversation.
+
+### Memory Tool
+
+`with_memory_tool(path)` gives the model persistent memory compatible
+with Anthropic's `memory_20250818` command set — on every provider:
+
+```python
+agent.with_memory_tool("./agent-memory")
+```
+
+The model sees one `memory` tool (view / create / str_replace / insert /
+delete / rename) rooted at the virtual `/memories` directory, mapped
+into the given path with strict containment (path traversal is
+rejected). The memory protocol is appended to the system prompt. Pairs
+naturally with `with_compaction`/`with_context_management`: memory
+holds what must survive summarization.
 
 ### Accessing the Last Result
 
@@ -234,9 +409,7 @@ my_tool = AgentTool(
 
 Key methods:
 
-- `to_anthropic_schema()` -- Anthropic tool format
-- `to_openai_schema()` -- OpenAI function-calling format
-- `to_generic_schema()` -- Provider-agnostic format
+- `to_tool_schema()` -- Provider-agnostic [`ToolSchema`](../api/llm.md#toolschema)
 - `validate_input(tool_input)` -- Returns `(bool, str)` tuple
 
 ## Skills System
@@ -266,7 +439,7 @@ my_skill = Skill(
 | `description` | `str` | required | Shown in discovery prompt |
 | `instructions` | `str` | `""` | Injected when skill is activated |
 | `tools` | `tuple[AgentTool, ...]` | `()` | Tools this skill provides |
-| `activation` | `Literal["always", "on_demand"]` | `"always"` | When tools become available |
+| `activation` | `Literal["always", "on_demand"]` | `"on_demand"` | When tools become available |
 | `tags` | `tuple[str, ...]` | `()` | Grouping/filtering tags |
 
 ### Activation Modes
@@ -406,20 +579,27 @@ for chunk in agent.chat("Remember that my favorite color is blue"):
 
 ## Error Handling and Retries
 
-The agent retries on transient Anthropic errors with exponential backoff:
+The underlying `BaseLLMProvider` retries on transient errors with exponential
+backoff. Transient errors include:
 
-- `RateLimitError`
-- `APIConnectionError`
-- `APITimeoutError`
+- `RateLimitError` -- 429 responses (respects `retry_after` header)
+- `ServerError` -- 5xx responses
+- `LLMTimeoutError` -- request timeouts
 
-Backoff delays: 1s, 2s, 4s, etc., up to `max_retries` attempts.
+Non-transient errors (`AuthenticationError`, `ModelNotFoundError`,
+`ContentFilterError`) raise immediately.
 
 Tool execution errors are caught and returned as error messages to the model,
 allowing it to recover gracefully.
 
+See the [LLM Providers Guide](llm-providers.md) for details on fallback
+chains and the error hierarchy.
+
 ## See Also
 
+- [LLM Providers Guide](llm-providers.md) -- multi-provider setup and fallbacks
 - [Pipeline Guide](../guides/pipeline.md) -- underlying context assembly
 - [Memory Guide](../guides/memory.md) -- memory management details
 - [Agent API Reference](../api/agent.md) -- complete API signatures
+- [LLM API Reference](../api/llm.md) -- provider protocol, models, and errors
 - [Formatters Guide](../guides/formatters.md) -- output formatting

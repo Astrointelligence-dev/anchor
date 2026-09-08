@@ -22,7 +22,7 @@ class Reranker(Protocol):
     """
 
     def rerank(
-        self, query: QueryBundle, items: list[ContextItem], top_k: int = 10
+        self, query: QueryBundle, items: list[ContextItem], top_k: int | None = None
     ) -> list[ContextItem]:
         """Rerank context items by relevance to the query.
 
@@ -48,7 +48,7 @@ class AsyncReranker(Protocol):
     """
 
     async def arerank(
-        self, query: QueryBundle, items: list[ContextItem], top_k: int = 10
+        self, query: QueryBundle, items: list[ContextItem], top_k: int | None = None
     ) -> list[ContextItem]:
         """Asynchronously rerank context items by relevance to the query.
 

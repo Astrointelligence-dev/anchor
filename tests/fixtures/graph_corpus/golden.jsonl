@@ -1,0 +1,30 @@
+{"name": "fact: checkout latency budget", "query": "What is the latency budget of the checkout service?", "relevant": ["checkout-service"]}
+{"name": "fact: settlement batch close", "query": "When do settlement batches close?", "relevant": ["payments-service"]}
+{"name": "fact: fraud score threshold", "query": "Which fraud score blocks an authorization?", "relevant": ["fraud-scoring"]}
+{"name": "fact: jwt lifetime", "query": "How long do JWT access tokens live?", "relevant": ["auth-service"]}
+{"name": "fact: catalog prices", "query": "How are prices stored in the catalog?", "relevant": ["catalog-service"]}
+{"name": "fact: index rebuild time", "query": "When do search index rebuilds run?", "relevant": ["search-service"]}
+{"name": "fact: redis key expiry", "query": "How long do Redis keys live before expiring?", "relevant": ["redis-cache"]}
+{"name": "fact: kafka retention", "query": "What is the Kafka retention period?", "relevant": ["kafka-bus"]}
+{"name": "fact: postgres backups", "query": "How often are Postgres backups taken?", "relevant": ["postgres-cluster"]}
+{"name": "fact: march outage duration", "query": "How long was the March payments outage?", "relevant": ["incident-2026-03-payments-outage"]}
+{"name": "fact: adr-003 engine", "query": "Which search engine did ADR-003 select?", "relevant": ["adr-003-search-engine"]}
+{"name": "fact: trace sampling", "query": "What is the trace sampling rate?", "relevant": ["observability-stack"]}
+{"name": "multi-hop: on-call for checkout's card authorizer", "query": "Who is on call for the service that authorizes cards for Checkout?", "relevant": ["payments-service", "bruno-costa"]}
+{"name": "multi-hop: team owning checkout cart storage", "query": "Which team owns the store that keeps Checkout cart state?", "relevant": ["redis-cache", "team-platform"]}
+{"name": "multi-hop: admin of auth signing keys store", "query": "Who administers the store holding the signing keys used by Auth?", "relevant": ["vault-secrets", "diego-rocha"]}
+{"name": "multi-hop: incident behind token rotation", "query": "Which incident motivated the token rotation decision?", "relevant": ["adr-002-token-rotation", "incident-2026-05-auth-token-leak"]}
+{"name": "multi-hop: consumer of user profile history", "query": "Which service consumes purchase history from User Profile?", "relevant": ["fraud-scoring", "user-profile"]}
+{"name": "multi-hop: catalog schema change fallout", "query": "What broke when the Catalog schema changed in June?", "relevant": ["incident-2026-06-search-latency", "search-service"]}
+{"name": "multi-hop: maintainer of kafka lag alert", "query": "Who maintains the alerting rules that detected the Kafka lag incident?", "relevant": ["observability-stack", "henrique-alves"]}
+{"name": "multi-hop: decision behind ledger projections", "query": "Which decision explains why the Ledger rebuilds balances from events?", "relevant": ["adr-001-event-sourcing-ledger"]}
+{"name": "multi-hop: who led billing duplicate invoices", "query": "Who led the response when Billing issued duplicate invoices?", "relevant": ["incident-2026-08-billing-double-charge", "ana-lima"]}
+{"name": "multi-hop: publishers to the event bus", "query": "Which services publish to the event bus?", "relevant": ["kafka-bus", "payments-service", "catalog-service"]}
+{"name": "multi-hop: vendor scoring checkout orders", "query": "Which vendor scores orders for Checkout?", "relevant": ["fraud-scoring", "adr-004-fraud-vendor"]}
+{"name": "multi-hop: people on the team owning search", "query": "Which people are on the team that owns Search?", "relevant": ["team-discovery", "felipe-souza", "gabriela-torres"]}
+{"name": "explain: billing and ledger", "query": "How is Billing connected to the Ledger?", "relevant": ["billing-service", "ledger-service", "adr-001-event-sourcing-ledger"]}
+{"name": "explain: checkout and fraud scoring", "query": "How does Checkout relate to Fraud Scoring?", "relevant": ["checkout-service", "fraud-scoring"]}
+{"name": "explain: auth and vault", "query": "What links the Auth service to Vault?", "relevant": ["auth-service", "vault-secrets", "adr-002-token-rotation"]}
+{"name": "explain: catalog to search", "query": "How does the Catalog reach Search?", "relevant": ["catalog-service", "kafka-bus", "search-service"]}
+{"name": "explain: notifications and kafka", "query": "Why does Notifications depend on Kafka?", "relevant": ["notification-service", "kafka-bus"]}
+{"name": "explain: payments and postgres", "query": "How are Payments and Postgres related?", "relevant": ["payments-service", "postgres-cluster", "incident-2026-03-payments-outage"]}

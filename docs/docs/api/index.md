@@ -19,6 +19,7 @@ Each page corresponds to a top-level module in the `anchor` package.
 | [Observability](observability.md) | Tracing, metrics, cost tracking |
 | [Formatters](formatters.md) | Anthropic, OpenAI, and generic formatters |
 | [Agent](agent.md) | `Agent`, skills, tool definitions |
+| [LLM Providers](llm.md) | `LLMProvider`, `create_provider`, `FallbackProvider`, error hierarchy |
 | [Models](models.md) | `ContextItem`, `ContextWindow`, `QueryBundle`, `TokenBudget` |
 | [Protocols](protocols.md) | All PEP 544 protocol definitions |
 | [Storage](storage.md) | Context stores, vector stores, entry stores |

@@ -68,7 +68,7 @@ class TestDenseRetrieverIndex:
 
     def test_index_without_embed_fn_raises(self) -> None:
         retriever = make_dense_retriever(embed_fn=None)
-        with pytest.raises(RetrieverError, match="embed_fn must be provided"):
+        with pytest.raises(RetrieverError, match="must be provided to index"):
             retriever.index(_make_items())
 
 
@@ -130,3 +130,16 @@ class TestDenseRetrieverRetrieve:
         results = retriever.retrieve(query, top_k=5)
         for item in results:
             assert 0.0 <= item.score <= 1.0
+
+
+class TestDenseRetrieverVaultGuard:
+    def test_stores_on_different_vaults_are_refused(self) -> None:
+        with pytest.raises(ValueError, match="different vaults"):
+            make_dense_retriever(
+                InMemoryVectorStore(vault="dnd"), InMemoryContextStore(vault="work"),
+            )
+
+    def test_same_vault_and_custom_stores_pass(self) -> None:
+        make_dense_retriever(InMemoryVectorStore(vault="dnd"), InMemoryContextStore(vault="dnd"))
+        make_dense_retriever(object.__new__(InMemoryVectorStore), InMemoryContextStore())
+

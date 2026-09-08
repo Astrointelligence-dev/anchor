@@ -16,6 +16,7 @@ def rrf_fuse(
     weights: list[float] | None = None,
     k: int = 60,
     top_k: int | None = None,
+    retrieval_method: str = "rrf",
 ) -> list[ContextItem]:
     """Fuse multiple ranked lists using Reciprocal Rank Fusion.
 
@@ -27,9 +28,13 @@ def rrf_fuse(
         weights: Per-list weights (defaults to equal weight 1.0).
         k: Smoothing constant (default 60, from original RRF paper).
         top_k: Maximum number of items to return. If None, return all.
+        retrieval_method: Label recorded in each item's metadata.
 
     Returns:
-        Fused list of items sorted by RRF score, with normalized scores.
+        Fused list of items sorted by RRF score. The ``score`` field is
+        min-max normalized across the returned set (ContextItem.score is
+        constrained to [0, 1]); the raw RRF score is preserved in
+        ``metadata["rrf_raw_score"]``.
     """
     if not ranked_lists:
         return []
@@ -72,7 +77,7 @@ def rrf_fuse(
                 "score": min(1.0, max(0.0, normalized_score)),
                 "metadata": {
                     **original.metadata,
-                    "retrieval_method": "rrf",
+                    "retrieval_method": retrieval_method,
                     "rrf_raw_score": rrf_scores[item_id],
                 },
             }

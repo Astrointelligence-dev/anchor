@@ -227,50 +227,6 @@ class TestSharedSpaceRetrieverEdgeCases:
         assert len(results) == 5
 
 
-class TestIntegrationLateInteractionWithSharedSpace:
-    """Integration test: LateInteractionRetriever with SharedSpaceRetriever as first stage."""
-
-    def test_shared_space_as_first_stage(self) -> None:
-        """Chain SharedSpaceRetriever -> LateInteractionRetriever.
-
-        SharedSpaceRetriever acts as the first-stage candidate generator,
-        and LateInteractionRetriever re-scores with token-level MaxSim.
-        """
-        from anchor.retrieval.late_interaction import LateInteractionRetriever
-
-        # Set up cross-modal encoder and first-stage retriever
-        cm_encoder = CrossModalEncoder(encoders={"text": _text_encoder})
-        first_stage = SharedSpaceRetriever(encoder=cm_encoder, query_modality="text")
-
-        items = [
-            _make_item("the quick brown fox", item_id="a"),
-            _make_item("lazy dog sleeps all day", item_id="b"),
-            _make_item("fox jumps over fence", item_id="c"),
-        ]
-        first_stage.index(items, modality="text")
-
-        # Token-level encoder for re-scoring
-        class _SimpleTokenEncoder:
-            def encode_tokens(self, text: str) -> list[list[float]]:
-                words = text.split()
-                return [[float(hash(w) % 100) / 100.0, float(hash(w) % 50) / 50.0] for w in words]
-
-        retriever = LateInteractionRetriever(
-            first_stage=first_stage,
-            encoder=_SimpleTokenEncoder(),
-            first_stage_k=10,
-        )
-        query = QueryBundle(query_str="quick fox")
-        results = retriever.retrieve(query, top_k=2)
-        assert len(results) == 2
-        # Results should be ContextItem instances
-        for r in results:
-            assert isinstance(r, ContextItem)
-        # The IDs should come from our original items
-        result_ids = {r.id for r in results}
-        assert result_ids.issubset({"a", "b", "c"})
-
-
 class TestRepr:
     def test_repr_all(self) -> None:
         encoder = CrossModalEncoder(encoders={"text": _text_encoder, "image": _image_encoder})

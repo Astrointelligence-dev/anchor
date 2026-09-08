@@ -74,7 +74,6 @@ class TestTopLevelExports:
             Reranker,
             Retriever,
             Tokenizer,
-            TokenLevelEncoder,
             VectorStore,
         )
 
@@ -88,7 +87,6 @@ class TestTopLevelExports:
         assert PostProcessor is not None
         assert Reranker is not None
         assert Retriever is not None
-        assert TokenLevelEncoder is not None
         assert Tokenizer is not None
         assert VectorStore is not None
 
@@ -98,14 +96,12 @@ class TestTopLevelExports:
             FormatterError,
             RetrieverError,
             StorageError,
-            TokenBudgetExceededError,
         )
 
         assert AstroContextError is not None
         assert FormatterError is not None
         assert RetrieverError is not None
         assert StorageError is not None
-        assert TokenBudgetExceededError is not None
 
     def test_retrieval_exports(self) -> None:
         from anchor import (
@@ -119,9 +115,6 @@ class TestTopLevelExports:
             DenseRetriever,
             FlashRankReranker,
             HybridRetriever,
-            LateInteractionRetriever,
-            LateInteractionScorer,
-            MaxSimScorer,
             RerankerPipeline,
             RoundRobinReranker,
             SharedSpaceRetriever,
@@ -139,9 +132,6 @@ class TestTopLevelExports:
         assert DenseRetriever is not None
         assert FlashRankReranker is not None
         assert HybridRetriever is not None
-        assert LateInteractionRetriever is not None
-        assert LateInteractionScorer is not None
-        assert MaxSimScorer is not None
         assert RerankerPipeline is not None
         assert RoundRobinReranker is not None
         assert SharedSpaceRetriever is not None
@@ -156,10 +146,12 @@ class TestTopLevelExports:
         assert OpenAIFormatter is not None
 
     def test_memory_exports(self) -> None:
-        from anchor import MemoryManager, SlidingWindowMemory
+        from anchor import LLMConsolidator, LLMExtractor, MemoryManager, SlidingWindowMemory
 
         assert MemoryManager is not None
         assert SlidingWindowMemory is not None
+        assert LLMConsolidator is not None
+        assert LLMExtractor is not None
 
     def test_storage_exports(self) -> None:
         from anchor import InMemoryContextStore, InMemoryVectorStore
@@ -366,4 +358,4 @@ class TestTopLevelExports:
     def test_version(self) -> None:
         from anchor import __version__
 
-        assert __version__ == "0.1.0"
+        assert __version__ == "0.2.0"

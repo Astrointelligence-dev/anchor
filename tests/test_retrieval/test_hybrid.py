@@ -6,6 +6,7 @@ import pytest
 
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
+from anchor.models.scope import RetrievalScope
 from anchor.retrieval.hybrid import HybridRetriever
 from tests.conftest import FakeRetriever
 
@@ -130,3 +131,43 @@ class TestHybridRetrieverValidation:
         hybrid = HybridRetriever(retrievers=[r1, r2])
         results = hybrid.retrieve(QueryBundle(query_str="test"), top_k=10)
         assert results == []
+
+
+class _ScopedFake:
+    """Retriever that records the scope it was handed and filters by it."""
+
+    def __init__(self, items: list[ContextItem]) -> None:
+        self._items = items
+        self.seen: list[RetrievalScope | None] = []
+
+    def retrieve(self, query, top_k=10, *, scope=None):
+        self.seen.append(scope)
+        return [
+            i for i in self._items
+            if scope is None or scope.matches(i.namespace)
+        ][:top_k]
+
+
+class TestHybridRetrieverScope:
+    def test_scope_is_forwarded_to_every_child(self) -> None:
+        a = ContextItem(id="a", content="x", source=SourceType.RETRIEVAL, namespace="/in")
+        b = ContextItem(id="b", content="y", source=SourceType.RETRIEVAL, namespace="/out")
+        left, right = _ScopedFake([a, b]), _ScopedFake([b, a])
+        scope = RetrievalScope(include=("/in",))
+        got = HybridRetriever([left, right]).retrieve(QueryBundle(query_str="q"), scope=scope)
+        assert [i.id for i in got] == ["a"]
+        assert left.seen == [scope]
+        assert right.seen == [scope]
+
+    def test_child_without_scope_support_is_skipped_not_widened(self, caplog) -> None:
+        a = ContextItem(id="a", content="x", source=SourceType.RETRIEVAL, namespace="/in")
+        b = ContextItem(id="b", content="y", source=SourceType.RETRIEVAL, namespace="/out")
+        legacy = FakeRetriever([b])  # retrieve(query, top_k) only
+        scoped = _ScopedFake([a, b])
+        with caplog.at_level("WARNING"):
+            got = HybridRetriever([legacy, scoped]).retrieve(
+                QueryBundle(query_str="q"), scope=RetrievalScope(include=("/in",)),
+            )
+        assert [i.id for i in got] == ["a"]
+        assert "skipping" in caplog.text
+

@@ -1,7 +1,14 @@
 """anchor: Context engineering toolkit for AI applications.
 
 Agent:
-    Agent, AgentTool, tool, memory_tools, rag_tools
+    Agent, AgentTool, tool, Skill, SkillRegistry,
+    SubagentDefinition, HookResult, AgentCallback, RoundUsage, TurnDiagnostics,
+    ChildTurn,
+    ApprovalRequest, ApprovalDecision, ApprovalCallback,
+    AgentEvent, TurnStarted, RoundStarted, TextDelta, ToolStarted, ToolFinished,
+    CompactionStarted, CompactionFinished, RoundFinished, TurnFinished,
+    UsageLimits, UsageLimitReached,
+    memory_skill, memory_tools, rag_skill, rag_tools
 
 Core Pipeline:
     ContextPipeline, ContextResult, PipelineStep, PipelineCallback,
@@ -11,35 +18,58 @@ Core Pipeline:
     auto_promotion_step, graph_retrieval_step, create_eviction_promoter,
     query_transform_step, classified_retriever_step
 
+Knowledge Graph:
+    KnowledgeGraph, GraphNode, GraphEdge, GraphStore, InMemoryGraphStore,
+    GraphRetriever, GraphIndexer, WikilinkExtractor, StructureExtractor
+
+LLM Providers:
+    BaseLLMProvider, LLMProvider, LLMResponse, Message, ContentBlock,
+    FallbackProvider, create_provider, register_provider,
+    ToolCall, ToolCallDelta, ToolResult, ToolSchema, Usage, StopReason,
+    StreamChunk, calculate_cost, MODEL_PRICING,
+    ProviderError, AuthenticationError, RateLimitError, ContentFilterError,
+    ModelNotFoundError, ServerError, LLMTimeoutError, ProviderNotInstalledError
+
+MCP Bridge (optional — requires astro-anchor[mcp]):
+    FastMCPClientBridge, FastMCPServerBridge, MCPClient, MCPClientPool,
+    MCPServer, MCPServerConfig, MCPResource, MCPPrompt, MCPPromptArgument,
+    mcp_tool_to_agent_tool, parse_server_string,
+    MCPError, MCPConfigError, MCPConnectionError, MCPTimeoutError, MCPToolError
+
 Caching:
     CacheBackend, InMemoryCacheBackend
 
 Memory Management:
-    MemoryManager, SlidingWindowMemory, SummaryBufferMemory, SimpleGraphMemory,
-    MemoryGarbageCollector, GCStats, MemoryCallback, CallbackExtractor,
+    MemoryManager, SlidingWindowMemory, SummaryBufferMemory, ProgressiveSummarizationMemory,
+    TierCompactor,
+    MemoryGarbageCollector, GCStats, MemoryCallback, CallbackExtractor, LLMExtractor,
     MemoryContextEnricher, ContextQueryEnricher,
     FIFOEviction, ImportanceEviction, PairedEviction,
-    SimilarityConsolidator, ExponentialRecencyScorer, LinearRecencyScorer,
+    SimilarityConsolidator, LLMConsolidator, ExponentialRecencyScorer, LinearRecencyScorer,
     EbbinghausDecay, LinearDecay
 
 Retrieval:
-    DenseRetriever, SparseRetriever, HybridRetriever, ScoreReranker,
+    DenseRetriever, SparseRetriever, HybridRetriever,
     CrossEncoderReranker, CohereReranker, FlashRankReranker,
     RoundRobinReranker, RerankerPipeline,
     ScoredMemoryRetriever, MemoryRetrieverAdapter, rrf_fuse,
-    CallbackRouter, KeywordRouter, MetadataRouter, RoutedRetriever
+    CallbackRouter, KeywordRouter, MetadataRouter, RoutedRetriever,
+    SharedSpaceRetriever, CrossModalEncoder
 
 Formatting:
     AnthropicFormatter, OpenAIFormatter, GenericTextFormatter, BaseFormatter
 
 Query Transformation:
     HyDETransformer, MultiQueryTransformer, DecompositionTransformer,
-    StepBackTransformer, QueryTransformPipeline, query_transform_step
+    StepBackTransformer, QueryTransformPipeline, query_transform_step,
+    ContextualQueryTransformer, ConversationRewriter,
+    KeywordClassifier, EmbeddingClassifier, CallbackClassifier
 
 Evaluation:
     RetrievalMetrics, RAGMetrics, EvaluationResult,
     RetrievalMetricsCalculator, LLMRAGEvaluator, PipelineEvaluator,
-    EvaluationSample, EvaluationDataset, AggregatedMetrics, BatchEvaluator
+    EvaluationSample, EvaluationDataset, AggregatedMetrics, BatchEvaluator,
+    ABTestRunner, ABTestResult, HumanEvaluationCollector, HumanJudgment
 
 Multi-modal:
     ModalityType, MultiModalContent, MultiModalItem, MultiModalConverter,
@@ -66,7 +96,7 @@ Protocols (extension points):
     RetrievalEvaluator, RAGEvaluator,
     ModalityEncoder, TableExtractor,
     SpanExporter, MetricsCollector,
-    QueryRouter, CacheBackend
+    QueryRouter, QueryClassifier, CacheBackend
 
 Storage:
     InMemoryContextStore, InMemoryDocumentStore, InMemoryVectorStore,
@@ -76,18 +106,18 @@ Models & Types:
     ContextItem, ContextWindow, QueryBundle, TokenBudget, BudgetAllocation,
     ConversationTurn, MemoryEntry, MemoryType, MemoryOperation,
     SourceType, OverflowStrategy, Role,
-    StreamDelta, StreamResult, StreamUsage,
     default_chat_budget, default_rag_budget, default_agent_budget
 
 Ingestion:
     DocumentIngester, FixedSizeChunker, RecursiveCharacterChunker,
     SemanticChunker, SentenceChunker, ParentChildChunker, ParentExpander,
     PlainTextParser, MarkdownParser, HTMLParser, PDFParser,
-    MetadataEnricher, generate_doc_id, generate_chunk_id, extract_chunk_metadata
+    MetadataEnricher, generate_doc_id, generate_chunk_id, extract_chunk_metadata,
+    CodeChunker, TableAwareChunker
 
 Exceptions:
     AstroContextError, FormatterError, IngestionError, RetrieverError,
-    StorageError, TokenBudgetExceededError
+    StorageError
 
 Tokens:
     TiktokenCounter
@@ -97,16 +127,45 @@ from importlib.metadata import PackageNotFoundError, version
 
 from anchor.agent import (
     Agent,
+    AgentCallback,
+    AgentEvent,
     AgentTool,
+    ApprovalCallback,
+    ApprovalDecision,
+    ApprovalRequest,
+    ChildTurn,
+    CompactionFinished,
+    CompactionStarted,
+    FileMemoryBackend,
+    HookResult,
+    RoundFinished,
+    RoundStarted,
+    RoundUsage,
     Skill,
     SkillRegistry,
+    SubagentDefinition,
+    TextDelta,
+    ToolFinished,
+    ToolStarted,
+    TurnDiagnostics,
+    TurnFinished,
+    TurnStarted,
+    UsageLimitReached,
+    UsageLimits,
     memory_skill,
+    memory_tool,
     memory_tools,
     rag_skill,
     rag_tools,
     tool,
 )
 from anchor.cache import InMemoryCacheBackend
+from anchor.embeddings import (
+    CallableEmbeddingProvider,
+    OpenAIEmbeddingProvider,
+    SentenceTransformerEmbeddingProvider,
+    VoyageEmbeddingProvider,
+)
 from anchor.evaluation import (
     ABTestResult,
     ABTestRunner,
@@ -130,7 +189,6 @@ from anchor.exceptions import (
     PipelineExecutionError,
     RetrieverError,
     StorageError,
-    TokenBudgetExceededError,
 )
 from anchor.formatters import (
     AnthropicFormatter,
@@ -139,10 +197,13 @@ from anchor.formatters import (
     GenericTextFormatter,
     OpenAIFormatter,
 )
+from anchor.graph import KnowledgeGraph
 from anchor.ingestion import (
     CodeChunker,
     DocumentIngester,
     FixedSizeChunker,
+    GraphIndexer,
+    GraphIndexingEntryStore,
     HTMLParser,
     MarkdownParser,
     MetadataEnricher,
@@ -153,11 +214,40 @@ from anchor.ingestion import (
     RecursiveCharacterChunker,
     SemanticChunker,
     SentenceChunker,
+    StructureExtractor,
     TableAwareChunker,
+    WikilinkExtractor,
     extract_chunk_metadata,
     generate_chunk_id,
     generate_doc_id,
 )
+from anchor.llm import (
+    MODEL_PRICING,
+    AuthenticationError,
+    BaseLLMProvider,
+    ContentBlock,
+    ContentFilterError,
+    FallbackProvider,
+    LLMProvider,
+    LLMResponse,
+    LLMTimeoutError,
+    Message,
+    ModelNotFoundError,
+    ProviderError,
+    ProviderNotInstalledError,
+    RateLimitError,
+    ServerError,
+    StopReason,
+    StreamChunk,
+    ToolCall,
+    ToolCallDelta,
+    ToolResult,
+    ToolSchema,
+    Usage,
+    calculate_cost,
+    create_provider,
+    register_provider,
+)  # Note: Role is intentionally NOT imported here — it comes from anchor.models above
 from anchor.memory import (
     CallbackExtractor,
     EbbinghausDecay,
@@ -167,14 +257,17 @@ from anchor.memory import (
     ImportanceEviction,
     LinearDecay,
     LinearRecencyScorer,
+    LLMConsolidator,
+    LLMExtractor,
     MemoryCallback,
     MemoryGarbageCollector,
     MemoryManager,
     PairedEviction,
+    ProgressiveSummarizationMemory,
     SimilarityConsolidator,
-    SimpleGraphMemory,
     SlidingWindowMemory,
     SummaryBufferMemory,
+    TierCompactor,
 )
 from anchor.models import (
     BudgetAllocation,
@@ -182,17 +275,17 @@ from anchor.models import (
     ContextResult,
     ContextWindow,
     ConversationTurn,
+    GraphEdge,
+    GraphNode,
     MemoryEntry,
     MemoryType,
     OverflowStrategy,
     PipelineDiagnostics,
     QueryBundle,
+    RetrievalScope,
     Role,
     SourceType,
     StepDiagnostic,
-    StreamDelta,
-    StreamResult,
-    StreamUsage,
     TokenBudget,
     default_agent_budget,
     default_chat_budget,
@@ -264,6 +357,7 @@ from anchor.protocols import (
     DocumentStore,
     EvictionPolicy,
     GarbageCollectableStore,
+    GraphStore,
     HumanEvaluator,
     MemoryConsolidator,
     MemoryDecay,
@@ -287,7 +381,6 @@ from anchor.protocols import (
     SpanExporter,
     TableExtractor,
     Tokenizer,
-    TokenLevelEncoder,
     VectorStore,
 )
 from anchor.query import (
@@ -313,18 +406,15 @@ from anchor.retrieval import (
     CrossModalEncoder,
     DenseRetriever,
     FlashRankReranker,
+    GraphRetriever,
     HybridRetriever,
     KeywordRouter,
-    LateInteractionRetriever,
-    LateInteractionScorer,
-    MaxSimScorer,
     MemoryRetrieverAdapter,
     MetadataRouter,
     RerankerPipeline,
     RoundRobinReranker,
     RoutedRetriever,
     ScoredMemoryRetriever,
-    ScoreReranker,
     SharedSpaceRetriever,
     SparseRetriever,
     rrf_fuse,
@@ -333,6 +423,7 @@ from anchor.storage import (
     InMemoryContextStore,
     InMemoryDocumentStore,
     InMemoryEntryStore,
+    InMemoryGraphStore,
     InMemoryVectorStore,
     JsonFileMemoryStore,
 )
@@ -344,12 +435,18 @@ except PackageNotFoundError:
     __version__ = "0.0.0-dev"
 
 __all__ = [
+    "MODEL_PRICING",
     "ABTestResult",
     "ABTestRunner",
     "Agent",
+    "AgentCallback",
+    "AgentEvent",
     "AgentTool",
     "AggregatedMetrics",
     "AnthropicFormatter",
+    "ApprovalCallback",
+    "ApprovalDecision",
+    "ApprovalRequest",
     "AstroContextError",
     "AsyncCohereReranker",
     "AsyncCompactionStrategy",
@@ -361,19 +458,27 @@ __all__ = [
     "AsyncQueryTransformer",
     "AsyncReranker",
     "AsyncRetriever",
+    "AuthenticationError",
     "BaseFormatter",
+    "BaseLLMProvider",
     "BatchEvaluator",
     "BudgetAllocation",
     "CacheBackend",
+    "CallableEmbeddingProvider",
     "CallbackClassifier",
     "CallbackExtractor",
     "CallbackRouter",
+    "ChildTurn",
     "Chunker",
     "CodeChunker",
     "CohereReranker",
+    "CompactionFinished",
+    "CompactionStarted",
     "CompactionStrategy",
     "CompositeEncoder",
     "ConsoleSpanExporter",
+    "ContentBlock",
+    "ContentFilterError",
     "ContextItem",
     "ContextPipeline",
     "ContextQueryEnricher",
@@ -403,6 +508,8 @@ __all__ = [
     "EvictionPolicy",
     "ExponentialRecencyScorer",
     "FIFOEviction",
+    "FallbackProvider",
+    "FileMemoryBackend",
     "FileSpanExporter",
     "FixedSizeChunker",
     "FlashRankReranker",
@@ -411,8 +518,15 @@ __all__ = [
     "GCStats",
     "GarbageCollectableStore",
     "GenericTextFormatter",
+    "GraphEdge",
+    "GraphIndexer",
+    "GraphIndexingEntryStore",
+    "GraphNode",
+    "GraphRetriever",
+    "GraphStore",
     "HTMLParser",
     "HTMLTableParser",
+    "HookResult",
     "HumanEvaluationCollector",
     "HumanEvaluator",
     "HumanJudgment",
@@ -424,6 +538,7 @@ __all__ = [
     "InMemoryContextStore",
     "InMemoryDocumentStore",
     "InMemoryEntryStore",
+    "InMemoryGraphStore",
     "InMemoryMetricsCollector",
     "InMemorySpanExporter",
     "InMemoryVectorStore",
@@ -431,15 +546,18 @@ __all__ = [
     "JsonFileMemoryStore",
     "KeywordClassifier",
     "KeywordRouter",
+    "KnowledgeGraph",
+    "LLMConsolidator",
+    "LLMExtractor",
+    "LLMProvider",
     "LLMRAGEvaluator",
-    "LateInteractionRetriever",
-    "LateInteractionScorer",
+    "LLMResponse",
+    "LLMTimeoutError",
     "LinearDecay",
     "LinearRecencyScorer",
     "LoggingMetricsCollector",
     "MarkdownParser",
     "MarkdownTableParser",
-    "MaxSimScorer",
     "MemoryCallback",
     "MemoryConsolidator",
     "MemoryContextEnricher",
@@ -454,18 +572,21 @@ __all__ = [
     "MemoryQueryEnricher",
     "MemoryRetrieverAdapter",
     "MemoryType",
+    "Message",
     "MetadataEnricher",
     "MetadataRouter",
     "MetricPoint",
     "MetricsCollector",
     "ModalityEncoder",
     "ModalityType",
+    "ModelNotFoundError",
     "MultiModalContent",
     "MultiModalConverter",
     "MultiModalItem",
     "MultiQueryTransformer",
     "OTLPMetricsExporter",
     "OTLPSpanExporter",
+    "OpenAIEmbeddingProvider",
     "OpenAIFormatter",
     "OverflowStrategy",
     "PDFParser",
@@ -479,6 +600,9 @@ __all__ = [
     "PipelineStep",
     "PlainTextParser",
     "PostProcessor",
+    "ProgressiveSummarizationMemory",
+    "ProviderError",
+    "ProviderNotInstalledError",
     "QueryBundle",
     "QueryClassifier",
     "QueryEnricher",
@@ -487,6 +611,7 @@ __all__ = [
     "QueryTransformer",
     "RAGEvaluator",
     "RAGMetrics",
+    "RateLimitError",
     "RecencyScorer",
     "RecursiveCharacterChunker",
     "Reranker",
@@ -494,18 +619,22 @@ __all__ = [
     "RetrievalEvaluator",
     "RetrievalMetrics",
     "RetrievalMetricsCalculator",
+    "RetrievalScope",
     "Retriever",
     "RetrieverError",
     "Role",
+    "RoundFinished",
     "RoundRobinReranker",
+    "RoundStarted",
+    "RoundUsage",
     "RoutedRetriever",
-    "ScoreReranker",
     "ScoredMemoryRetriever",
     "SemanticChunker",
     "SentenceChunker",
+    "SentenceTransformerEmbeddingProvider",
+    "ServerError",
     "SharedSpaceRetriever",
     "SimilarityConsolidator",
-    "SimpleGraphMemory",
     "Skill",
     "SkillRegistry",
     "SlidingWindowMemory",
@@ -516,30 +645,47 @@ __all__ = [
     "SparseRetriever",
     "StepBackTransformer",
     "StepDiagnostic",
+    "StopReason",
     "StorageError",
-    "StreamDelta",
-    "StreamResult",
-    "StreamUsage",
+    "StreamChunk",
+    "StructureExtractor",
+    "SubagentDefinition",
     "SummaryBufferMemory",
     "TableAwareChunker",
     "TableEncoder",
     "TableExtractor",
+    "TextDelta",
     "TextEncoder",
+    "TierCompactor",
     "TiktokenCounter",
     "TokenBudget",
-    "TokenBudgetExceededError",
-    "TokenLevelEncoder",
     "Tokenizer",
+    "ToolCall",
+    "ToolCallDelta",
+    "ToolFinished",
+    "ToolResult",
+    "ToolSchema",
+    "ToolStarted",
     "TraceRecord",
     "Tracer",
     "TracingCallback",
+    "TurnDiagnostics",
+    "TurnFinished",
+    "TurnStarted",
+    "Usage",
+    "UsageLimitReached",
+    "UsageLimits",
     "VectorStore",
+    "VoyageEmbeddingProvider",
+    "WikilinkExtractor",
     "async_postprocessor_step",
     "async_reranker_step",
     "async_retriever_step",
     "auto_promotion_step",
+    "calculate_cost",
     "classified_retriever_step",
     "create_eviction_promoter",
+    "create_provider",
     "default_agent_budget",
     "default_chat_budget",
     "default_rag_budget",
@@ -549,13 +695,59 @@ __all__ = [
     "generate_doc_id",
     "graph_retrieval_step",
     "memory_skill",
+    "memory_tool",
     "memory_tools",
     "postprocessor_step",
     "query_transform_step",
     "rag_skill",
     "rag_tools",
+    "register_provider",
     "reranker_step",
     "retriever_step",
     "rrf_fuse",
     "tool",
 ]
+
+# MCP Bridge (optional — requires pip install astro-anchor[mcp])
+try:
+    import fastmcp as _fastmcp  # noqa: F401 — probe for optional dependency
+except ImportError:
+    pass  # fastmcp not installed — MCP bridge unavailable
+else:
+    from anchor.mcp import (
+        FastMCPClientBridge,
+        FastMCPServerBridge,
+        MCPClient,
+        MCPClientPool,
+        MCPConfigError,
+        MCPConnectionError,
+        MCPError,
+        MCPPrompt,
+        MCPPromptArgument,
+        MCPResource,
+        MCPServer,
+        MCPServerConfig,
+        MCPTimeoutError,
+        MCPToolError,
+        mcp_tool_to_agent_tool,
+        parse_server_string,
+    )
+
+    __all__ += [
+        "FastMCPClientBridge",
+        "FastMCPServerBridge",
+        "MCPClient",
+        "MCPClientPool",
+        "MCPConfigError",
+        "MCPConnectionError",
+        "MCPError",
+        "MCPPrompt",
+        "MCPPromptArgument",
+        "MCPResource",
+        "MCPServer",
+        "MCPServerConfig",
+        "MCPTimeoutError",
+        "MCPToolError",
+        "mcp_tool_to_agent_tool",
+        "parse_server_string",
+    ]

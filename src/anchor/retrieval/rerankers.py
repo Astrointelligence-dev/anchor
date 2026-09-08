@@ -65,7 +65,7 @@ class CrossEncoderReranker:
         self,
         query: QueryBundle,
         items: list[ContextItem],
-        top_k: int = 10,
+        top_k: int | None = None,
     ) -> list[ContextItem]:
         """Rerank items using the cross-encoder scoring function.
 
@@ -81,13 +81,16 @@ class CrossEncoderReranker:
         if not items:
             return []
 
-        effective_top_k = min(top_k, self._top_k) if top_k != 10 else self._top_k
+        effective_top_k = top_k if top_k is not None else self._top_k
 
         scored: list[tuple[float, ContextItem]] = []
         for item in items:
             score = self._score_fn(query.query_str, item.content)
             clamped = max(0.0, min(1.0, score))
-            updated = item.model_copy(update={"score": clamped})
+            updated = item.model_copy(update={
+                "score": clamped,
+                "metadata": {**item.metadata, "raw_score": score},
+            })
             scored.append((score, updated))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -134,7 +137,7 @@ class CohereReranker:
         self,
         query: QueryBundle,
         items: list[ContextItem],
-        top_k: int = 10,
+        top_k: int | None = None,
     ) -> list[ContextItem]:
         """Rerank items using the batch reranking callback.
 
@@ -149,7 +152,7 @@ class CohereReranker:
         if not items:
             return []
 
-        effective_top_k = min(top_k, self._top_k) if top_k != 10 else self._top_k
+        effective_top_k = top_k if top_k is not None else self._top_k
         documents = [item.content for item in items]
 
         ranked_results = self._rerank_fn(query.query_str, documents, effective_top_k)
@@ -158,7 +161,10 @@ class CohereReranker:
         for idx, score in ranked_results:
             if 0 <= idx < len(items):
                 clamped = max(0.0, min(1.0, score))
-                updated = items[idx].model_copy(update={"score": clamped})
+                updated = items[idx].model_copy(update={
+                    "score": clamped,
+                    "metadata": {**items[idx].metadata, "raw_score": score},
+                })
                 result.append(updated)
 
         return result[:effective_top_k]
@@ -220,7 +226,7 @@ class FlashRankReranker:
         self,
         query: QueryBundle,
         items: list[ContextItem],
-        top_k: int = 10,
+        top_k: int | None = None,
     ) -> list[ContextItem]:
         """Rerank items using the flashrank local cross-encoder.
 
@@ -244,7 +250,7 @@ class FlashRankReranker:
             )
             raise RetrieverError(msg) from e
 
-        effective_top_k = min(top_k, self._top_k) if top_k != 10 else self._top_k
+        effective_top_k = top_k if top_k is not None else self._top_k
         ranker = self._get_ranker()
 
         # Build passages with item IDs for mapping back
@@ -265,7 +271,10 @@ class FlashRankReranker:
             score = float(entry["score"])
             if item_id in item_map:
                 clamped = max(0.0, min(1.0, score))
-                updated = item_map[item_id].model_copy(update={"score": clamped})
+                updated = item_map[item_id].model_copy(update={
+                    "score": clamped,
+                    "metadata": {**item_map[item_id].metadata, "raw_score": score},
+                })
                 result.append(updated)
 
         return result
@@ -294,7 +303,7 @@ class RoundRobinReranker:
         self,
         query: QueryBundle,
         items: list[ContextItem],
-        top_k: int = 10,
+        top_k: int | None = None,
     ) -> list[ContextItem]:
         """Re-sort items by existing score descending.
 
@@ -312,7 +321,7 @@ class RoundRobinReranker:
         if not items:
             return []
 
-        effective_top_k = min(top_k, self._top_k) if top_k != 10 else self._top_k
+        effective_top_k = top_k if top_k is not None else self._top_k
         sorted_items = sorted(items, key=lambda x: x.score, reverse=True)
         return sorted_items[:effective_top_k]
 
@@ -401,7 +410,7 @@ class RerankerPipeline:
         self,
         query: QueryBundle,
         items: list[ContextItem],
-        top_k: int = 10,
+        top_k: int | None = None,
     ) -> list[ContextItem]:
         """Rerank items through the chain of rerankers.
 
@@ -419,7 +428,7 @@ class RerankerPipeline:
         if not items:
             return []
 
-        effective_top_k = min(top_k, self._top_k) if top_k != 10 else self._top_k
+        effective_top_k = top_k if top_k is not None else self._top_k
         current = items
 
         for reranker in self._rerankers:

@@ -8,6 +8,10 @@ compliance using FakeTokenizer.
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("tiktoken", reason="tiktoken required for TiktokenCounter tests")
+
 from unittest.mock import patch
 
 from anchor.protocols.tokenizer import Tokenizer
@@ -90,6 +94,27 @@ class TestTiktokenCounterTruncate:
         token_count = counter.count_tokens(text)
         truncated = counter.truncate_to_tokens(text, max_tokens=token_count)
         assert truncated == text
+
+    def test_split_head_tail_returns_whole_text_when_it_fits(self) -> None:
+        counter = _make_counter()
+        head, tail, total = counter.split_head_tail("a b c", 2, 2)
+        assert (head, tail, total) == ("a b c", "", 3)
+
+    def test_split_head_tail_splits_oversized_text(self) -> None:
+        counter = _make_counter()
+        text = " ".join(f"w{i}" for i in range(10))
+        head, tail, total = counter.split_head_tail(text, 2, 3)
+        assert total == 10
+        # Mock encoding maps word i to token id i.
+        assert head == "tok0 tok1"
+        assert tail == "tok7 tok8 tok9"
+
+    def test_split_head_tail_zero_tail_budget(self) -> None:
+        counter = _make_counter()
+        head, tail, total = counter.split_head_tail("a b c d", 2, 0)
+        assert tail == ""
+        assert total == 4
+        assert head == "tok0 tok1"
 
 
 class TestTiktokenCounterProtocol:

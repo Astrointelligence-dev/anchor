@@ -9,26 +9,12 @@ queries to specialised retrievers.
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Callable
 
+from anchor._math import cosine_similarity as _cosine_similarity
 from anchor.models.query import QueryBundle
 
 logger = logging.getLogger(__name__)
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors.
-
-    Returns a value in [-1.0, 1.0]. Returns 0.0 if either vector has
-    zero norm.
-    """
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return max(-1.0, min(1.0, dot / (norm_a * norm_b)))
 
 
 class KeywordClassifier:

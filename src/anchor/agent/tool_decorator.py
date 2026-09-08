@@ -26,6 +26,9 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     input_model: type[BaseModel] | None = None,
+    requires_approval: bool = False,
+    read_only: bool = False,
+    max_result_tokens: int | None = None,
 ) -> Callable[[Callable[..., str]], AgentTool]: ...
 
 
@@ -35,6 +38,9 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     input_model: type[BaseModel] | None = None,
+    requires_approval: bool = False,
+    read_only: bool = False,
+    max_result_tokens: int | None = None,
 ) -> AgentTool | Callable[[Callable[..., str]], AgentTool]:
     """Create an :class:`AgentTool` from a decorated function.
 
@@ -64,14 +70,29 @@ def tool(
     input_model:
         Explicit Pydantic model for input schema.  When omitted,
         a model is auto-generated from the function's type hints.
+    read_only:
+        Declare the tool side-effect free — the async loop may run it
+        concurrently with other read-only calls. Default ``False``:
+        an undeclared tool is a write and runs alone.
+    max_result_tokens:
+        Per-tool override of the agent's tool-result cap; ``None``
+        inherits the agent-wide default.
     """
     if fn is not None:
         # Bare @tool usage
-        return _build_agent_tool(fn, name=name, description=description, input_model=input_model)
+        return _build_agent_tool(
+            fn, name=name, description=description, input_model=input_model,
+            requires_approval=requires_approval, read_only=read_only,
+            max_result_tokens=max_result_tokens,
+        )
 
     # Parameterised @tool(...) usage — return a decorator
     def decorator(func: Callable[..., str]) -> AgentTool:
-        return _build_agent_tool(func, name=name, description=description, input_model=input_model)
+        return _build_agent_tool(
+            func, name=name, description=description, input_model=input_model,
+            requires_approval=requires_approval, read_only=read_only,
+            max_result_tokens=max_result_tokens,
+        )
 
     return decorator
 
@@ -82,6 +103,9 @@ def _build_agent_tool(
     name: str | None,
     description: str | None,
     input_model: type[BaseModel] | None,
+    requires_approval: bool = False,
+    read_only: bool = False,
+    max_result_tokens: int | None = None,
 ) -> AgentTool:
     """Internal helper that builds the AgentTool from a function."""
     tool_name = name or fn.__name__
@@ -101,4 +125,7 @@ def _build_agent_tool(
         input_schema=input_schema,
         fn=fn,
         input_model=model,
+        requires_approval=requires_approval,
+        read_only=read_only,
+        max_result_tokens=max_result_tokens,
     )

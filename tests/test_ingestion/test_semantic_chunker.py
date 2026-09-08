@@ -113,13 +113,9 @@ class TestSemanticChunker:
         chunks = chunker.chunk(text)
         for chunk in chunks:
             token_count = fake_tokenizer.count_tokens(chunk)
-            assert token_count <= 10, (
-                f"Chunk exceeds chunk_size: {token_count} tokens in '{chunk}'"
-            )
+            assert token_count <= 10, f"Chunk exceeds chunk_size: {token_count} tokens in '{chunk}'"
 
-    def test_min_chunk_size_merges_small_chunks(
-        self, fake_tokenizer: FakeTokenizer
-    ) -> None:
+    def test_min_chunk_size_merges_small_chunks(self, fake_tokenizer: FakeTokenizer) -> None:
         chunker = SemanticChunker(
             embed_fn=_contrasting_embed_fn,
             tokenizer=fake_tokenizer,
@@ -179,9 +175,7 @@ class TestSemanticChunker:
                 chunk_size=0,
             )
 
-    def test_metadata_parameter_accepted(
-        self, semantic_chunker: SemanticChunker
-    ) -> None:
+    def test_metadata_parameter_accepted(self, semantic_chunker: SemanticChunker) -> None:
         """Metadata param is accepted but unused."""
         chunks = semantic_chunker.chunk("hello world", metadata={"lang": "en"})
         assert len(chunks) == 1

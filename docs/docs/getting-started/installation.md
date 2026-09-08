@@ -20,7 +20,7 @@ icon: material/download
 === "uv"
 
     ```bash
-    uv add anchor
+    uv add astro-anchor
     ```
 
 ## Optional extras
@@ -42,12 +42,12 @@ what you need, or grab everything at once.
 === "uv"
 
     ```bash
-    uv add anchor[bm25]
-    uv add anchor[cli]
-    uv add anchor[flashrank]
-    uv add anchor[anthropic]
-    uv add anchor[otlp]
-    uv add anchor[all]
+    uv add astro-anchor[bm25]
+    uv add astro-anchor[cli]
+    uv add astro-anchor[flashrank]
+    uv add astro-anchor[anthropic]
+    uv add astro-anchor[otlp]
+    uv add astro-anchor[all]
     ```
 
 | Extra | What it adds | When you need it |
@@ -81,7 +81,7 @@ editable mode with all extras:
 === "pip"
 
     ```bash
-    git clone https://github.com/artcgranja/anchor.git
+    git clone https://github.com/Astrointelligence-dev/anchor.git
     cd anchor
     pip install -e ".[all,dev]"
     ```
@@ -89,7 +89,7 @@ editable mode with all extras:
 === "uv"
 
     ```bash
-    git clone https://github.com/artcgranja/anchor.git
+    git clone https://github.com/Astrointelligence-dev/anchor.git
     cd anchor
     uv sync --all-extras
     ```

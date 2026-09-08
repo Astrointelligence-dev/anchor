@@ -1,0 +1,156 @@
+"""Typed events emitted by the agent loop (``Agent.stream``/``Agent.astream``).
+
+One discriminated union (``AgentEvent``, by the ``type`` literal) delivered
+through a single iterator — ``chat``/``achat`` are text-only projections of
+the same stream. Events forwarded from a subagent carry the parent tool
+call's id in ``parent_tool_call_id``; top-level events leave it ``None``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from contextvars import ContextVar
+from typing import Any, Literal
+
+from pydantic import BaseModel
+
+from anchor.agent.models import RoundUsage, TurnDiagnostics
+
+
+class _BaseEvent(BaseModel, frozen=True):
+    parent_tool_call_id: str | None = None
+
+
+class TurnStarted(_BaseEvent):
+    """The turn's context is built; rounds are about to run."""
+
+    type: Literal["turn_started"] = "turn_started"
+
+
+class RoundStarted(_BaseEvent):
+    """A model round is starting (``round`` is 0-based)."""
+
+    type: Literal["round_started"] = "round_started"
+    round: int
+    max_rounds: int
+
+
+class TextDelta(_BaseEvent):
+    """Incremental assistant text — the projection target of ``chat``."""
+
+    type: Literal["text_delta"] = "text_delta"
+    text: str
+
+
+class ToolStarted(_BaseEvent):
+    """A tool call is about to execute.
+
+    ``tool_input`` is the model's requested arguments; a pre-hook may
+    still rewrite them before execution (observer callbacks receive the
+    resolved input).
+    """
+
+    type: Literal["tool_started"] = "tool_started"
+    tool_call_id: str
+    name: str
+    tool_input: dict[str, Any]
+
+
+class ToolFinished(_BaseEvent):
+    """A tool call completed. Tool failure is ``is_error=True``, not an
+    exception — only turn-level failures (provider, MCP) raise."""
+
+    type: Literal["tool_finished"] = "tool_finished"
+    tool_call_id: str
+    name: str
+    result: str
+    is_error: bool = False
+
+
+class CompactionStarted(_BaseEvent):
+    """Client-side compaction is summarizing older messages (LLM call)."""
+
+    type: Literal["compaction_started"] = "compaction_started"
+
+
+class CompactionFinished(_BaseEvent):
+    """Client-side compaction replaced the head with a summary."""
+
+    type: Literal["compaction_finished"] = "compaction_finished"
+    tokens_before: int
+    tokens_after: int
+
+
+class RoundFinished(_BaseEvent):
+    """A round completed, with its token accounting."""
+
+    type: Literal["round_finished"] = "round_finished"
+    round: int
+    usage: RoundUsage
+
+
+class UsageLimitReached(_BaseEvent):
+    """A usage limit was crossed; the next round is the wrap-up round.
+
+    ``scope="run"`` means the shared pool spanning subagents tripped —
+    a child's spend counts; ``scope="turn"`` is one agent's own
+    per-turn limit. For ``kind="cost"``, ``used``/``limit`` are USD.
+    The turn ends gracefully with ``stopped_by="usage_limit"`` — no
+    exception is raised. A subagent that *starts* on an already
+    exhausted pool emits no additional event (the breach was already
+    emitted by whoever exhausted it); its cut is visible in
+    ``diagnostics.stopped_by``.
+    """
+
+    type: Literal["usage_limit_reached"] = "usage_limit_reached"
+    kind: Literal["total_tokens", "tool_calls", "cost"]
+    used: int | float
+    limit: int | float
+    scope: Literal["turn", "run"] = "turn"
+
+
+class TurnFinished(_BaseEvent):
+    """Terminal event: the final text and per-round diagnostics.
+
+    The diagnostics are also available after the turn as
+    ``agent.last_turn``. ``output`` carries the normalized structured
+    output JSON when the agent has an ``output_model`` (tool mode).
+    """
+
+    type: Literal["turn_finished"] = "turn_finished"
+    text: str
+    diagnostics: TurnDiagnostics
+    output: str | None = None
+
+
+AgentEvent = (
+    TurnStarted
+    | RoundStarted
+    | TextDelta
+    | ToolStarted
+    | ToolFinished
+    | CompactionStarted
+    | CompactionFinished
+    | RoundFinished
+    | UsageLimitReached
+    | TurnFinished
+)
+
+
+# Per-tool-call event sink: ``(emit, parent_tool_call_id)``. The loop's
+# tool phase sets it around each call; a subagent runner executing
+# inside that call forwards the child's events through ``emit`` with
+# ``parent_tool_call_id`` stamped, flattening nested runs into the
+# parent stream. Each asyncio task gets its own context copy, so
+# parallel tool calls never see each other's sink.
+_EVENT_SINK: ContextVar[tuple[Callable[[AgentEvent], None], str] | None] = (
+    ContextVar("anchor_agent_event_sink", default=None)
+)
+
+
+def _forward(event: AgentEvent) -> None:
+    """Emit *event* to the active sink (if any) with the parent id set."""
+    sink = _EVENT_SINK.get()
+    if sink is not None:
+        emit, parent_id = sink
+        emit(event.model_copy(update={"parent_tool_call_id": parent_id}))

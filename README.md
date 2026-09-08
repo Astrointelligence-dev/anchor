@@ -54,6 +54,7 @@ pip install astro-anchor
 ```bash
 pip install astro-anchor[bm25]        # BM25 sparse retrieval
 pip install astro-anchor[anthropic]   # Anthropic Claude support
+pip install astro-anchor[claude-cli]  # Claude Code CLI — your subscription, no API key
 pip install astro-anchor[cli]         # CLI tools (typer + rich)
 pip install astro-anchor[flashrank]   # FlashRank reranking
 pip install astro-anchor[otlp]        # OpenTelemetry tracing
@@ -83,7 +84,10 @@ print(result.diagnostics)        # Token usage, timing, overflow info
 
 - **Hybrid RAG** — Dense embeddings + BM25 sparse retrieval with Reciprocal Rank Fusion
 - **Smart Memory** — Token-aware sliding window with automatic eviction
+- **Knowledge Graph** — Entities and evidenced, bi-temporal relations over memory *and* documents; scope-aware navigation (`path`, `explain`, `backlinks`), graph retrieval fused by RRF, `anchor graph` CLI
 - **Token Budgets** — Priority-ranked context assembly that never exceeds your window
+- **LLM Providers** — Unified interface for Anthropic, OpenAI, Gemini, Grok, Ollama, OpenRouter, LiteLLM with fallback
+- **MCP Bridge** — Bidirectional Model Context Protocol integration for consuming and exposing MCP tools
 - **Provider Agnostic** — Format output for Anthropic, OpenAI, or plain text
 - **Protocol-Based** — Plug in any vector store, tokenizer, or retriever via PEP 544 Protocols
 - **Type-Safe** — Pydantic v2 models throughout, full `py.typed` support
@@ -225,10 +229,11 @@ uv run ruff check src/ tests/
 
 ## Roadmap
 
-- **v0.1.0** (current) — Hybrid RAG, Memory, Pipeline, Formatters, Async, Decorator API, Agent Framework, [Full docs](https://astrointelligence-dev.github.io/anchor/)
-- **v0.2.0** — MCP Bridge, progressive summarization, persistent storage backends
-- **v0.3.0** — GraphRAG, multi-modal context, LangChain/LlamaIndex adapters
-- **v1.0.0** — Production-grade APIs, plugin ecosystem
+- **v0.1.0** — Hybrid RAG, Memory, Pipeline, Formatters, Async, Decorator API, Agent Framework, [Full docs](https://astrointelligence-dev.github.io/anchor/)
+- **v0.2.0** (next) — Agent loop 2026: event stream, usage limits, subagents, hooks + approval seam, structured output, memory tool, MCP bridge; embeddings layer, sqlite-vec + pgvector (HNSW), skills to the agentskills.io spec; vaults, namespaces and `RetrievalScope`; knowledge graph over memory and documents
+- **v0.3.0** — Production deployment guides, additional vector backends by demand
+- **v0.4.0** — LangChain/LlamaIndex adapters, webhook-based event system, async navigation API for the Postgres graph
+- **v1.0.0** — Stable public API, plugin ecosystem, managed cloud offering
 
 ## License
 

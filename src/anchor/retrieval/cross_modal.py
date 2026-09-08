@@ -8,32 +8,15 @@ similarity search across modalities.
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Callable
 from typing import Any
 
+from anchor._math import cosine_similarity as _cosine_sim
 from anchor.models.context import ContextItem
 from anchor.models.query import QueryBundle
+from anchor.models.scope import RetrievalScope
 
 logger = logging.getLogger(__name__)
-
-
-def _cosine_sim(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors.
-
-    Parameters:
-        a: First vector.
-        b: Second vector.
-
-    Returns:
-        Cosine similarity in [-1, 1], or 0.0 for zero-magnitude vectors.
-    """
-    dot = sum(x * y for x, y in zip(a, b, strict=False))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0.0 or mag_b == 0.0:
-        return 0.0
-    return dot / (mag_a * mag_b)
 
 
 class CrossModalEncoder:
@@ -127,7 +110,13 @@ class SharedSpaceRetriever:
             embedding = self._encoder.encode(item.content, item_modality)
             self._items.append((item, embedding))
 
-    def retrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]:
+    def retrieve(
+        self,
+        query: QueryBundle,
+        top_k: int = 10,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
         """Retrieve items most similar to the query across modalities.
 
         Parameters:
@@ -144,6 +133,8 @@ class SharedSpaceRetriever:
 
         scored: list[tuple[float, ContextItem]] = []
         for item, embedding in self._items:
+            if scope is not None and not scope.matches(item.namespace):
+                continue
             sim = self._similarity_fn(query_embedding, embedding)
             scored.append((sim, item))
 

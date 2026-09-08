@@ -209,3 +209,10 @@ docs/site/
 
 # Claude Code
 .claude/
+
+# Git worktrees
+.worktrees/
+
+# Local plans and task tracking (not versioned)
+docs/superpowers/
+tasks/

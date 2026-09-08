@@ -20,14 +20,34 @@ class Reranker(Protocol):
 
 class AsyncReranker(Protocol):
     async def arerank(self, query: QueryBundle, items: list[ContextItem], top_k: int = 10) -> list[ContextItem]: ...
-
-class TokenLevelEncoder(Protocol):
-    def encode_tokens(self, text: str) -> list[list[float]]: ...
 ```
 
 ---
 
 ## Core Retrievers
+
+### GraphRetriever
+
+Spreading activation (personalized PageRank) from the knowledge-graph nodes
+a query mentions, optionally seeded by the nearest passages of a
+`VectorStore`; items keep their canonical ids so `HybridRetriever` fuses
+them by RRF. Implements `Retriever` (`scope` honoured).
+
+```python
+GraphRetriever(
+    graph: KnowledgeGraph,
+    context_store: ContextStore,
+    entity_extractor: Callable[[str], list[str]] | None = None,
+    *,
+    vector_store: VectorStore | None = None,
+    embeddings: EmbeddingProvider | None = None,
+    seed_k: int = 5,
+    damping: float = 0.5,
+    tokenizer: Tokenizer | None = None,
+)
+```
+
+See [Knowledge Graph](graph.md).
 
 ### DenseRetriever
 
@@ -318,99 +338,6 @@ SharedSpaceRetriever(
 |---|---|---|
 | `index` | `(items: list[ContextItem], modality: str \| None = None) -> None` | Embed and store items. Uses `metadata["modality"]` if `modality` is `None`. |
 | `retrieve` | `(query: QueryBundle, top_k: int = 10) -> list[ContextItem]` | Retrieve by similarity in shared space. |
-
----
-
-## Late Interaction
-
-### MaxSimScorer
-
-ColBERT-style MaxSim scoring over per-token embeddings.
-
-```python
-MaxSimScorer()
-```
-
-| Method | Signature | Description |
-|---|---|---|
-| `score` | `(query_tokens: list[list[float]], doc_tokens: list[list[float]]) -> float` | Sum of per-query-token maximum cosine similarities. |
-
-### LateInteractionScorer
-
-Configurable wrapper for token-level scoring. Defaults to MaxSim.
-
-```python
-LateInteractionScorer(
-    score_fn: Callable[[list[list[float]], list[list[float]]], float] | None = None,
-)
-```
-
-| Method | Signature | Description |
-|---|---|---|
-| `score` | `(query_tokens: list[list[float]], doc_tokens: list[list[float]]) -> float` | Delegate to configured scoring function. |
-
-### LateInteractionRetriever
-
-Two-stage retriever: first-stage candidate generation + token-level re-scoring.
-
-```python
-LateInteractionRetriever(
-    first_stage: Retriever,
-    encoder: TokenLevelEncoder,
-    scorer: LateInteractionScorer | None = None,
-    first_stage_k: int = 100,
-)
-```
-
-| Method | Signature | Description |
-|---|---|---|
-| `retrieve` | `(query: QueryBundle, top_k: int = 10) -> list[ContextItem]` | Generate candidates then re-score with token-level similarity. |
-
----
-
-## Memory Retrieval
-
-### ScoredMemoryRetriever
-
-Multi-signal retriever combining recency, relevance, and importance.
-
-```python
-ScoredMemoryRetriever(
-    store: MemoryEntryStore,
-    embed_fn: Callable[[str], list[float]] | None = None,
-    vector_store: VectorStore | None = None,
-    decay: MemoryDecay | None = None,
-    alpha: float = 0.3,
-    beta: float = 0.5,
-    gamma: float = 0.2,
-)
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `store` | `MemoryEntryStore` | -- | Backing store for entries. |
-| `embed_fn` | `Callable \| None` | `None` | Embedding function for relevance. |
-| `vector_store` | `VectorStore \| None` | `None` | Vector index for relevance scoring. |
-| `decay` | `MemoryDecay \| None` | `None` | Custom decay. Defaults to 7-day half-life. |
-| `alpha` / `beta` / `gamma` | `float` | `0.3` / `0.5` / `0.2` | Recency / relevance / importance weights. |
-
-| Method | Signature | Description |
-|---|---|---|
-| `retrieve` | `(query: str, top_k: int = 5, *, user_id: str \| None, memory_type: str \| None) -> list[MemoryEntry]` | Retrieve by composite score with optional filters. |
-| `add_entry` | `(entry: MemoryEntry) -> None` | Add entry and optionally index embedding. |
-| `as_retriever` | `() -> MemoryRetrieverAdapter` | Return `Retriever`-protocol adapter for pipeline use. |
-
-### MemoryRetrieverAdapter
-
-Bridges `ScoredMemoryRetriever` to the `Retriever` protocol.
-
-```python
-MemoryRetrieverAdapter(retriever: ScoredMemoryRetriever)
-```
-
-| Method | Signature | Description |
-|---|---|---|
-| `retrieve` | `(query: QueryBundle, top_k: int = 10) -> list[ContextItem]` | Convert `MemoryEntry` to `ContextItem` with `source=MEMORY`, `priority=7`. |
 
 ---
 

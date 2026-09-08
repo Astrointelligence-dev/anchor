@@ -43,6 +43,13 @@ class LLMRAGEvaluator:
         precision_fn: Callable[[str, list[str]], float] | None = None,
         recall_fn: Callable[[str, list[str], str], float] | None = None,
     ) -> None:
+        if not any((faithfulness_fn, relevancy_fn, precision_fn, recall_fn)):
+            msg = (
+                "LLMRAGEvaluator requires at least one metric callback -- "
+                "an evaluator with none configured can only produce "
+                "meaningless results"
+            )
+            raise ValueError(msg)
         self._faithfulness_fn = faithfulness_fn
         self._relevancy_fn = relevancy_fn
         self._precision_fn = precision_fn
@@ -64,17 +71,18 @@ class LLMRAGEvaluator:
             ground_truth: Optional reference answer for recall computation.
 
         Returns:
-            A ``RAGMetrics`` instance.  Dimensions without callbacks are 0.0.
+            A ``RAGMetrics`` instance.  Dimensions without callbacks are
+            ``None`` (not evaluated), never a silent 0.0.
         """
         faithfulness = (
-            self._faithfulness_fn(answer, contexts) if self._faithfulness_fn is not None else 0.0
+            self._faithfulness_fn(answer, contexts) if self._faithfulness_fn is not None else None
         )
-        relevancy = self._relevancy_fn(query, answer) if self._relevancy_fn is not None else 0.0
-        precision = self._precision_fn(query, contexts) if self._precision_fn is not None else 0.0
+        relevancy = self._relevancy_fn(query, answer) if self._relevancy_fn is not None else None
+        precision = self._precision_fn(query, contexts) if self._precision_fn is not None else None
         recall = (
             self._recall_fn(query, contexts, ground_truth)
             if self._recall_fn is not None and ground_truth is not None
-            else 0.0
+            else None
         )
 
         return RAGMetrics(

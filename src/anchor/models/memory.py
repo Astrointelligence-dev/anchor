@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal, TypeAlias
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-Role: TypeAlias = Literal["user", "assistant", "system", "tool"]
+from anchor.llm.models import Role
 
 
 class MemoryType(StrEnum):
@@ -84,3 +85,57 @@ class MemoryEntry(BaseModel):
                 "last_accessed": datetime.now(UTC),
             }
         )
+
+    def invalidate(self, *, by: str | None = None) -> MemoryEntry:
+        """Return a copy expired now — a soft delete.
+
+        The entry drops out of ``search``/``list_all`` but stays readable
+        through ``list_all_unfiltered`` until the garbage collector's
+        retention elapses. *by* records the id of the entry that superseded
+        it in ``metadata["invalidated_by"]``.
+        """
+        metadata = {**self.metadata, "invalidated_by": by} if by else {**self.metadata}
+        return self.model_copy(update={"expires_at": datetime.now(UTC), "metadata": metadata})
+
+
+class FactType(StrEnum):
+    """Classification of key facts extracted during progressive summarization."""
+
+    DECISION = "decision"
+    ENTITY = "entity"
+    NUMBER = "number"
+    DATE = "date"
+    PREFERENCE = "preference"
+    CONSTRAINT = "constraint"
+
+
+class KeyFact(BaseModel):
+    """A structured fact extracted during tier transitions."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    fact_type: FactType
+    content: str
+    source_tier: int
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    token_count: int = Field(default=0, ge=0)
+
+
+class SummaryTier(BaseModel):
+    """A single compression tier holding a summary."""
+
+    level: int
+    content: str
+    token_count: int = Field(default=0, ge=0)
+    source_turn_count: int
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass(frozen=True)
+class TierConfig:
+    """Configuration for a single compression tier."""
+
+    level: int
+    max_tokens: int
+    target_tokens: int = 0
+    priority: int = 7

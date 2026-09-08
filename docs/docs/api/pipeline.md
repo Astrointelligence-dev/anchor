@@ -174,10 +174,12 @@ Execute the step asynchronously. Works for both sync and async step functions.
 
 ## Factory Functions
 
-### `retriever_step(name, retriever, top_k=10) -> PipelineStep`
+### `retriever_step(name, retriever, top_k=10, *, scope=None) -> PipelineStep`
 
 Create a step from a `Retriever` protocol implementation. Appends retrieved
-items to the current list.
+items to the current list. `scope` is intersected with the scope published by
+the running agent turn (`Agent.with_scope`, a parent's scope), so pipeline
+retrieval can only narrow.
 
 ```python
 from anchor import retriever_step
@@ -187,12 +189,13 @@ step = retriever_step("search", my_retriever, top_k=5)
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `str` | (required) | Step name for diagnostics. |
-| `retriever` | `Retriever` | (required) | Object with `retrieve(query, top_k)` method. |
+| `retriever` | `Retriever` | (required) | Object with `retrieve(query, top_k, *, scope=None)` method. |
 | `top_k` | `int` | `10` | Maximum items to retrieve. |
+| `scope` | `RetrievalScope \| None` | `None` | Static namespace scope for this step (include/exclude prefixes, exclude wins). |
 
-### `async_retriever_step(name, retriever, top_k=10) -> PipelineStep`
+### `async_retriever_step(name, retriever, top_k=10, *, scope=None) -> PipelineStep`
 
-Async variant. Wraps an `AsyncRetriever` (must have `aretrieve(query, top_k)`).
+Async variant. Wraps an `AsyncRetriever` (must have `aretrieve(query, top_k, *, scope=None)`).
 
 ```python
 from anchor import async_retriever_step
@@ -321,24 +324,27 @@ side-effect-only step that returns items unchanged.
 |---|---|---|---|
 | `extractor` | `MemoryExtractor` | (required) | Extracts `MemoryEntry` objects from conversation turns. |
 | `store` | `MemoryEntryStore` | (required) | Persistence backend for memory entries. |
-| `consolidator` | `MemoryConsolidator \| None` | `None` | Optional deduplication against existing entries. |
+| `consolidator` | `MemoryConsolidator \| None` | `None` | Optional consolidation against existing entries: `ADD`/`UPDATE` are written, `DELETE` soft-deletes the target (`expires_at=now`), `NONE` is skipped. |
 | `name` | `str` | `"auto_promotion"` | Step name for diagnostics. |
 | `on_error` | `"raise" \| "skip"` | `"skip"` | Error handling policy. |
 
 ### `graph_retrieval_step(graph, store, entity_extractor, ...) -> PipelineStep`
 
-Create a step that retrieves memory entries linked to graph entities via BFS
-traversal.
+Create a step that retrieves the memory entries a query's entities lead to
+in the knowledge graph (the item id is the `MemoryEntry.id`). The walk
+honours the scope published by the running agent turn intersected with the
+static `scope`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `graph` | `SimpleGraphMemory` | (required) | Graph memory instance to traverse. |
+| `graph` | `KnowledgeGraph` | (required) | The graph to walk (see [Knowledge Graph](graph.md)). |
 | `store` | `MemoryEntryStore` | (required) | Store holding `MemoryEntry` objects. |
-| `entity_extractor` | `Callable[[str], list[str]]` | (required) | Maps query string to entity IDs. |
-| `max_depth` | `int` | `2` | Maximum BFS traversal depth. |
+| `entity_extractor` | `Callable[[str], list[str]]` | (required) | Maps query string to entity names. |
+| `max_depth` | `int` | `2` | Maximum traversal depth. |
 | `max_items` | `int` | `5` | Maximum `ContextItem` objects to return. |
 | `name` | `str` | `"graph_retrieval"` | Step name for diagnostics. |
 | `on_error` | `"raise" \| "skip"` | `"skip"` | Error handling policy. |
+| `scope` | `RetrievalScope \| None` | `None` | Static namespace scope (keyword-only). |
 
 ### `create_eviction_promoter(extractor, store, consolidator=None) -> Callable`
 
@@ -356,13 +362,46 @@ memory = SlidingWindowMemory(max_tokens=4096, on_evict=promoter)
 |---|---|---|---|
 | `extractor` | `MemoryExtractor` | (required) | Extracts `MemoryEntry` objects from turns. |
 | `store` | `MemoryEntryStore` | (required) | Persistence backend. |
-| `consolidator` | `MemoryConsolidator \| None` | `None` | Optional deduplication. |
+| `consolidator` | `MemoryConsolidator \| None` | `None` | Optional consolidation (same semantics as `auto_promotion_step`). |
 
 **Returns:** A callable with signature `(list[ConversationTurn]) -> None`.
 
 !!! note
     Errors inside the eviction promoter are logged but never propagated to
     prevent crashing the memory pipeline.
+
+---
+
+## `MemoryContextEnricher`
+
+Enriches queries by appending recent conversation context. Helps retrieval steps
+find documents relevant to the ongoing conversation, not just the literal query.
+
+```python
+from anchor import MemoryContextEnricher
+
+MemoryContextEnricher(
+    max_items: int = 5,
+    template: str = "{query}\n\nConversation context: {context}",
+)
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_items` | `int` | `5` | Maximum number of recent memory items to include. Must be positive. |
+| `template` | `str` | `"{query}\n\nConversation context: {context}"` | Format string with `{query}` and `{context}` placeholders. |
+
+**Usage:**
+
+```python
+enricher = MemoryContextEnricher(max_items=3)
+pipeline = ContextPipeline(max_tokens=8192).with_query_enricher(enricher)
+```
+
+Satisfies the `MemoryQueryEnricher` protocol. When attached via `with_query_enricher()`,
+it receives memory items and appends a summary to the query before retrieval steps execute.
 
 ---
 

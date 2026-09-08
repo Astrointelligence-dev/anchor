@@ -5,49 +5,103 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from anchor._math import cosine_similarity
+from anchor.exceptions import RetrieverError
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.query import QueryBundle
+from anchor.models.scope import ROOT_NAMESPACE, RetrievalScope, same_vault, scope_kwargs
+from anchor.protocols.embeddings import EmbeddingProvider
+from anchor.protocols.storage import AsyncContextStore, AsyncVectorStore
+from anchor.retrieval._rrf import rrf_fuse
+from anchor.storage._where import matches_where
 
 logger = logging.getLogger(__name__)
 
 
 class AsyncDenseRetriever:
-    """Async embedding-based retriever using cosine similarity.
+    """Async embedding-based retriever.
 
-    Uses a user-provided async embedding function to compute query embeddings
-    and scores indexed items by cosine similarity against their stored
-    embeddings. Items must have an ``"embedding"`` key in their metadata.
+    Two operating modes:
+
+    * **Store-backed** (pass ``vector_store`` + ``context_store``): search
+      is delegated to an :class:`AsyncVectorStore` (e.g. pgvector via
+      ``PostgresVectorStore``, or ``AsyncSqliteVectorStore``), including
+      metadata ``where`` filtering.
+    * **In-process** (default): items are held in a Python list with
+      embeddings in their metadata and scored by cosine similarity.
 
     Implements the ``AsyncRetriever`` protocol.
 
     Parameters:
-        embed_fn: Async callable that takes a text string and returns
-            a list of floats representing the embedding.
-        similarity_fn: Optional callable for computing similarity between
-            two embedding vectors. Defaults to cosine similarity.
+        embed_fn: Async callable ``(text) -> embedding``. Alternative to
+            ``embeddings``.
+        similarity_fn: Optional similarity for the in-process mode.
+            Defaults to cosine similarity.
+        embeddings: An :class:`EmbeddingProvider`; preferred over embed_fn.
+        vector_store: Optional :class:`AsyncVectorStore` backend.
+        context_store: Optional :class:`AsyncContextStore` used to resolve
+            ids returned by the vector store. Required with vector_store.
+        min_score: Optional raw-score threshold.
     """
 
-    __slots__ = ("_embed_fn", "_items", "_similarity_fn")
+    __slots__ = (
+        "_context_store",
+        "_embed_fn",
+        "_embeddings",
+        "_items",
+        "_min_score",
+        "_similarity_fn",
+        "_vector_store",
+    )
 
     def __init__(
         self,
-        embed_fn: Callable[[str], Awaitable[list[float]]],
+        embed_fn: Callable[[str], Awaitable[list[float]]] | None = None,
         similarity_fn: Callable[[list[float], list[float]], float] | None = None,
+        *,
+        embeddings: EmbeddingProvider | None = None,
+        vector_store: AsyncVectorStore | None = None,
+        context_store: AsyncContextStore | None = None,
+        min_score: float | None = None,
     ) -> None:
+        if vector_store is not None and context_store is None:
+            msg = "context_store is required when vector_store is provided"
+            raise ValueError(msg)
         self._embed_fn = embed_fn
+        self._embeddings = embeddings
         self._items: list[ContextItem] = []
         self._similarity_fn = similarity_fn or cosine_similarity
+        same_vault(vector_store, context_store)
+        self._vector_store = vector_store
+        self._context_store = context_store
+        self._min_score = min_score
 
     def __repr__(self) -> str:
         return (
             f"AsyncDenseRetriever(items={len(self._items)}, "
-            f"embed_fn={'set' if self._embed_fn is not None else 'None'})"
+            f"store={'set' if self._vector_store is not None else 'None'})"
         )
 
+    async def _embed_query(self, text: str) -> list[float]:
+        if self._embeddings is not None:
+            return await self._embeddings.aembed_query(text)
+        if self._embed_fn is not None:
+            return await self._embed_fn(text)
+        msg = "Configure embeddings or embed_fn to embed queries"
+        raise RetrieverError(msg)
+
+    async def _embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if self._embeddings is not None:
+            return await self._embeddings.aembed_documents(texts)
+        if self._embed_fn is not None:
+            return [await self._embed_fn(t) for t in texts]
+        msg = "Configure embeddings or embed_fn to embed documents"
+        raise RetrieverError(msg)
+
     def index(self, items: list[ContextItem]) -> None:
-        """Store items for retrieval. Items must have embeddings in metadata.
+        """Store items for in-process retrieval (embeddings in metadata).
 
         Parameters:
             items: Context items to index. Each should have an ``"embedding"``
@@ -56,44 +110,84 @@ class AsyncDenseRetriever:
         self._items = list(items)
 
     async def aindex(self, items: list[ContextItem]) -> None:
-        """Async index: embed items using embed_fn and store them.
+        """Async index: embed items and store them.
 
-        Parameters:
-            items: Context items to index. Embeddings will be computed
-                via the configured ``embed_fn`` and stored in metadata.
+        In store-backed mode, documents are embedded in one batch and
+        written to the vector + context stores. In in-process mode,
+        embeddings are stored in item metadata.
         """
+        if self._vector_store is not None and self._context_store is not None:
+            if not items:
+                return
+            vectors = await self._embed_documents([item.content for item in items])
+            for item, embedding in zip(items, vectors, strict=True):
+                # namespace only when set — legacy-store compatibility.
+                if item.namespace != ROOT_NAMESPACE:
+                    await self._vector_store.add_embedding(
+                        item.id, embedding, item.metadata,
+                        namespace=item.namespace,
+                    )
+                else:
+                    await self._vector_store.add_embedding(
+                        item.id, embedding, item.metadata
+                    )
+                await self._context_store.add(item)
+            return
+
         indexed: list[ContextItem] = []
         for item in items:
             if "embedding" not in item.metadata:
-                embedding = await self._embed_fn(item.content)
+                embedding = (await self._embed_documents([item.content]))[0]
                 item = item.model_copy(
                     update={"metadata": {**item.metadata, "embedding": embedding}}
                 )
             indexed.append(item)
         self._items = indexed
 
-    async def aretrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]:
+    async def aretrieve(
+        self,
+        query: QueryBundle,
+        top_k: int = 10,
+        where: dict[str, Any] | None = None,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
         """Asynchronously retrieve items most similar to the query.
 
         Parameters:
             query: The query bundle containing the user's query text.
             top_k: Maximum number of items to return.
+            where: Optional metadata filter (equality or operator dicts).
+            scope: Optional namespace scope (include/exclude, exclude wins).
 
         Returns:
             A list of ``ContextItem`` objects ranked by similarity
             (most similar first).
         """
+        if self._vector_store is not None and self._context_store is not None:
+            return await self._aretrieve_from_store(query, top_k, where, scope)
+
         if not self._items:
             return []
 
-        embedding = await self._embed_fn(query.query_str)
+        embedding = (
+            query.embedding
+            if query.embedding is not None
+            else await self._embed_query(query.query_str)
+        )
 
         scored: list[tuple[float, ContextItem]] = []
         for item in self._items:
             item_embedding = item.metadata.get("embedding")
             if item_embedding is None:
                 continue
+            if scope is not None and not scope.matches(item.namespace):
+                continue
+            if where is not None and not matches_where(item.metadata, where):
+                continue
             score = self._similarity_fn(embedding, item_embedding)
+            if self._min_score is not None and score < self._min_score:
+                continue
             clamped = max(0.0, min(1.0, score))
             updated = item.model_copy(
                 update={
@@ -102,6 +196,7 @@ class AsyncDenseRetriever:
                     "metadata": {
                         **item.metadata,
                         "retrieval_method": "async_dense",
+                        "raw_score": score,
                     },
                 }
             )
@@ -109,6 +204,49 @@ class AsyncDenseRetriever:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [item for _, item in scored[:top_k]]
+
+    async def _aretrieve_from_store(
+        self,
+        query: QueryBundle,
+        top_k: int,
+        where: dict[str, Any] | None,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
+        if self._vector_store is None or self._context_store is None:  # pragma: no cover
+            msg = "store-backed retrieval requires vector_store and context_store"
+            raise RetrieverError(msg)
+        embedding = (
+            query.embedding
+            if query.embedding is not None
+            else await self._embed_query(query.query_str)
+        )
+        kwargs: dict[str, Any] = {}
+        if where is not None:
+            kwargs["where"] = where
+        if scope is not None:
+            kwargs["scope"] = scope
+        results = await self._vector_store.search(embedding, top_k=top_k, **kwargs)
+
+        items: list[ContextItem] = []
+        for item_id, score in results:
+            if self._min_score is not None and score < self._min_score:
+                continue
+            item = await self._context_store.get(item_id)
+            if item is not None:
+                items.append(
+                    item.model_copy(
+                        update={
+                            "source": SourceType.RETRIEVAL,
+                            "score": min(1.0, max(0.0, score)),
+                            "metadata": {
+                                **item.metadata,
+                                "retrieval_method": "async_dense",
+                                "raw_score": score,
+                            },
+                        }
+                    )
+                )
+        return items
 
 
 class AsyncHybridRetriever:
@@ -153,8 +291,14 @@ class AsyncHybridRetriever:
             f"k={self._k}, weights={self._weights})"
         )
 
-    async def aretrieve(self, query: QueryBundle, top_k: int = 10) -> list[ContextItem]:
-        """Fan out to all retrievers concurrently and fuse with RRF.
+    async def aretrieve(
+        self,
+        query: QueryBundle,
+        top_k: int = 10,
+        *,
+        scope: RetrievalScope | None = None,
+    ) -> list[ContextItem]:
+        """Fan out to all retrievers concurrently (scope forwarded) and fuse with RRF.
 
         Parameters:
             query: The query bundle containing the user's query text.
@@ -163,7 +307,10 @@ class AsyncHybridRetriever:
         Returns:
             A fused list of ``ContextItem`` objects ranked by RRF score.
         """
-        tasks = [r.aretrieve(query, top_k=top_k) for r in self._retrievers]
+        tasks = [
+            r.aretrieve(query, top_k=top_k, **scope_kwargs(scope))
+            for r in self._retrievers
+        ]
         all_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_rankings: list[list[ContextItem]] = []
@@ -177,42 +324,13 @@ class AsyncHybridRetriever:
             successful_weights.append(weight)
 
         if not all_rankings:
-            return []
+            msg = "All sub-retrievers failed during hybrid retrieval"
+            raise RetrieverError(msg)
 
-        rrf_scores: dict[str, float] = {}
-        item_map: dict[str, ContextItem] = {}
-
-        for ranking, weight in zip(all_rankings, successful_weights, strict=True):
-            for rank, item in enumerate(ranking, start=1):
-                rrf_scores[item.id] = rrf_scores.get(item.id, 0.0) + weight / (self._k + rank)
-                if item.id not in item_map or item.score > item_map[item.id].score:
-                    item_map[item.id] = item
-
-        sorted_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)[:top_k]
-
-        if not sorted_ids:
-            return []
-
-        max_rrf = rrf_scores[sorted_ids[0]]
-        min_rrf = rrf_scores[sorted_ids[-1]] if len(sorted_ids) > 1 else 0.0
-        score_range = max_rrf - min_rrf if max_rrf > min_rrf else 1.0
-
-        fused_results: list[ContextItem] = []
-        for item_id in sorted_ids:
-            original = item_map[item_id]
-            normalized_score = (
-                (rrf_scores[item_id] - min_rrf) / score_range if score_range > 0 else 1.0
-            )
-            fused_item = original.model_copy(
-                update={
-                    "score": min(1.0, max(0.0, normalized_score)),
-                    "metadata": {
-                        **original.metadata,
-                        "retrieval_method": "async_hybrid_rrf",
-                        "rrf_raw_score": rrf_scores[item_id],
-                    },
-                }
-            )
-            fused_results.append(fused_item)
-
-        return fused_results
+        return rrf_fuse(
+            all_rankings,
+            weights=successful_weights,
+            k=self._k,
+            top_k=top_k,
+            retrieval_method="async_hybrid_rrf",
+        )

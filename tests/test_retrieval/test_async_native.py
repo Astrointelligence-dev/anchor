@@ -43,14 +43,16 @@ async def _fake_score(query: str, doc: str) -> float:
     return 1.0 if query in doc else 0.0
 
 
-async def _fake_cohere_rerank(query: str, documents: list[str], top_k: int) -> list[int]:
+async def _fake_cohere_rerank(
+    query: str, documents: list[str], top_k: int
+) -> list[tuple[int, float]]:
     """Fake reranker: puts documents containing the query first."""
     scored = []
     for i, doc in enumerate(documents):
         score = 1.0 if query in doc else 0.0
         scored.append((score, i))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [idx for _, idx in scored[:top_k]]
+    return [(idx, score) for score, idx in scored[:top_k]]
 
 
 def _make_item(
@@ -495,9 +497,11 @@ class TestAsyncCohereRerankerEdgeCases:
     async def test_cohere_invalid_indices_are_skipped(self) -> None:
         """If the rerank callback returns out-of-range indices, they are skipped."""
 
-        async def bad_rerank(query: str, documents: list[str], top_k: int) -> list[int]:
+        async def bad_rerank(
+            query: str, documents: list[str], top_k: int
+        ) -> list[tuple[int, float]]:
             # Return some valid and some invalid indices
-            return [0, 99, -5, 1]
+            return [(0, 0.9), (99, 0.8), (-5, 0.7), (1, 0.6)]
 
         reranker = AsyncCohereReranker(rerank_fn=bad_rerank)
         items = [
