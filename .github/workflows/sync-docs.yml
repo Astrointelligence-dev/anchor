@@ -25,6 +25,16 @@ jobs:
             echo "::warning::DOCS_SYNC_TOKEN is missing or empty; astro-docs was not notified (see 02-repos/repo-astro-docs)"
           fi
 
+      - name: Probe what the token can see on astro-docs
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_SYNC_TOKEN }}
+        run: |
+          # 404 = token cannot see the repo (wrong resource owner / pending org approval);
+          # 200 with push=false = no Contents write; dispatch needs push=true
+          gh api repos/Astrointelligence-dev/astro-docs --jq '{full_name, permissions}' \
+            || echo "token cannot access Astrointelligence-dev/astro-docs"
+
       - name: Dispatch to astro-docs
         if: steps.token.outputs.present == 'true'
         uses: peter-evans/repository-dispatch@v3
