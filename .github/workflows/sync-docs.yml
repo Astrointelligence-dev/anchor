@@ -30,6 +30,6 @@ jobs:
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.DOCS_SYNC_TOKEN }}
-          repository: artcgranja/astro-docs
+          repository: Astrointelligence-dev/astro-docs
           event-type: sync-anchor-docs
           client-payload: '{"ref": "${{ github.ref_name }}", "sha": "${{ github.sha }}"}'
