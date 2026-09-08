@@ -42,10 +42,10 @@ Caching:
 Memory Management:
     MemoryManager, SlidingWindowMemory, SummaryBufferMemory, ProgressiveSummarizationMemory,
     TierCompactor,
-    MemoryGarbageCollector, GCStats, MemoryCallback, CallbackExtractor,
+    MemoryGarbageCollector, GCStats, MemoryCallback, CallbackExtractor, LLMExtractor,
     MemoryContextEnricher, ContextQueryEnricher,
     FIFOEviction, ImportanceEviction, PairedEviction,
-    SimilarityConsolidator, ExponentialRecencyScorer, LinearRecencyScorer,
+    SimilarityConsolidator, LLMConsolidator, ExponentialRecencyScorer, LinearRecencyScorer,
     EbbinghausDecay, LinearDecay
 
 Retrieval:
@@ -257,6 +257,8 @@ from anchor.memory import (
     ImportanceEviction,
     LinearDecay,
     LinearRecencyScorer,
+    LLMConsolidator,
+    LLMExtractor,
     MemoryCallback,
     MemoryGarbageCollector,
     MemoryManager,
@@ -545,6 +547,8 @@ __all__ = [
     "KeywordClassifier",
     "KeywordRouter",
     "KnowledgeGraph",
+    "LLMConsolidator",
+    "LLMExtractor",
     "LLMProvider",
     "LLMRAGEvaluator",
     "LLMResponse",

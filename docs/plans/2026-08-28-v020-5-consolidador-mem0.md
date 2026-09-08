@@ -89,13 +89,13 @@ o LLM é o do agente, injetado; `SimilarityConsolidator` continua default.
       compartilhado para SQLite/Postgres/Redis.
 
 ### Fase B — `LLMExtractor` + `LLMConsolidator`
-- [ ] `memory/extractor.py`: `LLMExtractor(llm, *, roles=("user","assistant"))`.
-- [ ] `memory/consolidator.py`: `LLMConsolidator(llm, *, embed_fn=None,
+- [x] `memory/extractor.py`: `LLMExtractor(llm, *, roles=("user","assistant"))`.
+- [x] `memory/consolidator.py`: `LLMConsolidator(llm, *, embed_fn=None,
       new_threshold=0.3, top_k=5, max_candidates=20)`; `Decision` Pydantic;
       hash-gate; seleção de S; faixa "novo"; um `invoke`; materialização;
       fail-soft global = ADD.
-- [ ] Exports (`memory/__init__.py`, `anchor/__init__.py`) + smoke.
-- [ ] Testes com `FakeLLM` (JSON fixo): SP→Rio UPDATE (id e hash), café,
+- [x] Exports (`memory/__init__.py`, `anchor/__init__.py`) + smoke.
+- [x] Testes com `FakeLLM` (JSON fixo): SP→Rio UPDATE (id e hash), café,
       paráfrase NONE, DELETE invalida, órfãos, JSON ruim/provider erro,
       `existing==[]` e hash-gate não chamam o LLM, extractor filtra `tool`.
 

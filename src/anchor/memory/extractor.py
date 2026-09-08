@@ -1,19 +1,42 @@
 """Memory extraction from conversation turns.
 
-Provides a callback-based extractor that delegates to user-provided
-functions. The library never calls an LLM -- users supply their own
-extraction logic (which may or may not involve an LLM).
+``CallbackExtractor`` delegates to a user-provided function — the library
+calls no model on its own. ``LLMExtractor`` is the opt-in alternative: the
+extraction phase of the mem0 paper, one call to an injected provider.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+import logging
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
+from anchor._text import strip_markdown_fences
+from anchor.llm.models import Message, Role
 from anchor.models.memory import MemoryEntry, MemoryType
 
 if TYPE_CHECKING:
+    from anchor.llm.base import LLMProvider
     from anchor.models.memory import ConversationTurn
+
+logger = logging.getLogger(__name__)
+
+_MEMORY_TYPES = {t.value for t in MemoryType}
+
+_EXTRACTION_PROMPT = (
+    "You extract durable facts about the user from a conversation excerpt: preferences, "
+    "biographical details, decisions, constraints, relationships — what is worth knowing "
+    "in a future conversation. Skip pleasantries, unanswered questions and anything only "
+    "true for this moment. Write each fact as one self-contained sentence in the third "
+    'person ("User lives in Rio"), resolving pronouns and relative dates from the excerpt. '
+    "Do not repeat a fact.\n"
+    "Return ONLY a JSON array, no prose:\n"
+    '[{{"content": "User lives in Rio", "tags": ["location"], "memory_type": "semantic"}}]\n'
+    "memory_type is one of: semantic (facts), episodic (events), procedural (how-tos). "
+    "Return [] when nothing is worth remembering.\n\n"
+    "Conversation:\n{conversation}\n"
+)
 
 
 class CallbackExtractor:
@@ -88,3 +111,63 @@ class CallbackExtractor:
             entries.append(entry)
 
         return entries
+
+
+class LLMExtractor(CallbackExtractor):
+    """Facts from recent turns in one model call — the mem0 extraction phase.
+
+    Opt-in: the provider is injected (the agent's own), never a new client.
+    Only turns whose role is in *roles* are read — tool turns are noise for
+    facts about the user — and no call is made when none remain. Each fact
+    becomes a ``MemoryEntry`` the way ``CallbackExtractor`` builds them. A
+    malformed or failed response yields no entries and logs a warning, the
+    fail-soft contract of ``LLMGraphExtractor``.
+    """
+
+    __slots__ = ("_llm", "_roles")
+
+    def __init__(
+        self,
+        llm: LLMProvider,
+        *,
+        roles: Iterable[str] = ("user", "assistant"),
+        default_type: MemoryType = MemoryType.SEMANTIC,
+    ) -> None:
+        super().__init__(self._ask, default_type)
+        self._llm = llm
+        self._roles = tuple(roles)
+
+    def extract(self, turns: list[ConversationTurn]) -> list[MemoryEntry]:
+        kept = [t for t in turns if t.role in self._roles]
+        return super().extract(kept) if kept else []
+
+    def _ask(self, turns: list[ConversationTurn]) -> list[dict[str, Any]]:
+        conversation = "\n".join(f"{t.role}: {t.content}" for t in turns)
+        prompt = _EXTRACTION_PROMPT.format(conversation=conversation)
+        try:
+            response = self._llm.invoke([Message(role=Role.USER, content=prompt)])
+            data = json.loads(strip_markdown_fences(response.content or ""))
+            if not isinstance(data, list):
+                msg = "response is not a JSON array"
+                raise TypeError(msg)
+        except Exception as exc:
+            logger.warning("LLM memory extraction failed: %s", exc)
+            return []
+        facts: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in data:
+            content = raw.get("content") if isinstance(raw, dict) else None
+            if not isinstance(content, str) or not content.strip() or content in seen:
+                continue
+            seen.add(content)
+            fact: dict[str, Any] = {"content": content.strip()}
+            tags = raw.get("tags")
+            if isinstance(tags, list):
+                fact["tags"] = [t for t in tags if isinstance(t, str)]
+            if raw.get("memory_type") in _MEMORY_TYPES:
+                fact["memory_type"] = raw["memory_type"]
+            facts.append(fact)
+        return facts
+
+    def __repr__(self) -> str:
+        return f"LLMExtractor(llm={self._llm!r}, roles={self._roles!r})"

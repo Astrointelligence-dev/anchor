@@ -146,10 +146,12 @@ class TestTopLevelExports:
         assert OpenAIFormatter is not None
 
     def test_memory_exports(self) -> None:
-        from anchor import MemoryManager, SlidingWindowMemory
+        from anchor import LLMConsolidator, LLMExtractor, MemoryManager, SlidingWindowMemory
 
         assert MemoryManager is not None
         assert SlidingWindowMemory is not None
+        assert LLMConsolidator is not None
+        assert LLMExtractor is not None
 
     def test_storage_exports(self) -> None:
         from anchor import InMemoryContextStore, InMemoryVectorStore
