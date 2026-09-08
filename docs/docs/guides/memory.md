@@ -294,15 +294,18 @@ What happens on `remember()` (the `Agent` calls `after_turn()` after every
 completed turn — not on an abandoned stream — and in `astream` off the event
 loop):
 
-1. The extractor reads the last `extract_window` user/assistant turns (tool
-   turns are noise) and returns facts.
+1. The extractor reads the user/assistant turns not yet remembered (at most
+   `extract_window`, the newest; tool turns are noise) and returns facts. A
+   provider error propagates and the turns wait for the next attempt.
 2. Cheap gates first: an exact content-hash match is `NONE` without a model
    call; an empty store makes everything `ADD`; with `embed_fn`, a fact whose
    best cosine against the store is below `new_threshold` is `ADD` without a
    call. **High similarity never decides `NONE` on its own** — cosine cannot
    separate a contradiction from a paraphrase, so that band goes to the model.
-3. One model call with the `top_k` most similar memories per fact (the
-   `max_candidates` most recent ones without `embed_fn`), referenced by index.
+3. One model call with the `top_k` most similar memories per fact (word
+   overlap without `embed_fn`), at most `max_candidates` in total — a fact
+   none of whose candidates made the cap is `ADD` without a call — referenced
+   by index.
    `UPDATE` keeps the memory's id, recomputes the hash and records
    `metadata["previous_content"]`; `DELETE` is a **soft delete** — the entry
    gets `expires_at=now` (`MemoryEntry.invalidate`), drops out of

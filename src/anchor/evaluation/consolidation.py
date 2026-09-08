@@ -58,7 +58,7 @@ class ConsolidationCase(BaseModel):
 
     name: str
     existing: list[str] = Field(default_factory=list)
-    turns: list[list[ConversationTurn]]
+    turns: list[list[ConversationTurn]] = Field(min_length=1)
     live_contains: list[str] = Field(default_factory=list)
     live_not_contains: list[str] = Field(default_factory=list)
     expected_live: int | tuple[int, int]
@@ -110,7 +110,11 @@ class ConsolidationReport(BaseModel):
     """Aggregate report over a consolidation golden set."""
 
     results: tuple[ConsolidationCaseResult, ...] = ()
-    k: int = Field(default=5, ge=1)
+
+    @property
+    def k(self) -> int:
+        """Probe cutoff — fixed; ``assert_metric_floor`` reports it."""
+        return _PROBE_K
 
     def mean(self, metric: str) -> float:
         """Mean of a ``ConsolidationMetrics`` field (``passed`` included)."""
@@ -200,4 +204,4 @@ def evaluate_consolidator(
                 case=case, metrics=metrics, live=tuple(live), operations=tuple(operations)
             )
         )
-    return ConsolidationReport(results=tuple(results), k=_PROBE_K)
+    return ConsolidationReport(results=tuple(results))

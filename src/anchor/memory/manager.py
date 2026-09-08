@@ -331,11 +331,18 @@ class MemoryManager:
         )
 
     def _fresh_turns(self) -> list[ConversationTurn]:
-        """The turns after the last remembered one (by identity — eviction-proof)."""
+        """The turns after the last remembered one — eviction-proof.
+
+        The cursor is matched by identity, then by equality, so a backend
+        that rebuilds ``ConversationTurn`` objects on every ``turns`` read
+        still finds it. A cursor no longer in the window means everything
+        there is new.
+        """
         turns = self._conversation.turns
+        last = self._last_remembered
         start = 0
-        if self._last_remembered is not None:
-            start = next((i + 1 for i, t in enumerate(turns) if t is self._last_remembered), 0)
+        if last is not None:
+            start = next((i + 1 for i, t in enumerate(turns) if t is last or t == last), 0)
         return turns[start:][-self._extract_window :]
 
     def after_turn(self) -> list[tuple[MemoryOperation, MemoryEntry | None]]:

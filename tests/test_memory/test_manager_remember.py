@@ -159,6 +159,33 @@ class TestCursor:
         manager.remember()
         assert [[t.content for t in call] for call in extractor.calls] == [["u0", "a0"], ["u1"]]
 
+    def test_provider_failure_keeps_the_turns_for_the_next_attempt(self, caplog) -> None:
+        calls = {"n": 0}
+
+        class Flaky:
+            def extract(self, turns):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("429")
+                return [MemoryEntry(content=f"fact: {turns[-1].content}")]
+
+        manager = _manager(extractor=Flaky())
+        manager.add_user_message("u0")
+        with caplog.at_level(logging.ERROR):
+            assert manager.after_turn() == []  # failed, logged, cursor not advanced
+        assert [e.content for op, e in manager.after_turn()] == ["fact: u0"]  # retried
+
+    def test_rebuilt_turn_objects_still_match_the_cursor(self) -> None:
+        extractor = LastUserFactExtractor()
+        manager = _manager(extractor=extractor)
+        manager.add_user_message("u0")
+        manager.remember()
+        copies = [t.model_copy() for t in manager.conversation.turns]  # equal, not identical
+        manager._last_remembered = copies[-1]
+        manager.add_user_message("u1")
+        manager.remember()
+        assert [[t.content for t in call] for call in extractor.calls] == [["u0"], ["u1"]]
+
     def test_window_caps_the_fresh_turns_and_survives_eviction(self) -> None:
         extractor = LastUserFactExtractor()
         manager = _manager(extractor=extractor, extract_window=2, conversation_tokens=6)

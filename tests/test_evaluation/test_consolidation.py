@@ -71,7 +71,10 @@ class TestLoader:
 
     def test_invalid_line_names_the_line(self, tmp_path: Path) -> None:
         path = tmp_path / "bad.jsonl"
-        path.write_text('{"name": "ok", "turns": [], "expected_live": 0}\n{"name": "no turns"}\n')
+        path.write_text(
+            '{"name": "ok", "turns": [{"role": "user", "content": "x"}], "expected_live": 0}\n'
+            '{"name": "no turns"}\n'
+        )
         with pytest.raises(ValueError, match=r"bad\.jsonl:2"):
             load_consolidation_set(path)
 
@@ -82,6 +85,8 @@ class TestLoader:
         assert [len(step) for step in case.turns] == [1]
         with pytest.raises(ValueError, match="at least one turn"):
             ConsolidationCase(name="c", turns=[[]], expected_live=1)
+        with pytest.raises(ValueError, match="at least 1"):
+            ConsolidationCase(name="c", turns=[], expected_live=1)
 
 
 class TestEvaluate:

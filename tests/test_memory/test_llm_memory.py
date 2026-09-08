@@ -93,14 +93,15 @@ class TestLLMExtractor:
         assert LLMExtractor(llm, roles=("system",)).extract([_turn("system", "y")]) == []
         assert len(llm.prompts) == 1
 
-    def test_fail_soft(self, caplog) -> None:
+    def test_malformed_answers_are_soft_but_provider_errors_propagate(self, caplog) -> None:
         turns = [_turn("user", "hi")]
         with caplog.at_level(logging.WARNING):
             assert LLMExtractor(FakeLLM("not json")).extract(turns) == []
             assert LLMExtractor(FakeLLM('{"content": "obj"}')).extract(turns) == []
             assert LLMExtractor(FakeLLM(None)).extract(turns) == []
-            assert LLMExtractor(Boom()).extract(turns) == []
-        assert caplog.text.count("LLM memory extraction failed") == 4
+        assert caplog.text.count("LLM memory extraction failed") == 3
+        with pytest.raises(RuntimeError, match="provider down"):
+            LLMExtractor(Boom()).extract(turns)  # the manager keeps the turns for a retry
         assert "LLMExtractor(" in repr(LLMExtractor(Boom()))
 
 
@@ -191,7 +192,12 @@ class TestLLMConsolidatorDecisions:
         with caplog.at_level(logging.WARNING):
             results = LLMConsolidator(llm).consolidate(facts, _existing())
 
-        assert _ops(results) == [(NONE, None), (ADD, facts[1].id), (ADD, facts[2].id)]
+        assert _ops(results) == [
+            (NONE, None),
+            (ADD, facts[1].id),
+            (ADD, facts[2].id),
+            (ADD, facts[3].id),  # its only decision was unusable: kept, not dropped
+        ]
         assert "memory 9: added as-is" in caplog.text
         assert "memory -1: ignored" in caplog.text
         assert "named fact 7 of 4" in caplog.text
@@ -266,7 +272,7 @@ class TestLLMConsolidatorGates:
             [MemoryEntry(content="User moved to Rio; lives there now")], existing
         )
         shown = llm.prompts[0].split("NEW FACTS")[0]
-        assert "[0] User lives in São Paulo" in shown  # overlap ("user", "lives") beats recency
+        assert "[0] User lives in São Paulo" in shown  # overlap (user, lives) beats recency
         assert "[1] memory 0" in shown  # ties broken by updated_at
         assert "memory 1" not in shown
 

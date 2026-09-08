@@ -35,7 +35,7 @@ MemoryManager(
 | `graph` | `GraphIndexer \| None` | `None` | Keeps a knowledge graph in step with the store (see [Knowledge Graph](graph.md)). |
 | `extractor` | `MemoryExtractor \| None` | `None` | Turns recent turns into facts on `remember()` (e.g. `LLMExtractor`). |
 | `consolidator` | `MemoryConsolidator \| None` | `None` | Decides ADD/UPDATE/DELETE/NONE for each fact (e.g. `LLMConsolidator`). Without one every fact is added. |
-| `extract_window` | `int` | `10` | How many recent turns the extractor sees. |
+| `extract_window` | `int` | `10` | Cap on the not-yet-remembered turns (the newest) the extractor sees per `remember()`. |
 | `remember_every` | `int` | `1` | `after_turn()` runs `remember()` every N completed turns; `0` = only on an explicit call. |
 | `callbacks` | `list[MemoryCallback] \| None` | `None` | Observers for `on_extraction` / `on_consolidation`. |
 
@@ -56,7 +56,7 @@ MemoryManager(
 | `get_all_facts()` | `list[MemoryEntry]` | Return all persistent entries. |
 | `delete_fact(entry_id)` | `bool` | Delete a fact by ID. Returns `False` if not found. |
 | `update_fact(entry_id, content)` | `MemoryEntry \| None` | Update fact content. Returns `None` if not found. |
-| `remember()` | `list[tuple[MemoryOperation, MemoryEntry \| None]]` | Extract facts from the last `extract_window` turns and consolidate them into the store; returns the operations applied (`DELETE` = soft delete). Empty without extractor/store/turns. Errors propagate. |
+| `remember()` | `list[tuple[MemoryOperation, MemoryEntry \| None]]` | Extract facts from the turns not yet remembered (at most `extract_window`, the newest) and consolidate them into the store; returns the operations applied (`DELETE` = soft delete). Empty without extractor/store/new turns. Errors propagate, and the turns stay for the next attempt. |
 | `after_turn()` | `list[tuple[MemoryOperation, MemoryEntry \| None]]` | Called by `Agent` after each completed turn; runs `remember()` every `remember_every` turns. Failures are logged, never raised. |
 | `get_context_items(priority=7)` | `list[ContextItem]` | Assemble context items. Facts at priority 8, conversation at given priority. |
 | `clear()` | `None` | Clear conversation history and persistent store. |
@@ -283,7 +283,7 @@ SimilarityConsolidator(
 |---|---|---|---|
 | `embed_fn` | `Callable[[str], list[float]]` | *(required)* | Embedding function. This consolidator never calls an LLM (see `LLMConsolidator` for the one that does). |
 | `similarity_threshold` | `float` | `0.85` | Cosine similarity above which entries are merged. In [0.0, 1.0]. |
-| `max_cache_size` | `int` | `1000` | Max cached embeddings before cache is cleared. |
+| `max_cache_size` | `int` | `1000` | LRU cache of embeddings, keyed by text. |
 
 | Method | Returns | Description |
 |---|---|---|
@@ -316,11 +316,11 @@ LLMConsolidator(
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `llm` | `LLMProvider` | *(required)* | The provider to ask — typically `agent.llm`. |
-| `embed_fn` | `Callable \| None` | `None` | With it, a fact whose best cosine against the store is below `new_threshold` is `ADD` without a call, and the model sees the `top_k` most similar memories per fact. Without it, the `max_candidates` most recently updated memories. |
-| `new_threshold` | `float` | `0.3` | Cosine below which a fact is novel. In [0.0, 1.0]. |
-| `top_k` | `int` | `5` | Candidates per fact shown to the model (with `embed_fn`). |
-| `max_candidates` | `int` | `20` | Cap on memories shown to the model. |
-| `max_cache_size` | `int` | `1000` | Embedding cache size (keyed by content hash). |
+| `embed_fn` | `Callable \| None` | `None` | With it, similarity is cosine and a fact whose best cosine against the store is below `new_threshold` is `ADD` without a call. Without it, similarity is word overlap (recency breaks ties). |
+| `new_threshold` | `float` | `0.3` | Cosine below which a fact is novel (only with `embed_fn`). In [0.0, 1.0]. |
+| `top_k` | `int` | `5` | Most similar memories per fact shown to the model. |
+| `max_candidates` | `int` | `20` | Cap on memories shown to the model; a fact none of whose `top_k` made the cap is `ADD` without a call. |
+| `max_cache_size` | `int` | `1000` | LRU cache of embeddings, keyed by text. |
 
 | Method | Returns | Description |
 |---|---|---|

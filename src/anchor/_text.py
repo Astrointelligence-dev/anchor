@@ -26,19 +26,33 @@ def strip_markdown_fences(text: str) -> str:
 
 
 def ask_json(
-    llm: LLMProvider, prompt: str, *, expect: type = list, log: logging.Logger, what: str
+    llm: LLMProvider,
+    prompt: str,
+    *,
+    expect: type = list,
+    log: logging.Logger,
+    what: str,
+    fail_soft: bool = True,
 ) -> Any | None:
     """One model call whose answer is JSON: the parsed value, or ``None`` after a warning.
 
-    The fail-soft contract shared by the memory extractor and consolidator
-    and the LLM graph extractor: a provider error or an answer that is not
-    the *expect* JSON type costs this call its result, never the caller's run.
-    *what* is the phrase the warning opens with ("LLM memory extraction failed").
+    The contract shared by the memory extractor and consolidator and the LLM
+    graph extractor: an answer that is not the *expect* JSON type costs this
+    call its result, never the caller's run. A provider error does the same
+    when *fail_soft* is true; with ``fail_soft=False`` it propagates, for
+    callers that must retry rather than lose the input. *what* is the phrase
+    the warning opens with ("LLM memory extraction failed").
     """
     from anchor.llm.models import Message, Role
 
     try:
         response = llm.invoke([Message(role=Role.USER, content=prompt)])
+    except Exception as exc:
+        if not fail_soft:
+            raise
+        log.warning("%s: %s", what, exc)
+        return None
+    try:
         data = json.loads(strip_markdown_fences(response.content or ""))
         if not isinstance(data, expect):
             msg = f"response is not a JSON {expect.__name__}"

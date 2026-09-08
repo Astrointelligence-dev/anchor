@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -237,13 +238,14 @@ def _decision(item: Any) -> _Decision | None:
         return None
 
 
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"\w+", text.lower()))
+
+
 def _overlap(query: str, content: str) -> float:
-    """Share of the query's words found in the content — the ScoredMemoryRetriever scorer."""
-    terms = set(query.lower().split())
-    if not terms:
-        return 0.0
-    lowered = content.lower()
-    return sum(1 for term in terms if term in lowered) / len(terms)
+    """Share of the query's words that appear in the content (punctuation-blind)."""
+    terms = _words(query)
+    return len(terms & _words(content)) / len(terms) if terms else 0.0
 
 
 class LLMConsolidator:
@@ -254,10 +256,10 @@ class LLMConsolidator:
     empty store makes everything ``ADD``. With *embed_fn*, a fact whose best
     cosine against the store is below *new_threshold* is ``ADD`` without a
     call; the rest reach the model with the *top_k* most similar memories
-    per fact — ranked by keyword overlap (recency breaking ties) when there
-    is no embed_fn — capped at *max_candidates* in total; a fact none of
-    whose candidates made the cap is ``ADD`` without a call rather than
-    asked blind. High similarity never decides ``NONE`` on its own: cosine
+    per fact — ranked by word overlap (recency breaking ties) when there is
+    no embed_fn — capped at *max_candidates* in total; a fact none of whose
+    candidates made the cap is ``ADD`` without a call rather than asked
+    blind. High similarity never decides ``NONE`` on its own: cosine
     cannot tell a contradiction from a paraphrase (MemStrata, 2026), so that
     band is exactly where the model decides.
 
@@ -429,7 +431,7 @@ class _Batch:
             if d.op == "delete" and (t := self._target(d)) is not None:
                 self._deleted.add(t)
                 ops.append((MemoryOperation.DELETE, self._current[t].invalidate(by=survivor)))
-        return ops
+        return ops or [(MemoryOperation.ADD, fact)]  # every decision unusable: keep the fact
 
     def _update(self, fact: MemoryEntry, d: _Decision) -> Outcome:
         t = self._target(d)

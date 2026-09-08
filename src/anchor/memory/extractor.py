@@ -118,8 +118,9 @@ class LLMExtractor(CallbackExtractor):
     Only turns whose role is in *roles* are read — tool turns are noise for
     facts about the user — and no call is made when none remain. Each fact
     becomes a ``MemoryEntry`` the way ``CallbackExtractor`` builds them. A
-    malformed or failed response yields no entries and logs a warning, the
-    fail-soft contract of ``LLMGraphExtractor``.
+    malformed answer yields no entries and logs a warning; a provider error
+    propagates, so ``MemoryManager.remember()`` keeps those turns for the
+    next attempt instead of losing them (``after_turn`` logs it).
     """
 
     __slots__ = ("_llm", "_roles")
@@ -142,7 +143,9 @@ class LLMExtractor(CallbackExtractor):
     def _ask(self, turns: list[ConversationTurn]) -> list[dict[str, Any]]:
         conversation = "\n".join(f"{t.role}: {t.content}" for t in turns)
         prompt = _EXTRACTION_PROMPT.format(conversation=conversation)
-        data = ask_json(self._llm, prompt, log=logger, what="LLM memory extraction failed")
+        data = ask_json(
+            self._llm, prompt, log=logger, what="LLM memory extraction failed", fail_soft=False
+        )
         if data is None:
             return []
         facts: list[dict[str, Any]] = []
