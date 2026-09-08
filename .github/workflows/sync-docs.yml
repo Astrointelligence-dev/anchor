@@ -11,16 +11,22 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    env:
-      # secrets are not allowed in `if:`; surface presence through env
-      HAS_TOKEN: ${{ secrets.DOCS_SYNC_TOKEN != '' }}
     steps:
-      - name: Skip when DOCS_SYNC_TOKEN is missing
-        if: env.HAS_TOKEN != 'true'
-        run: echo "::warning::DOCS_SYNC_TOKEN is not set; astro-docs was not notified (see 02-repos/repo-astro-docs)"
+      - name: Check DOCS_SYNC_TOKEN
+        id: token
+        env:
+          TOKEN: ${{ secrets.DOCS_SYNC_TOKEN }}
+        run: |
+          echo "DOCS_SYNC_TOKEN length: ${#TOKEN}"
+          if [ -n "$TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::DOCS_SYNC_TOKEN is missing or empty; astro-docs was not notified (see 02-repos/repo-astro-docs)"
+          fi
 
       - name: Dispatch to astro-docs
-        if: env.HAS_TOKEN == 'true'
+        if: steps.token.outputs.present == 'true'
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.DOCS_SYNC_TOKEN }}
