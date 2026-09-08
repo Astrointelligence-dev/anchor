@@ -96,8 +96,8 @@ Implement any protocol to plug custom logic into the pipeline.
   RecencyScorer        -- score(entry) -> float
   EvictionPolicy       -- select_for_eviction(entries, count) -> list[str]
   CompactionStrategy   -- compact(entries) -> list[MemoryEntry]
-  MemoryExtractor      -- extract(turn) -> list[MemoryEntry]
-  MemoryConsolidator   -- consolidate(entries) -> list[MemoryEntry]
+  MemoryExtractor      -- extract(turns) -> list[MemoryEntry]
+  MemoryConsolidator   -- consolidate(new_entries, existing) -> list[(MemoryOperation, MemoryEntry | None)]
   MemoryDecay          -- decay(entry) -> float
   QueryRouter          -- route(query) -> str
   QueryClassifier      -- classify(query) -> str

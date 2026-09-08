@@ -283,8 +283,12 @@ class MemoryConsolidator(Protocol):
     ) -> list[tuple[MemoryOperation, MemoryEntry | None]]: ...
 ```
 
-**Returns:** A list of `(MemoryOperation, entry | None)` tuples. Operations
-are `ADD`, `UPDATE`, `DELETE`, or `NONE`.
+**Returns:** A list of `(MemoryOperation, entry)` tuples where the `entry`
+slot names the target: `ADD` — the new entry; `UPDATE` — the existing entry
+rewritten under its own id (a fresh id is a silent ADD); `DELETE` — the
+existing entry to invalidate (the applier soft-deletes it via
+`MemoryEntry.invalidate`; `(DELETE, None)` is a no-op); `NONE` — `None`.
+`existing` may be every entry in the store or a similarity-selected subset.
 
 ### EvictionPolicy
 

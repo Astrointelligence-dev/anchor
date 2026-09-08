@@ -16,6 +16,12 @@ MemoryManager(
     on_evict: Callable[[list[ConversationTurn]], None] | None = None,
     persistent_store: MemoryEntryStore | None = None,
     conversation_memory: ConversationMemory | None = None,
+    graph: GraphIndexer | None = None,
+    extractor: MemoryExtractor | None = None,
+    consolidator: MemoryConsolidator | None = None,
+    extract_window: int = 10,
+    remember_every: int = 1,
+    callbacks: list[MemoryCallback] | None = None,
 )
 ```
 
@@ -26,6 +32,12 @@ MemoryManager(
 | `on_evict` | `Callable \| None` | `None` | Callback for evicted turns. Ignored when `conversation_memory` is provided. |
 | `persistent_store` | `MemoryEntryStore \| None` | `None` | Store for long-term facts. |
 | `conversation_memory` | `ConversationMemory \| None` | `None` | Custom conversation backend. Overrides the default sliding window. |
+| `graph` | `GraphIndexer \| None` | `None` | Keeps a knowledge graph in step with the store (see [Knowledge Graph](graph.md)). |
+| `extractor` | `MemoryExtractor \| None` | `None` | Turns recent turns into facts on `remember()` (e.g. `LLMExtractor`). |
+| `consolidator` | `MemoryConsolidator \| None` | `None` | Decides ADD/UPDATE/DELETE/NONE for each fact (e.g. `LLMConsolidator`). Without one every fact is added. |
+| `extract_window` | `int` | `10` | How many recent turns the extractor sees. |
+| `remember_every` | `int` | `1` | `after_turn()` runs `remember()` every N completed turns; `0` = only on an explicit call. |
+| `callbacks` | `list[MemoryCallback] \| None` | `None` | Observers for `on_extraction` / `on_consolidation`. |
 
 | Property | Type | Description |
 |---|---|---|
@@ -44,6 +56,8 @@ MemoryManager(
 | `get_all_facts()` | `list[MemoryEntry]` | Return all persistent entries. |
 | `delete_fact(entry_id)` | `bool` | Delete a fact by ID. Returns `False` if not found. |
 | `update_fact(entry_id, content)` | `MemoryEntry \| None` | Update fact content. Returns `None` if not found. |
+| `remember()` | `list[tuple[MemoryOperation, MemoryEntry \| None]]` | Extract facts from the last `extract_window` turns and consolidate them into the store; returns the operations applied (`DELETE` = soft delete). Empty without extractor/store/turns. Errors propagate. |
+| `after_turn()` | `list[tuple[MemoryOperation, MemoryEntry \| None]]` | Called by `Agent` after each completed turn; runs `remember()` every `remember_every` turns. Failures are logged, never raised. |
 | `get_context_items(priority=7)` | `list[ContextItem]` | Assemble context items. Facts at priority 8, conversation at given priority. |
 | `clear()` | `None` | Clear conversation history and persistent store. |
 
@@ -267,7 +281,7 @@ SimilarityConsolidator(
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `embed_fn` | `Callable[[str], list[float]]` | *(required)* | Embedding function. The library never calls an LLM. |
+| `embed_fn` | `Callable[[str], list[float]]` | *(required)* | Embedding function. This consolidator never calls an LLM (see `LLMConsolidator` for the one that does). |
 | `similarity_threshold` | `float` | `0.85` | Cosine similarity above which entries are merged. In [0.0, 1.0]. |
 | `max_cache_size` | `int` | `1000` | Max cached embeddings before cache is cleared. |
 
@@ -281,6 +295,39 @@ SimilarityConsolidator(
 
 ---
 
+## LLMConsolidator
+
+The update phase of the mem0 paper: one model call decides `ADD` / `UPDATE` /
+`DELETE` / `NONE` per new fact against the most similar memories. Opt-in;
+the provider is injected.
+
+```python
+LLMConsolidator(
+    llm: LLMProvider,
+    *,
+    embed_fn: Callable[[str], list[float]] | None = None,
+    new_threshold: float = 0.3,
+    top_k: int = 5,
+    max_candidates: int = 20,
+    max_cache_size: int = 1000,
+)
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `llm` | `LLMProvider` | *(required)* | The provider to ask — typically `agent.llm`. |
+| `embed_fn` | `Callable \| None` | `None` | With it, a fact whose best cosine against the store is below `new_threshold` is `ADD` without a call, and the model sees the `top_k` most similar memories per fact. Without it, the `max_candidates` most recently updated memories. |
+| `new_threshold` | `float` | `0.3` | Cosine below which a fact is novel. In [0.0, 1.0]. |
+| `top_k` | `int` | `5` | Candidates per fact shown to the model (with `embed_fn`). |
+| `max_candidates` | `int` | `20` | Cap on memories shown to the model. |
+| `max_cache_size` | `int` | `1000` | Embedding cache size (keyed by content hash). |
+
+| Method | Returns | Description |
+|---|---|---|
+| `consolidate(new_entries, existing)` | `list[tuple[MemoryOperation, MemoryEntry \| None]]` | Exact duplicates → `NONE` without a call; empty `existing` → `ADD` without a call; otherwise one call. `UPDATE` keeps the target id, recomputes `content_hash`, records `metadata["previous_content"]`; `DELETE` returns the target invalidated (`MemoryEntry.invalidate`); unknown `update` target → `ADD`, unknown `delete` target → ignored, a fact the model leaves out → `ADD`; a malformed or failed answer → `ADD` for every fact, with a warning. |
+
+---
+
 ## MemoryGarbageCollector
 
 Prunes expired and decayed entries from a `GarbageCollectableStore`.
@@ -290,6 +337,8 @@ MemoryGarbageCollector(
     store: GarbageCollectableStore,
     decay: MemoryDecay | None = None,
     callbacks: list[MemoryCallback] | None = None,
+    *,
+    retention: timedelta | None = None,
 )
 ```
 
@@ -298,6 +347,7 @@ MemoryGarbageCollector(
 | `store` | `GarbageCollectableStore` | *(required)* | Store to prune. Must support `list_all_unfiltered()`. |
 | `decay` | `MemoryDecay \| None` | `None` | Decay function. Without it, only expiry pruning runs. |
 | `callbacks` | `list[MemoryCallback] \| None` | `None` | Callbacks notified of pruning events. |
+| `retention` | `timedelta \| None` | `None` | Keep expired entries this long before deleting them — an invalidated (soft-deleted) fact stays readable through `list_all_unfiltered` as history. `None` deletes on the first collection. |
 
 | Method | Returns | Description |
 |---|---|---|
@@ -443,3 +493,29 @@ entries = extractor.extract(turns)
 print(entries[0].content)       # "Discussed: Tell me about Python async"
 print(entries[0].memory_type)   # MemoryType.SEMANTIC
 ```
+
+---
+
+## LLMExtractor
+
+Facts from recent turns in one model call — the extraction phase of the
+mem0 paper. Builds entries the way `CallbackExtractor` does.
+
+```python
+LLMExtractor(
+    llm: LLMProvider,
+    *,
+    roles: Iterable[str] = ("user", "assistant"),
+    default_type: MemoryType = MemoryType.SEMANTIC,
+)
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `llm` | `LLMProvider` | *(required)* | The provider to ask — typically `agent.llm`. |
+| `roles` | `Iterable[str]` | `("user", "assistant")` | Only turns with these roles are read; no call when none remain (tool turns are noise). |
+| `default_type` | `MemoryType` | `MemoryType.SEMANTIC` | Type when the model gives none or an unknown one. |
+
+| Method | Returns | Description |
+|---|---|---|
+| `extract(turns)` | `list[MemoryEntry]` | One self-contained fact per entry (`content`, optional `tags`, `memory_type`), deduplicated within the batch, `source_turns` = the turns read. A malformed or failed answer returns `[]` with a warning. |

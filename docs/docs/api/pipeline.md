@@ -324,7 +324,7 @@ side-effect-only step that returns items unchanged.
 |---|---|---|---|
 | `extractor` | `MemoryExtractor` | (required) | Extracts `MemoryEntry` objects from conversation turns. |
 | `store` | `MemoryEntryStore` | (required) | Persistence backend for memory entries. |
-| `consolidator` | `MemoryConsolidator \| None` | `None` | Optional deduplication against existing entries. |
+| `consolidator` | `MemoryConsolidator \| None` | `None` | Optional consolidation against existing entries: `ADD`/`UPDATE` are written, `DELETE` soft-deletes the target (`expires_at=now`), `NONE` is skipped. |
 | `name` | `str` | `"auto_promotion"` | Step name for diagnostics. |
 | `on_error` | `"raise" \| "skip"` | `"skip"` | Error handling policy. |
 
@@ -362,7 +362,7 @@ memory = SlidingWindowMemory(max_tokens=4096, on_evict=promoter)
 |---|---|---|---|
 | `extractor` | `MemoryExtractor` | (required) | Extracts `MemoryEntry` objects from turns. |
 | `store` | `MemoryEntryStore` | (required) | Persistence backend. |
-| `consolidator` | `MemoryConsolidator \| None` | `None` | Optional deduplication. |
+| `consolidator` | `MemoryConsolidator \| None` | `None` | Optional consolidation (same semantics as `auto_promotion_step`). |
 
 **Returns:** A callable with signature `(list[ConversationTurn]) -> None`.
 

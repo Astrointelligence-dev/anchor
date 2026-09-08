@@ -260,8 +260,63 @@ for action, entry in results:
 ```
 
 !!! warning
-    The library never calls an LLM. You provide the `embed_fn` which
-    can use any embedding provider (OpenAI, Cohere, local models, etc.).
+    `SimilarityConsolidator` never calls an LLM — you provide the `embed_fn`
+    (OpenAI, Cohere, local models, etc.). It also cannot tell a
+    contradiction from a paraphrase: "moved to Rio" is *similar* to "lives
+    in São Paulo" and gets merged, not corrected. For that, opt into the
+    LLM pair below.
+
+## LLMExtractor and LLMConsolidator
+
+The two-phase update of the mem0 paper, opt-in: an `LLMExtractor` turns the
+recent turns into facts, an `LLMConsolidator` decides `ADD` / `UPDATE` /
+`DELETE` / `NONE` for each fact against the most similar memories. Both take
+the agent's own provider — never a new client — and fail soft (a bad answer
+logs a warning and adds the facts as-is).
+
+```python
+from anchor import Agent, LLMConsolidator, LLMExtractor, MemoryManager, InMemoryEntryStore
+
+agent = Agent(llm=...)
+memory = MemoryManager(
+    persistent_store=InMemoryEntryStore(),
+    extractor=LLMExtractor(agent.llm),
+    consolidator=LLMConsolidator(agent.llm, embed_fn=my_embed),  # embed_fn optional
+    remember_every=1,  # run after every completed turn (5 = Letta-style batching)
+)
+agent.with_memory(memory)
+
+list(agent.chat("Me mudei pro Rio de Janeiro mês passado."))
+memory.get_all_facts()  # "User lives in São Paulo" became "User lives in Rio de Janeiro"
+```
+
+What happens on `remember()` (the `Agent` calls `after_turn()` after every
+completed turn — not on an abandoned stream — and in `astream` off the event
+loop):
+
+1. The extractor reads the last `extract_window` user/assistant turns (tool
+   turns are noise) and returns facts.
+2. Cheap gates first: an exact content-hash match is `NONE` without a model
+   call; an empty store makes everything `ADD`; with `embed_fn`, a fact whose
+   best cosine against the store is below `new_threshold` is `ADD` without a
+   call. **High similarity never decides `NONE` on its own** — cosine cannot
+   separate a contradiction from a paraphrase, so that band goes to the model.
+3. One model call with the `top_k` most similar memories per fact (the
+   `max_candidates` most recent ones without `embed_fn`), referenced by index.
+   `UPDATE` keeps the memory's id, recomputes the hash and records
+   `metadata["previous_content"]`; `DELETE` is a **soft delete** — the entry
+   gets `expires_at=now` (`MemoryEntry.invalidate`), drops out of
+   `search`/`list_all` in every backend, and stays readable through
+   `list_all_unfiltered` until the garbage collector's `retention` elapses.
+   An unknown `update` target degrades to `ADD`, an unknown `delete` target
+   is ignored, a fact the model leaves out is `ADD`.
+
+Call `memory.remember()` yourself for a manual flush (end of session, or
+with `remember_every=0`). `MemoryCallback.on_extraction` /
+`on_consolidation` observe every step. The consolidation golden set in
+`tests/fixtures/consolidation_golden.jsonl` (48 cases: fact changes,
+preference flips, paraphrases, temporary facts, false contradictions,
+re-affirmations) measures the pair — see the [evaluation guide](evaluation.md).
 
 ## MemoryGarbageCollector and GCStats
 
@@ -272,6 +327,7 @@ from anchor import MemoryGarbageCollector, EbbinghausDecay, InMemoryEntryStore
 
 store = InMemoryEntryStore()
 gc = MemoryGarbageCollector(store=store, decay=EbbinghausDecay())
+# retention=timedelta(days=30) keeps invalidated (soft-deleted) facts as history that long
 
 stats = gc.collect(retention_threshold=0.1)
 print(stats)  # GCStats(applied: expired_pruned=0, decayed_pruned=0, ...)
@@ -309,7 +365,7 @@ entry = manager.add_fact(
 # Search, update, delete
 results = manager.get_relevant_facts("theme preference", top_k=3)
 manager.update_fact(entry.id, "User prefers dark mode with blue accent")
-manager.delete_fact(entry.id)
+manager.delete_fact(entry.id)  # hard delete; a consolidator's DELETE is the soft one
 all_facts = manager.get_all_facts()
 ```
 
