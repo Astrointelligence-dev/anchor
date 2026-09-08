@@ -30,13 +30,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.DOCS_SYNC_TOKEN }}
         run: |
-          # 404 = token cannot see the repo (wrong resource owner / pending org approval);
-          # 200 with push=false = no Contents write; dispatch needs push=true
+          # 404 = token cannot see the repo (wrong resource owner / pending org approval).
+          # The dispatch itself needs the token's Contents: write; a 403 there says so in
+          # X-Accepted-GitHub-Permissions (permissions below are the user's, not the token's)
           gh api repos/Astrointelligence-dev/astro-docs --jq '{full_name, permissions}' \
             || echo "token cannot access Astrointelligence-dev/astro-docs"
-          # On 403 GitHub names the missing permission in X-Accepted-GitHub-Permissions
-          gh api -i -X POST repos/Astrointelligence-dev/astro-docs/dispatches -f event_type=probe-only 2>&1 \
-            | grep -iE '^HTTP/|x-accepted-github-permissions|"message"' || true
 
       - name: Dispatch to astro-docs
         if: steps.token.outputs.present == 'true'
