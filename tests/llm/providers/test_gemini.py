@@ -25,7 +25,7 @@ from anchor.llm.errors import (
     ModelNotFoundError,
     RateLimitError,
     ServerError,
-    TimeoutError,
+    LLMTimeoutError,
 )
 from anchor.llm.models import (
     ContentBlock,
@@ -575,7 +575,7 @@ class TestErrorMapping:
         err = TimeoutErr("timed out")
 
         result = self.provider._map_error(err)
-        assert isinstance(result, TimeoutError)
+        assert isinstance(result, LLMTimeoutError)
         assert result.is_transient is True
 
     @patch("anchor.llm.providers.gemini.genai")
@@ -584,7 +584,7 @@ class TestErrorMapping:
         err = ConnErr("connection failed")
 
         result = self.provider._map_error(err)
-        assert isinstance(result, TimeoutError)
+        assert isinstance(result, LLMTimeoutError)
 
     @patch("anchor.llm.providers.gemini.genai")
     def test_unknown_error_maps_to_provider_error(self, mock_genai):

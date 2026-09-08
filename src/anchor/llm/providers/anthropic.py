@@ -21,7 +21,7 @@ from anchor.llm.errors import (
     ProviderError,
     RateLimitError,
     ServerError,
-    TimeoutError,
+    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
@@ -579,10 +579,10 @@ class AnthropicProvider(BaseLLMProvider):
             return ModelNotFoundError(str(exc), provider=self.provider_name)
 
         if "APIConnectionError" in mro_names or "APIConnectTimeoutError" in mro_names:
-            return TimeoutError(str(exc), provider=self.provider_name)
+            return LLMTimeoutError(str(exc), provider=self.provider_name)
 
         if "APITimeoutError" in mro_names:
-            return TimeoutError(str(exc), provider=self.provider_name)
+            return LLMTimeoutError(str(exc), provider=self.provider_name)
 
         if "APIStatusError" in mro_names:
             status_code = getattr(exc, "status_code", 0)

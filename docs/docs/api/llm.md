@@ -15,7 +15,7 @@ from anchor.llm import (
     Message, Role, LLMResponse, StreamChunk, Usage, StopReason,
     ContentBlock, ToolCall, ToolCallDelta, ToolResult, ToolSchema,
     ProviderError, AuthenticationError, RateLimitError, ServerError,
-    TimeoutError, ModelNotFoundError, ContentFilterError,
+    LLMTimeoutError, ModelNotFoundError, ContentFilterError,
     ProviderNotInstalledError,
     MODEL_PRICING, calculate_cost,
 )
@@ -484,7 +484,7 @@ Base class for all provider errors.
 | `AuthenticationError` | `False` | Invalid or missing API key |
 | `RateLimitError` | `True` | Rate limit exceeded; has optional `retry_after: float \| None` |
 | `ServerError` | `True` | Provider returned a 5xx error |
-| `TimeoutError` | `True` | Request timed out |
+| `LLMTimeoutError` | `True` | Request timed out |
 | `ModelNotFoundError` | `False` | Requested model does not exist |
 | `ContentFilterError` | `False` | Content blocked by the provider's safety filter |
 

@@ -28,7 +28,7 @@ LLM Providers:
     ToolCall, ToolCallDelta, ToolResult, ToolSchema, Usage, StopReason,
     StreamChunk, calculate_cost, MODEL_PRICING,
     ProviderError, AuthenticationError, RateLimitError, ContentFilterError,
-    ModelNotFoundError, ServerError, TimeoutError, ProviderNotInstalledError
+    ModelNotFoundError, ServerError, LLMTimeoutError, ProviderNotInstalledError
 
 MCP Bridge (optional — requires astro-anchor[mcp]):
     FastMCPClientBridge, FastMCPServerBridge, MCPClient, MCPClientPool,
@@ -238,7 +238,7 @@ from anchor.llm import (
     ServerError,
     StopReason,
     StreamChunk,
-    TimeoutError,
+    LLMTimeoutError,
     ToolCall,
     ToolCallDelta,
     ToolResult,
@@ -657,7 +657,7 @@ __all__ = [
     "TextEncoder",
     "TierCompactor",
     "TiktokenCounter",
-    "TimeoutError",
+    "LLMTimeoutError",
     "TokenBudget",
     "Tokenizer",
     "ToolCall",

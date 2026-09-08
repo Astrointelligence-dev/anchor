@@ -12,7 +12,7 @@ from anchor.llm.errors import (
     ProviderNotInstalledError,
     RateLimitError,
     ServerError,
-    TimeoutError,
+    LLMTimeoutError,
 )
 
 
@@ -62,7 +62,7 @@ class TestServerError:
 
 class TestTimeoutError:
     def test_is_transient(self):
-        e = TimeoutError("timed out", provider="ollama")
+        e = LLMTimeoutError("timed out", provider="ollama")
         assert e.is_transient is True
 
 

@@ -30,7 +30,7 @@ from anchor.llm.errors import (
     ProviderError,
     RateLimitError,
     ServerError,
-    TimeoutError,
+    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
@@ -552,7 +552,7 @@ class GeminiProvider(BaseLLMProvider):
             return ModelNotFoundError(str(exc), provider=self.provider_name)
 
         if "TimeoutError" in mro_names or "APIConnectionError" in mro_names:
-            return TimeoutError(str(exc), provider=self.provider_name)
+            return LLMTimeoutError(str(exc), provider=self.provider_name)
 
         if "ServerError" in mro_names:
             return ServerError(str(exc), provider=self.provider_name)
@@ -569,7 +569,7 @@ class GeminiProvider(BaseLLMProvider):
             if status_code >= 500:
                 return ServerError(str(exc), provider=self.provider_name)
             if status_code == 408 or status_code == 504:
-                return TimeoutError(str(exc), provider=self.provider_name)
+                return LLMTimeoutError(str(exc), provider=self.provider_name)
             # Other 4xx
             return ProviderError(str(exc), provider=self.provider_name, is_transient=False)
 

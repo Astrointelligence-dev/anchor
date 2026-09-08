@@ -14,7 +14,7 @@ Models:
     Message, Usage, StopReason, LLMResponse, StreamChunk, ToolSchema
 
 Errors:
-    ProviderError, RateLimitError, ServerError, TimeoutError,
+    ProviderError, RateLimitError, ServerError, LLMTimeoutError,
     AuthenticationError, ModelNotFoundError, ContentFilterError,
     ProviderNotInstalledError
 
@@ -31,7 +31,7 @@ from anchor.llm.errors import (
     ProviderNotInstalledError,
     RateLimitError,
     ServerError,
-    TimeoutError,
+    LLMTimeoutError,
 )
 from anchor.llm.fallback import FallbackProvider
 from anchor.llm.models import (
@@ -79,7 +79,7 @@ __all__ = [
     "ProviderNotInstalledError",
     "RateLimitError",
     "ServerError",
-    "TimeoutError",
+    "LLMTimeoutError",
     # Pricing
     "MODEL_PRICING",
     "calculate_cost",

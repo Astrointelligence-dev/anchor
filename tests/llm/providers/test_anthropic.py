@@ -23,7 +23,7 @@ from anchor.llm.errors import (
     ModelNotFoundError,
     RateLimitError,
     ServerError,
-    TimeoutError,
+    LLMTimeoutError,
 )
 from anchor.llm.models import (
     ContentBlock,
@@ -480,7 +480,7 @@ class TestErrorMapping:
         err = mock_anthropic.APIConnectionError("connection failed")
 
         result = self.provider._map_error(err)
-        assert isinstance(result, TimeoutError)
+        assert isinstance(result, LLMTimeoutError)
         assert result.is_transient is True
 
     @patch("anchor.llm.providers.anthropic.anthropic")
@@ -489,7 +489,7 @@ class TestErrorMapping:
         err = mock_anthropic.APITimeoutError("timed out")
 
         result = self.provider._map_error(err)
-        assert isinstance(result, TimeoutError)
+        assert isinstance(result, LLMTimeoutError)
 
     @patch("anchor.llm.providers.anthropic.anthropic")
     def test_not_found_error_mapped(self, mock_anthropic):

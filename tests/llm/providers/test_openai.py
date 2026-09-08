@@ -25,7 +25,7 @@ from anchor.llm.errors import (
     ProviderError,
     RateLimitError,
     ServerError,
-    TimeoutError,
+    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
@@ -560,7 +560,7 @@ class TestErrorMapping:
         mock_openai.APIConnectionError = type("APIConnectionError", (Exception,), {})
         err = mock_openai.APIConnectionError("connection failed")
         result = self.provider._map_error(err)
-        assert isinstance(result, TimeoutError)
+        assert isinstance(result, LLMTimeoutError)
         assert result.is_transient is True
 
     @patch("anchor.llm.providers.openai.openai")
@@ -568,7 +568,7 @@ class TestErrorMapping:
         mock_openai.APITimeoutError = type("APITimeoutError", (Exception,), {})
         err = mock_openai.APITimeoutError("timed out")
         result = self.provider._map_error(err)
-        assert isinstance(result, TimeoutError)
+        assert isinstance(result, LLMTimeoutError)
         assert result.is_transient is True
 
     @patch("anchor.llm.providers.openai.openai")

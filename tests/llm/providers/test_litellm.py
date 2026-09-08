@@ -25,7 +25,7 @@ from anchor.llm.errors import (
     ProviderError,
     RateLimitError,
     ServerError,
-    TimeoutError,
+    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
@@ -487,14 +487,14 @@ class TestErrorMapping:
         APIConnErr = type("APIConnectionError", (Exception,), {})
         err = APIConnErr("connection failed")
         result = self.provider._map_error(err)
-        assert isinstance(result, TimeoutError)
+        assert isinstance(result, LLMTimeoutError)
         assert result.is_transient is True
 
     def test_api_timeout_error_mapped(self):
         TimeoutErr = type("APITimeoutError", (Exception,), {})
         err = TimeoutErr("timed out")
         result = self.provider._map_error(err)
-        assert isinstance(result, TimeoutError)
+        assert isinstance(result, LLMTimeoutError)
         assert result.is_transient is True
 
     def test_not_found_error_mapped(self):

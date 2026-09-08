@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking
+- **`TimeoutError` renamed to `LLMTimeoutError`** (`anchor` and `anchor.llm`): the old name shadowed the builtin, so `from anchor import *` or an `except TimeoutError` after the import silently changed meaning. Catch provider timeouts with `LLMTimeoutError` (or `ProviderError`); the builtin keeps meaning asyncio/socket timeouts
 - **`SimpleGraphMemory` is gone; the graph is `anchor.graph.KnowledgeGraph` over a `GraphStore` (roadmap #4)**: nodes carry a canonical key (`normalize_key`: NFKC + casefold + whitespace→`_`, so `"Project X"` and `"project x"` are one node), edges carry a free normalized `relation`, an optional `fact`, `provenance` (`extracted`/`inferred`/`ambiguous`), `confidence`, `evidence` (**`ContextItem` ids — the single currency; for memory the item id is `MemoryEntry.id`**) and bi-temporal validity (`valid_from`/`valid_to` world time, `created_at`/`invalidated_at` transaction time). `link_memory(entity, memory_id)` → `link_item(node, item_id, namespace="/")`, `add_relationship` → `add_edge(source, relation, target, evidence=...)`, `get_related_memory_ids` → `related_items`, `get_related_entities` → `neighbors`. Obsolete edges are invalidated, never deleted
 - **`MemoryRetrieverAdapter` items carry `id=MemoryEntry.id`** instead of a fresh uuid — the memory id is the item id (one currency), so graph evidence and RRF fusion line up with what memory returns
 - **`graph_retrieval_step(graph: KnowledgeGraph, ...)`** takes the new graph and gains `scope=`; the walk honors the scope published by the running agent turn (intersected with the static one) — memory reached through the graph can no longer escape `Agent.with_scope()`
@@ -81,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `LLMProvider` protocol and `BaseLLMProvider` ABC with built-in retry and timeout logic
 - `create_provider()` factory with `"provider/model"` string format and automatic lazy loading
 - `FallbackProvider` for automatic provider failover (fallback only before first stream chunk)
-- Provider error hierarchy: `ProviderError`, `RateLimitError`, `ServerError`, `TimeoutError`, `AuthenticationError`, `ModelNotFoundError`, `ContentFilterError`
+- Provider error hierarchy: `ProviderError`, `RateLimitError`, `ServerError`, `LLMTimeoutError`, `AuthenticationError`, `ModelNotFoundError`, `ContentFilterError`
 - Thread-safe provider registry with `threading.Lock`
 - Shared `_openai_compat` module for OpenAI/LiteLLM code deduplication
 - Anthropic streaming usage tracking (`input_tokens` + `output_tokens`)

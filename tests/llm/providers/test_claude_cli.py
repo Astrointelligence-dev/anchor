@@ -31,7 +31,7 @@ from anchor.llm.errors import (
     RateLimitError,
     ServerError,
 )
-from anchor.llm.errors import TimeoutError as ProviderTimeoutError
+from anchor.llm.errors import LLMTimeoutError as ProviderTimeoutError
 from anchor.llm.models import (
     ContentBlock,
     Message,

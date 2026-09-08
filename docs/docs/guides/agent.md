@@ -584,7 +584,7 @@ backoff. Transient errors include:
 
 - `RateLimitError` -- 429 responses (respects `retry_after` header)
 - `ServerError` -- 5xx responses
-- `TimeoutError` -- request timeouts
+- `LLMTimeoutError` -- request timeouts
 
 Non-transient errors (`AuthenticationError`, `ModelNotFoundError`,
 `ContentFilterError`) raise immediately.

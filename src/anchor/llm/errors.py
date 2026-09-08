@@ -40,7 +40,7 @@ class ServerError(ProviderError):
         super().__init__(message, provider=provider, is_transient=True)
 
 
-class TimeoutError(ProviderError):
+class LLMTimeoutError(ProviderError):
     """Request timed out. Transient."""
 
     def __init__(self, message: str, *, provider: str):
