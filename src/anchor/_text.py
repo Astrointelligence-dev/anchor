@@ -52,8 +52,12 @@ def ask_json(
             raise
         log.warning("%s: %s", what, exc)
         return None
+    text = strip_markdown_fences(response.content or "")
     try:
-        data = json.loads(strip_markdown_fences(response.content or ""))
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = json.loads(_outermost(text, expect))  # prose around the value
         if not isinstance(data, expect):
             msg = f"response is not a JSON {expect.__name__}"
             raise TypeError(msg)
@@ -61,3 +65,10 @@ def ask_json(
         log.warning("%s: %s", what, exc)
         return None
     return data
+
+
+def _outermost(text: str, expect: type) -> str:
+    """The slice from the first opening bracket to the last closing one for *expect*."""
+    opening, closing = ("[", "]") if expect is list else ("{", "}")
+    start, end = text.find(opening), text.rfind(closing)
+    return text[start : end + 1] if 0 <= start < end else text

@@ -175,6 +175,16 @@ class TestCursor:
             assert manager.after_turn() == []  # failed, logged, cursor not advanced
         assert [e.content for op, e in manager.after_turn()] == ["fact: u0"]  # retried
 
+    def test_tool_turns_never_eat_the_window(self) -> None:
+        extractor = LastUserFactExtractor()
+        manager = _manager(extractor=extractor, extract_window=2)
+        manager.add_user_message("u0")
+        for i in range(10):
+            manager.add_tool_message(f"[Tool: t] Input: {i} → Result: ok")
+        manager.add_assistant_message("a0")
+        manager.remember()
+        assert [t.content for t in extractor.calls[0]] == ["u0", "a0"]
+
     def test_rebuilt_turn_objects_still_match_the_cursor(self) -> None:
         extractor = LastUserFactExtractor()
         manager = _manager(extractor=extractor)

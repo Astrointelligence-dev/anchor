@@ -305,6 +305,34 @@ class TestLLMConsolidatorGates:
         assert _ops(results)[2] == (ADD, facts[2].id)
 
 
+class TestLLMConsolidatorRanking:
+    def test_without_embed_fn_every_fact_is_shown_up_to_the_cap(self) -> None:
+        """Word overlap is uncalibrated: an old contradiction with no shared word must still
+        reach the model, so the per-fact cut is max_candidates, not top_k."""
+        now = datetime.now(UTC)
+        existing = [
+            MemoryEntry(
+                id="sp", content="User lives in São Paulo", updated_at=now - timedelta(days=30)
+            ),
+            *[
+                MemoryEntry(
+                    id=f"m{i}", content=f"User likes thing {i}", updated_at=now - timedelta(minutes=i)
+                )
+                for i in range(6)
+            ],
+        ]
+        llm = FakeLLM("[]")
+        LLMConsolidator(llm, top_k=5, max_candidates=20).consolidate(
+            [MemoryEntry(content="User moved to Rio de Janeiro")], existing
+        )
+        assert "User lives in São Paulo" in llm.prompts[0].split("NEW FACTS")[0]
+
+    def test_uppercase_ops_are_accepted(self) -> None:
+        llm = FakeLLM(json.dumps([{"fact": 0, "op": "UPDATE", "target": 0, "content": "x"}]))
+        results = LLMConsolidator(llm).consolidate([MemoryEntry(content="User moved")], _existing())
+        assert _ops(results) == [(UPDATE, "m1")]
+
+
 class TestLLMConsolidatorBatches:
     """Decisions in one answer apply against a working copy, in order."""
 
@@ -419,9 +447,43 @@ class TestApplyConsolidation:
         apply_consolidation([MemoryEntry(content="x")], store, Rewrite(), callbacks=[Recorder()])
         assert seen == [("update", "User lives in Rio", "User lives in SP")]
 
+    def test_chained_updates_report_the_latest_previous(self) -> None:
+        seen = []
+
+        class Recorder:
+            def on_consolidation(self, action, new_entry, existing_entry):
+                seen.append(existing_entry.content)
+
+        store = InMemoryEntryStore()
+        store.add(MemoryEntry(id="m1", content="v0"))
+
+        class Twice:
+            def consolidate(self, new_entries, existing):
+                first = existing[0].model_copy(update={"content": "v1"})
+                return [(UPDATE, first), (UPDATE, first.model_copy(update={"content": "v2"}))]
+
+        apply_consolidation([MemoryEntry(content="x")], store, Twice(), callbacks=[Recorder()])
+        assert seen == ["v0", "v1"]
+
     def test_validation(self) -> None:
         with pytest.raises(ValueError):
             LLMConsolidator(FakeLLM("[]"), new_threshold=1.5)
         with pytest.raises(ValueError):
             LLMConsolidator(FakeLLM("[]"), top_k=0)
         assert "LLMConsolidator(" in repr(LLMConsolidator(FakeLLM("[]")))
+
+
+class TestAskJson:
+    def test_prose_around_the_value_and_wrapped_objects(self, caplog) -> None:
+        import logging as _logging
+
+        from anchor._text import ask_json
+
+        log = _logging.getLogger("t")
+        chatty = FakeLLM('Here you go:\n[{"fact": 0, "op": "add"}]\nDone.')
+        assert ask_json(chatty, "p", log=log, what="x") == [{"fact": 0, "op": "add"}]
+        wrapped = FakeLLM('Sure! {"a": [1]} ok')
+        assert ask_json(wrapped, "p", expect=dict, log=log, what="x") == {"a": [1]}
+        with caplog.at_level(logging.WARNING):
+            assert ask_json(FakeLLM('{"decisions": []}'), "p", log=log, what="x") is None
+        assert "not a JSON list" in caplog.text

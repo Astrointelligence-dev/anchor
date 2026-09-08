@@ -314,8 +314,10 @@ loop):
    An unknown `update` target degrades to `ADD`, an unknown `delete` target
    is ignored, a fact the model leaves out is `ADD`.
 
-Call `memory.remember()` yourself for a manual flush (end of session, or
-with `remember_every=0`). `MemoryCallback.on_extraction` /
+The two calls per turn go to the provider you injected but run outside the
+agent's own loop: they are not counted by `with_usage_limits` or
+`TurnDiagnostics`. Call `memory.remember()` yourself for a manual flush (end
+of session, or with `remember_every=0`). `MemoryCallback.on_extraction` /
 `on_consolidation` observe every step. The consolidation golden set in
 `tests/fixtures/consolidation_golden.jsonl` (48 cases: fact changes,
 preference flips, paraphrases, temporary facts, false contradictions,

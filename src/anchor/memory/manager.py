@@ -338,7 +338,9 @@ class MemoryManager:
         still finds it. A cursor no longer in the window means everything
         there is new.
         """
-        turns = self._conversation.turns
+        # Tool turns are the agent's own bookkeeping, never facts about the user:
+        # they neither reach the extractor nor eat the window.
+        turns = [t for t in self._conversation.turns if t.role != Role.TOOL]
         last = self._last_remembered
         start = 0
         if last is not None:

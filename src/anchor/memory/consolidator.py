@@ -15,7 +15,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 from anchor._math import cosine_similarity as _cosine_similarity
 from anchor._text import ask_json
@@ -66,6 +66,7 @@ def apply_consolidation(
         previous = by_id.get(target.id) if target is not None else None
         if target is not None and action in (MemoryOperation.ADD, MemoryOperation.UPDATE):
             store.add(target)
+            by_id[target.id] = target  # a chained UPDATE reports the latest version as previous
         elif target is not None and action == MemoryOperation.DELETE:
             if previous is None:
                 logger.warning(
@@ -229,6 +230,11 @@ class _Decision(BaseModel):
     target: int | None = None
     content: str | None = None
 
+    @field_validator("op", mode="before")
+    @classmethod
+    def _lower(cls, value: Any) -> Any:  # mem0-style models answer "UPDATE"
+        return value.lower() if isinstance(value, str) else value
+
 
 def _decision(item: Any) -> _Decision | None:
     try:
@@ -256,10 +262,10 @@ class LLMConsolidator:
     empty store makes everything ``ADD``. With *embed_fn*, a fact whose best
     cosine against the store is below *new_threshold* is ``ADD`` without a
     call; the rest reach the model with the *top_k* most similar memories
-    per fact — ranked by word overlap (recency breaking ties) when there is
-    no embed_fn — capped at *max_candidates* in total; a fact none of whose
-    candidates made the cap is ``ADD`` without a call rather than asked
-    blind. High similarity never decides ``NONE`` on its own: cosine
+    per fact, capped at *max_candidates* in total; without embed_fn the
+    ranking is word overlap (recency breaking ties) and, being uncalibrated,
+    each fact is shown up to the whole cap. A fact none of whose candidates
+    made the cap is ``ADD`` without a call rather than asked blind. High similarity never decides ``NONE`` on its own: cosine
     cannot tell a contradiction from a paraphrase (MemStrata, 2026), so that
     band is exactly where the model decides.
 
@@ -348,7 +354,10 @@ class LLMConsolidator:
             ranked = self._rank(new_entries[i], existing)
             if self._embed is not None and ranked[0][0] < self._new_threshold:
                 continue  # nothing similar in the store: a plain ADD, no model call
-            top[i] = [entry for _, entry in ranked[: self._top_k]]
+            # cosine is calibrated enough for a tight top-k; word overlap is not,
+            # so without embed_fn a fact is shown up to the whole cap
+            cut = self._top_k if self._embed is not None else self._max_candidates
+            top[i] = [entry for _, entry in ranked[:cut]]
         chosen: dict[str, MemoryEntry] = {}
         for entries in top.values():
             for entry in entries:
