@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from anchor.agent.tool_decorator import tool
 from tests.test_agent.test_phase4_loop import (
     _agent,
@@ -60,3 +62,34 @@ async def test_async_tool_fn_honors_timeout():
     (result,) = _tool_results_of(provider, 1)
     assert result.is_error is True
     assert "timed out after 0.01s" in result.content
+
+
+def test_sync_chat_with_async_tool_keeps_the_thread_loop():
+    """asyncio.run would reset the thread's current loop; the private loop must not."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        responses = [_tool_use_response("tu_1", "echo", {"text": "hi"}), _text_response("done")]
+        agent, _ = _agent(responses, tools=[_async_echo()])
+        assert "".join(agent.chat("Go")) == "done"
+        assert asyncio.get_event_loop() is loop
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+async def test_async_tool_under_a_running_loop_raises_to_the_caller():
+    """The developer's mistake surfaces as TypeError, like an async approval under stream()."""
+    responses = [_tool_use_response("tu_1", "echo", {"text": "hi"}), _text_response("done")]
+    agent, _ = _agent(responses, tools=[_async_echo()])
+    with pytest.raises(TypeError, match="achat"):
+        list(agent.chat("Go"))
+
+
+async def test_refused_future_is_cancelled():
+    from anchor.agent.agent import _run_awaitable_blocking
+
+    fut = asyncio.get_running_loop().create_future()
+    with pytest.raises(TypeError):
+        _run_awaitable_blocking(fut, "t")
+    assert fut.cancelled()

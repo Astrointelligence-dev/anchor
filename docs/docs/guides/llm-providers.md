@@ -251,7 +251,7 @@ llm.invoke(messages, extra_body={"reasoning": {"effort": "low"}})
 ```
 
 Applies to every OpenAI-compatible provider (`openai`, `grok`, `openrouter`, `ollama`,
-`litellm`). Streaming requests the final usage-only chunk (`stream_options.include_usage`),
+`litellm`; the option lives on the base provider). Streaming requests the final usage-only chunk (`stream_options.include_usage`),
 so `RoundUsage` carries the provider's real token counts instead of tokenizer estimates,
 and `prompt_tokens_details.cached_tokens` becomes `Usage.cache_read_tokens`.
 `OpenRouterProvider` also asks for `usage: {"include": true}` by default: the billed

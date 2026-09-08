@@ -384,8 +384,8 @@ def search_kb(query: str, max_results: int = 5) -> str:
 
 An `async def` under `@tool` (or as `AgentTool.fn`) is awaited: on the async path
 (`achat`/`astream`) with the tool's `timeout`, and from `chat()` in a fresh event loop.
-A sync loop driven from inside a running loop cannot await it, so the tool returns an
-error result telling the model to use the async path.
+Calling `chat()` from inside a running loop cannot await it: that raises `TypeError`
+to the caller, the same as an async approval callback under `stream()`.
 
 ```python
 @tool

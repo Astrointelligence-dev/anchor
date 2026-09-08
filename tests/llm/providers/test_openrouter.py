@@ -111,29 +111,7 @@ class TestRegistry:
 # Test: billed cost (usage.include) and extra_body merge
 # ---------------------------------------------------------------------------
 
-
-def _usage_mock(cost=None):
-    usage = MagicMock()
-    usage.prompt_tokens = 10
-    usage.completion_tokens = 5
-    usage.total_tokens = 15
-    usage.cost = cost
-    usage.prompt_tokens_details.cached_tokens = None
-    return usage
-
-
-def _sdk_response(cost=None):
-    msg = MagicMock()
-    msg.content = "ok"
-    msg.tool_calls = None
-    choice = MagicMock()
-    choice.message = msg
-    choice.finish_reason = "stop"
-    resp = MagicMock()
-    resp.choices = [choice]
-    resp.usage = _usage_mock(cost)
-    resp.model = "openai/gpt-4o"
-    return resp
+from tests.llm.providers.test_openai import _sdk_response, _usage_mock  # noqa: E402
 
 
 class TestUsageAndCost:
@@ -163,6 +141,6 @@ class TestUsageAndCost:
 
     def test_billed_cost_lands_in_total_cost(self):
         provider = _make_provider()
-        out = provider._parse_response(_sdk_response(cost=0.0042))
+        out = provider._parse_response(_sdk_response(usage=_usage_mock(cost=0.0042)))
         assert out.usage.total_cost == 0.0042
         assert out.provider == "openrouter"

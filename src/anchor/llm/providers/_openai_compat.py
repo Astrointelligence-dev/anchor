@@ -184,7 +184,9 @@ def build_call_kwargs(
     if stream:
         call_kwargs["stream"] = True
         # A final usage-only chunk: streamed turns carry real token counts
-        # (and, on OpenRouter, the billed cost) instead of tokenizer estimates
+        # (and, on OpenRouter, the billed cost) instead of tokenizer estimates.
+        # ponytail: unconditional; a strict OpenAI-compatible server that 400s
+        # on unknown params would need a provider flag — none has shown up yet
         call_kwargs["stream_options"] = {"include_usage": True}
     if tools:
         call_kwargs["tools"] = [convert_tool(t) for t in tools]
@@ -195,7 +197,7 @@ def build_call_kwargs(
     if kwargs.get("tool_choice") is not None and tools:
         call_kwargs["tool_choice"] = convert_tool_choice(kwargs["tool_choice"])
     if kwargs.get("extra_body"):
-        call_kwargs["extra_body"] = dict(kwargs["extra_body"])
+        call_kwargs["extra_body"] = kwargs["extra_body"]
     return call_kwargs
 
 
@@ -227,11 +229,7 @@ def parse_usage(usage: Any) -> Usage | None:
         prompt_tokens=prompt,
         completion_tokens=completion,
         total_tokens=total if isinstance(total, int) else prompt + completion,
-        total_cost=(
-            float(cost)
-            if isinstance(cost, (int, float)) and not isinstance(cost, bool)
-            else None
-        ),
+        total_cost=float(cost) if isinstance(cost, (int, float)) else None,
         cache_read_tokens=cached if isinstance(cached, int) else 0,
     )
 

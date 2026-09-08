@@ -79,7 +79,7 @@ class LiteLLMProvider(BaseLLMProvider):
         import litellm
 
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, **kwargs,
+            self._model, convert_messages(messages), tools, **self._call_options(kwargs),
         )
         if self._timeout is not None:
             call_kwargs.setdefault("timeout", self._timeout)
@@ -100,7 +100,11 @@ class LiteLLMProvider(BaseLLMProvider):
         import litellm
 
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, stream=True, **kwargs,
+            self._model,
+            convert_messages(messages),
+            tools,
+            stream=True,
+            **self._call_options(kwargs),
         )
         if self._timeout is not None:
             call_kwargs.setdefault("timeout", self._timeout)
@@ -121,7 +125,7 @@ class LiteLLMProvider(BaseLLMProvider):
         import litellm
 
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, **kwargs,
+            self._model, convert_messages(messages), tools, **self._call_options(kwargs),
         )
         if self._timeout is not None:
             call_kwargs.setdefault("timeout", self._timeout)
@@ -142,7 +146,11 @@ class LiteLLMProvider(BaseLLMProvider):
         import litellm
 
         call_kwargs = build_call_kwargs(
-            self._model, convert_messages(messages), tools, stream=True, **kwargs,
+            self._model,
+            convert_messages(messages),
+            tools,
+            stream=True,
+            **self._call_options(kwargs),
         )
         if self._timeout is not None:
             call_kwargs.setdefault("timeout", self._timeout)

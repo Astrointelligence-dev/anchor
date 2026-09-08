@@ -116,27 +116,33 @@ _STUCK_NUDGE = (
 _PRICE_WARNED: set[str] = set()
 
 
+class _AsyncToolUnderRunningLoopError(TypeError):
+    """An ``async def`` tool reached the sync loop while a loop is running."""
+
+
 def _run_awaitable_blocking(awaitable: Any, tool_name: str) -> Any:
     """Drive an ``async def`` tool from the sync loop.
 
-    ``chat()`` has no running loop, so the awaitable runs to completion in
-    a fresh one. With a loop already running (sync loop driven from async
-    code) nothing can await it here: the coroutine is closed — no "never
-    awaited" warning — and a clear error is raised, which the caller turns
-    into an error result for the model.
+    ``chat()`` has no running loop, so the awaitable runs in a private one
+    (``asyncio.run`` would also reset the thread's current loop on exit).
+    With a loop already running nothing can await it here — that is the
+    caller's mistake, surfaced the way an async approval callback is under
+    ``stream()``: release the awaitable and raise to the developer.
     """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-
-        async def _await() -> Any:
-            return await awaitable
-
-        return asyncio.run(_await())
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(awaitable)
+        finally:
+            loop.close()
     if inspect.iscoroutine(awaitable):
         awaitable.close()
-    raise RuntimeError(
-        f"Tool '{tool_name}' is async; drive the agent with achat()/astream() "
+    elif callable(cancel := getattr(awaitable, "cancel", None)):
+        cancel()
+    raise _AsyncToolUnderRunningLoopError(
+        f"Tool '{tool_name}' is async; use agent.astream()/agent.achat() "
         "when an event loop is already running."
     )
 
@@ -1193,6 +1199,8 @@ class Agent:
             output = tool.fn(**tool_input)
             if inspect.isawaitable(output):
                 output = _run_awaitable_blocking(output, tc.name)
+        except _AsyncToolUnderRunningLoopError:
+            raise  # the developer's mistake, not a tool failure for the model
         except Exception as exc:
             logger.exception("Tool '%s' failed", tc.name)
             return self._error_result(
@@ -1226,11 +1234,7 @@ class Agent:
         # here; it gets the same real timeout as async callers above.
         result = tool.fn(**tool_input)
         if inspect.isawaitable(result):
-            awaited: str = (
-                await asyncio.wait_for(result, timeout)
-                if timeout is not None
-                else await result
-            )
+            awaited: str = await asyncio.wait_for(result, timeout)
             return awaited
         return result
 

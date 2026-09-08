@@ -78,20 +78,10 @@ class OpenAIProvider(BaseLLMProvider):
 
     provider_name = "openai"
 
-    def __init__(
-        self, *args: Any, extra_body: dict[str, Any] | None = None, **kwargs: Any,
-    ) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._extra_body: dict[str, Any] = dict(extra_body or {})
         self._client: Any = None
         self._async_client: Any = None
-
-    def _call_options(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Per-call options with the provider's ``extra_body`` folded in."""
-        if not self._extra_body:
-            return kwargs
-        merged = {**self._extra_body, **(kwargs.get("extra_body") or {})}
-        return {**kwargs, "extra_body": merged}
 
     # ------------------------------------------------------------------
     # Client caching
