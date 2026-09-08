@@ -1,0 +1,338 @@
+# anchor
+
+> Context engineering toolkit for AI applications.
+
+anchor is a Python library for building context pipelines that assemble,
+rank, and format context windows for large language models. It provides retrieval,
+memory management, token budgeting, formatting, query transformation, ingestion,
+evaluation, observability, and an agent framework -- all through a composable,
+protocol-driven architecture.
+
+- Repo: https://github.com/Astrointelligence-dev/anchor
+- Docs: https://astrointelligence-dev.github.io/anchor
+- License: MIT
+- Python: >=3.11
+- Core dependency: pydantic>=2.8
+
+## Installation
+
+pip install astro-anchor
+
+Optional extras:
+  pip install astro-anchor[tiktoken]    # tiktoken tokenizer
+  pip install astro-anchor[bm25]        # BM25 sparse retrieval
+  pip install astro-anchor[anthropic]   # Anthropic formatter + agent
+  pip install astro-anchor[agents]      # Agent framework (Anthropic SDK)
+  pip install astro-anchor[flashrank]   # FlashRank reranker
+  pip install astro-anchor[pdf]         # PDF parsing
+  pip install astro-anchor[otlp]        # OpenTelemetry export
+  pip install astro-anchor[cli]         # CLI (typer + rich)
+  pip install astro-anchor[all]         # Everything
+
+## Core Concepts
+
+### ContextPipeline
+The main orchestrator. Assembles context from multiple sources through a series
+of steps, respects token budgets, and formats output for a target LLM.
+
+  pipeline = (
+      ContextPipeline(max_tokens=8192)
+      .add_step(retriever_step("search", my_retriever))
+      .with_memory(memory_manager)
+      .with_formatter(AnthropicFormatter())
+      .add_system_prompt("You are a helpful assistant.")
+  )
+  result = pipeline.build(QueryBundle(query_str="What is context engineering?"))
+
+Key methods:
+  .add_step(step)              -- add a PipelineStep
+  .with_memory(provider)       -- attach a MemoryProvider
+  .with_formatter(formatter)   -- set output Formatter
+  .with_budget(budget)         -- attach a TokenBudget
+  .add_system_prompt(text)     -- add a system prompt item
+  .add_callback(callback)      -- register a PipelineCallback
+  .with_query_enricher(enr)    -- attach a ContextQueryEnricher
+  .build(query) -> ContextResult        -- synchronous build
+  .abuild(query) -> ContextResult       -- async build
+
+### ContextItem
+Immutable Pydantic model. The atomic unit flowing through the pipeline.
+Fields: id, content, source (SourceType), score, priority (1-10),
+token_count, metadata, created_at.
+
+### ContextWindow
+Token-aware, priority-ranked collection of ContextItems.
+Fields: items, max_tokens, used_tokens, metadata.
+
+### ContextResult
+Output of pipeline.build(). Contains the formatted prompt, the ContextWindow,
+and PipelineDiagnostics (step timings, token utilization, overflow stats).
+
+### QueryBundle
+Pydantic model carrying a query through the pipeline.
+Fields: query_str, embedding (optional), metadata, chat_history.
+
+### TokenBudget / BudgetAllocation
+Fine-grained token allocation by SourceType. Each BudgetAllocation has
+source, max_tokens, and priority. Unallocated tokens go to a shared pool.
+
+## Protocols (Extension Points)
+
+All extension points are runtime-checkable typing.Protocol classes.
+Implement any protocol to plug custom logic into the pipeline.
+
+  Retriever            -- retrieve(query: QueryBundle) -> list[ContextItem]
+  AsyncRetriever       -- async variant
+  Reranker             -- rerank(items, query) -> list[ContextItem]
+  AsyncReranker        -- async variant
+  PostProcessor        -- process(items) -> list[ContextItem]
+  AsyncPostProcessor   -- async variant
+  Tokenizer            -- count_tokens(text) -> int; truncate_to_tokens(text, max) -> str
+  Formatter            -- format(window) -> str | list[dict]
+  MemoryProvider       -- get_context_items(priority) -> list[ContextItem]
+  QueryTransformer     -- transform(query) -> QueryBundle
+  AsyncQueryTransformer
+  QueryEnricher        -- enrich(query_str, items) -> str
+  RecencyScorer        -- score(entry) -> float
+  EvictionPolicy       -- select_for_eviction(entries, count) -> list[str]
+  CompactionStrategy   -- compact(entries) -> list[MemoryEntry]
+  MemoryExtractor      -- extract(turns) -> list[MemoryEntry]
+  MemoryConsolidator   -- consolidate(new_entries, existing) -> list[(MemoryOperation, MemoryEntry | None)]
+  MemoryDecay          -- decay(entry) -> float
+  QueryRouter          -- route(query) -> str
+  QueryClassifier      -- classify(query) -> str
+  CacheBackend         -- get/set/delete/clear
+  SpanExporter         -- export(spans) -> None
+  MetricsCollector     -- record(metric) -> None
+
+## Pipeline Step Factories
+
+Create PipelineStep instances for use with pipeline.add_step():
+
+  retriever_step(name, retriever)              -- run a Retriever
+  filter_step(name, predicate_fn)              -- filter items by predicate
+  postprocessor_step(name, postprocessor)       -- run a PostProcessor
+  reranker_step(name, reranker)                -- run a Reranker
+  query_transform_step(name, transformer)       -- transform the query
+  classified_retriever_step(name, classifier, retriever_map)
+  graph_retrieval_step(graph, store, extractor) -- memory entries reached through the knowledge graph
+  auto_promotion_step(name, promoter)           -- promote items by importance
+  create_eviction_promoter(memory, threshold)   -- factory for auto-promotion
+
+Async variants:
+  async_retriever_step, async_postprocessor_step, async_reranker_step
+
+## Memory Types
+
+### SlidingWindowMemory
+Keeps the last N conversation turns. Simple and token-efficient.
+
+  memory = SlidingWindowMemory(max_turns=20)
+
+### SummaryBufferMemory
+Keeps recent turns verbatim; older turns are compacted into summaries.
+Requires a CompactionStrategy.
+
+  memory = SummaryBufferMemory(
+      max_entries=100,
+      compaction_strategy=my_strategy,
+  )
+
+### KnowledgeGraph (see "Knowledge Graph" below)
+Entities, notes and typed evidenced relations over memory AND documents;
+memory facts enter it through MemoryManager(graph=GraphIndexer(...)).
+
+  graph = KnowledgeGraph()
+  graph.add_edge("Alice", "works_at", "Acme Corp", evidence=["mem-1"])
+  graph.related_items("Alice")
+
+### MemoryManager
+Orchestrates one or more memory backends. Implements MemoryProvider.
+
+  manager = MemoryManager(persistent_store=store, graph=GraphIndexer(graph))
+
+## Retrieval Types
+
+### DenseRetriever
+Vector similarity search. Requires an embed function and a list of items.
+
+### SparseRetriever
+BM25 keyword retrieval. Requires the `bm25` extra.
+
+### HybridRetriever
+Combines dense + sparse retrieval with reciprocal rank fusion (rrf_fuse).
+
+### Routed Retrieval
+  RoutedRetriever      -- routes queries to different retrievers
+  KeywordRouter        -- route by keyword matching
+  MetadataRouter       -- route by query metadata
+  CallbackRouter       -- route by custom function
+
+### Rerankers
+  ScoreReranker        -- re-score by a custom function
+  CrossEncoderReranker -- cross-encoder model reranking
+  CohereReranker       -- Cohere rerank API
+  FlashRankReranker    -- local FlashRank reranking
+  RoundRobinReranker   -- interleave from multiple sources
+  RerankerPipeline     -- chain multiple rerankers
+
+## Formatters
+
+### AnthropicFormatter
+Formats ContextWindow into Anthropic Messages API format (system + messages).
+
+### OpenAIFormatter
+Formats ContextWindow into OpenAI Chat Completions API format.
+
+### GenericTextFormatter
+Formats ContextWindow as plain text with section headers.
+
+### BaseFormatter
+Abstract base class. Subclass for custom formatting.
+
+## Token Budget Presets
+
+  default_chat_budget(max_tokens)   -- system 10%, memory 10%, conversation 20%, retrieval 25%, reserve 15%
+  default_rag_budget(max_tokens)    -- system 10%, memory 5%, conversation 10%, retrieval 40%, reserve 15%
+  default_agent_budget(max_tokens)  -- system 15%, memory 10%, conversation 15%, retrieval 20%, tool 15%, reserve 15%
+
+## Query Transformation
+
+  HyDETransformer             -- Hypothetical Document Embeddings
+  MultiQueryTransformer        -- generate multiple query variants
+  DecompositionTransformer     -- break complex queries into sub-queries
+  StepBackTransformer          -- generate a more general "step-back" query
+  QueryTransformPipeline       -- chain multiple transformers
+  ConversationRewriter         -- rewrite query using chat history
+  ContextualQueryTransformer   -- enrich query with context
+
+## Ingestion Pipeline
+
+### DocumentIngester
+Parses documents, chunks them, enriches metadata, and stores them.
+
+Parsers: PlainTextParser, MarkdownParser, HTMLParser, PDFParser
+Chunkers: FixedSizeChunker, RecursiveCharacterChunker, SemanticChunker,
+           SentenceChunker, ParentChildChunker, CodeChunker, TableAwareChunker
+Utilities: MetadataEnricher, ParentExpander, generate_doc_id, generate_chunk_id
+
+## Agent Framework
+
+### Agent
+High-level agent combining ContextPipeline + Anthropic SDK + tool loop.
+Supports streaming chat, automatic tool use, memory, and skills.
+
+  agent = (
+      Agent(model="claude-haiku-4-5-20251001")
+      .with_system_prompt("You are a helpful assistant.")
+      .with_memory(memory)
+      .with_tools(memory_tools(memory))
+  )
+  for chunk in agent.chat("Hello!"):
+      print(chunk, end="", flush=True)
+
+Key methods:
+  .with_system_prompt(text)     -- set the system prompt
+  .with_memory(manager)         -- attach MemoryManager
+  .with_tools(tools)            -- register AgentTools
+  .with_skills(skills)          -- register Skills
+  .chat(message) -> Iterator    -- synchronous streaming chat
+  .achat(message) -> AsyncIterator
+
+### @tool decorator
+Define tools from functions:
+
+  @tool
+  def search_docs(query: str) -> str:
+      """Search the documentation."""
+      return retriever.retrieve(query)
+
+### Skill / SkillRegistry
+Skills are reusable tool bundles that can be activated/deactivated at runtime.
+
+  skill = Skill(name="rag", tools=[search_tool, summarize_tool])
+  registry = SkillRegistry()
+  registry.register(skill)
+
+Built-in skill factories:
+  memory_tools(manager) -> list[AgentTool]   -- memory read/write/search tools
+  rag_tools(retriever) -> list[AgentTool]    -- RAG retrieval tools
+  memory_skill(manager) -> Skill
+  rag_skill(retriever) -> Skill
+
+## Evaluation
+
+  RetrievalMetricsCalculator   -- precision, recall, MRR, NDCG
+  LLMRAGEvaluator              -- LLM-judged faithfulness, relevance, coherence
+  PipelineEvaluator            -- end-to-end pipeline evaluation
+  BatchEvaluator               -- batch evaluation over datasets
+  ABTestRunner                 -- A/B test two pipeline configurations
+
+## Observability
+
+  Tracer / TracingCallback     -- distributed tracing for pipeline steps
+  Span / SpanKind              -- span model
+  CostTracker / CostTrackingCallback -- track LLM API costs
+
+Exporters: ConsoleSpanExporter, FileSpanExporter, InMemorySpanExporter,
+           OTLPSpanExporter, OTLPMetricsExporter
+Collectors: InMemoryMetricsCollector, LoggingMetricsCollector
+
+## Storage Backends
+
+  InMemoryContextStore    -- in-memory context item store
+  InMemoryDocumentStore   -- in-memory document store
+  InMemoryVectorStore     -- in-memory vector store
+  InMemoryEntryStore      -- in-memory memory entry store
+  JsonFileMemoryStore     -- JSON file-backed memory persistence
+
+## Multi-Modal Support
+
+  MultiModalConverter    -- convert multi-modal content to ContextItems
+  ModalityType           -- text, image, table, code, etc.
+  CompositeEncoder       -- encode multiple modalities
+  ImageDescriptionEncoder, TableEncoder, TextEncoder
+
+## Quick Start Example
+
+  from anchor import (
+      ContextPipeline, QueryBundle, AnthropicFormatter,
+      DenseRetriever, SlidingWindowMemory, MemoryManager,
+      retriever_step, default_rag_budget,
+  )
+
+  # Set up retrieval
+  retriever = DenseRetriever(embed_fn=my_embed, items=my_items)
+
+  # Set up memory
+  memory = MemoryManager(backends=[SlidingWindowMemory(max_turns=20)])
+
+  # Build pipeline
+  pipeline = (
+      ContextPipeline(max_tokens=8192)
+      .add_step(retriever_step("search", retriever))
+      .with_memory(memory)
+      .with_formatter(AnthropicFormatter())
+      .with_budget(default_rag_budget(8192))
+      .add_system_prompt("You are a helpful assistant.")
+  )
+
+  # Execute
+  result = pipeline.build(QueryBundle(query_str="How does context engineering work?"))
+  print(result.formatted_output)  # Ready for LLM API call
+
+## Knowledge Graph (anchor.graph)
+
+  KnowledgeGraph(store=None)   -- nodes (canonical keys), typed evidenced edges, bi-temporal
+  .add_node / .add_edge / .link_item / .unlink_item / .invalidate_edge
+  .neighbors / .backlinks / .path / .explain / .related_items / .mentions
+  .query(seeds, top_k)         -- personalized PageRank, scores land on items
+  .hubs(k) / .communities()    -- degree ranking; Louvain (igraph Leiden with [graph])
+  Every read takes scope=RetrievalScope and as_of=datetime; a node without
+  visible evidence does not exist for the scope and is never crossed.
+  Stores: InMemoryGraphStore, SqliteGraphStore (sync), PostgresGraphStore (async)
+  Extractors: StructureExtractor, WikilinkExtractor (free), LLMGraphExtractor(llm) (opt-in)
+  GraphIndexer(graph, extractors).index(items) / .index_entries(memory_entries)
+  GraphRetriever(graph, context_store, vector_store=None)  -- first-class Retriever
+  MemoryManager(graph=GraphIndexer(...))                  -- wraps the store in GraphIndexingEntryStore
+  CLI: anchor index --graph; anchor graph query|path|explain|hubs|communities|backlinks
