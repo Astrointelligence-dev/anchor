@@ -17,6 +17,8 @@ jobs:
   lint:
     name: Lint & Type Check
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.13"
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +49,8 @@ jobs:
       fail-fast: true
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}  # .python-version pins 3.11; without this every job ran 3.11
     steps:
       - uses: actions/checkout@v4
 
@@ -62,4 +66,7 @@ jobs:
         run: uv sync --all-extras --group dev
 
       - name: Run tests with coverage
-        run: uv run pytest --cov=anchor --cov-report=xml -q
+        # --cov-config: without an explicit path pytest-cov hands subprocesses (skill scripts) and its own
+        # combining Coverage no config, so they measure statements while the main run measures branches
+        # and the final combine fails with DataError
+        run: uv run pytest --cov=anchor --cov-config=pyproject.toml --cov-report=xml -q
