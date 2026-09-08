@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -140,13 +141,25 @@ def evaluate_retriever(
     return GoldenSetReport(results=tuple(results), k=k)
 
 
-def assert_metric_floor(
-    report: GoldenSetReport, metric: str, floor: float
-) -> None:
+class MetricReport(Protocol):
+    """What ``assert_metric_floor`` needs: a mean per metric and per-case results.
+
+    ``GoldenSetReport`` and ``ConsolidationReport`` both fit; each result
+    carries ``case.name`` and a ``metrics`` object with the metric field.
+    """
+
+    k: int
+    results: Sequence[Any]
+
+    def mean(self, metric: str) -> float: ...
+
+
+def assert_metric_floor(report: MetricReport, metric: str, floor: float) -> None:
     """Raise ``AssertionError`` when a mean metric falls below *floor*.
 
-    The CI-gate primitive: call it from a test so any retrieval change
-    that regresses the golden set fails the build with the actual number.
+    The CI-gate primitive: call it from a test so any retrieval (or
+    consolidation) change that regresses the golden set fails the build
+    with the actual number.
     """
     value = report.mean(metric)
     if value < floor:
@@ -154,7 +167,8 @@ def assert_metric_floor(
             report.results, key=lambda r: getattr(r.metrics, metric)
         )[:3]
         detail = "; ".join(
-            f"{r.case.name or r.case.query[:40]!r}={getattr(r.metrics, metric):.3f}"
+            f"{r.case.name or getattr(r.case, 'query', '')[:40]!r}="
+            f"{getattr(r.metrics, metric):.3f}"
             for r in worst
         )
         msg = (

@@ -109,16 +109,17 @@ o LLM é o do agente, injetado; `SimilarityConsolidator` continua default.
       abandono; `remember_every`.
 
 ### Fase D — golden set + `evaluation/consolidation.py`
-- [ ] `tests/fixtures/consolidation_golden.jsonl` (~48 casos, 10 cenários).
-- [ ] `evaluation/consolidation.py`: `ConsolidationCase`,
+- [x] `tests/fixtures/consolidation_golden.jsonl` (~48 casos, 10 cenários).
+- [x] `evaluation/consolidation.py`: `ConsolidationCase`,
       `load_consolidation_set`, `evaluate_consolidator`, relatório com
-      `stale_alive_rate`, `probe_stale_hit_rate`, `dup_rate`, `op_accuracy`,
-      `llm_calls`; `assert_metric_floor` reusado.
-- [ ] Teste em CI: baseline `SimilarityConsolidator` com pisos honestos;
+      `state_ok`, `size_ok`, `probes_ok`, `passed` (estado final por substring —
+      UPDATE in-place ≡ DELETE+ADD; `op_accuracy`/`llm_calls` ficaram de fora:
+      ops equivalentes e custo medido no teste live); `assert_metric_floor` reusado.
+- [x] Teste em CI: baseline `SimilarityConsolidator` com pisos honestos;
       `tests/live/test_memory_llm_live.py` com `claude_cli`.
 
 ### Fase E — docs + CHANGELOG
-- [ ] `guides/memory.md`, `api/memory.md`, `api/protocols.md`,
+- [x] `guides/memory.md`, `api/memory.md`, `api/protocols.md`,
       `api/pipeline.md`, `llms.txt`; CHANGELOG Added + Fixed.
 
 Depois: ritual xhigh (reviewer ponytail → juiz adversarial → discussão →

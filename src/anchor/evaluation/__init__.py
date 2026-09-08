@@ -8,6 +8,15 @@ from .ab_testing import (
     EvaluationSample,
 )
 from .batch import BatchEvaluator
+from .consolidation import (
+    ConsolidationCase,
+    ConsolidationCaseResult,
+    ConsolidationMetrics,
+    ConsolidationReport,
+    Probe,
+    evaluate_consolidator,
+    load_consolidation_set,
+)
 from .evaluator import PipelineEvaluator
 from .golden import (
     GoldenCase,
@@ -27,6 +36,10 @@ __all__ = [
     "ABTestRunner",
     "AggregatedMetrics",
     "BatchEvaluator",
+    "ConsolidationCase",
+    "ConsolidationCaseResult",
+    "ConsolidationMetrics",
+    "ConsolidationReport",
     "EvaluationDataset",
     "EvaluationResult",
     "EvaluationSample",
@@ -37,10 +50,13 @@ __all__ = [
     "HumanJudgment",
     "LLMRAGEvaluator",
     "PipelineEvaluator",
+    "Probe",
     "RAGMetrics",
     "RetrievalMetrics",
     "RetrievalMetricsCalculator",
     "assert_metric_floor",
+    "evaluate_consolidator",
     "evaluate_retriever",
+    "load_consolidation_set",
     "load_golden_set",
 ]
