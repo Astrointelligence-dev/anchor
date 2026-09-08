@@ -110,9 +110,11 @@ class TestAfterTurn:
         assert manager.after_turn() == []  # 1 of 2
         assert len(manager.after_turn()) == 1  # 2 of 2 → remember
         assert manager.after_turn() == []  # 1 of 2
+        manager.add_user_message("u1")
         manager.remember()  # an explicit flush resets the count
         assert manager.after_turn() == []  # 1 of 2 again
         assert len(extractor.calls) == 2
+
 
     def test_zero_means_manual_only(self) -> None:
         extractor = LastUserFactExtractor()
@@ -141,3 +143,30 @@ class TestAfterTurn:
             _manager(extract_window=0)
         with pytest.raises(ValueError, match="remember_every"):
             _manager(remember_every=-1)
+
+
+class TestCursor:
+    """A turn is extracted once: remember() reads only what came after the last call."""
+
+    def test_no_re_extraction_and_nothing_new_means_no_call(self) -> None:
+        extractor = LastUserFactExtractor()
+        manager = _manager(extractor=extractor, extract_window=10)
+        manager.add_user_message("u0")
+        manager.add_assistant_message("a0")
+        manager.remember()
+        assert manager.remember() == []  # nothing new: no extractor call
+        manager.add_user_message("u1")
+        manager.remember()
+        assert [[t.content for t in call] for call in extractor.calls] == [["u0", "a0"], ["u1"]]
+
+    def test_window_caps_the_fresh_turns_and_survives_eviction(self) -> None:
+        extractor = LastUserFactExtractor()
+        manager = _manager(extractor=extractor, extract_window=2, conversation_tokens=6)
+        for i in range(3):
+            manager.add_user_message(f"u{i}")
+        manager.remember()  # fresh = u0,u1,u2 → capped to the newest 2
+        assert [t.content for t in extractor.calls[0]] == ["u1", "u2"]
+        for i in range(3, 12):  # evicts everything remembered so far
+            manager.add_user_message(f"u{i}")
+        manager.remember()  # cursor gone from the window: take the fresh tail
+        assert [t.content for t in extractor.calls[1]] == ["u10", "u11"]

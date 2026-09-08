@@ -18,18 +18,21 @@ Usage::
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from anchor.memory.manager import MemoryManager
+from anchor.evaluation.golden import load_jsonl
 from anchor.models.memory import ConversationTurn, MemoryEntry
-from anchor.protocols.memory import MemoryConsolidator, MemoryExtractor
-from anchor.protocols.storage import MemoryEntryStore
 from anchor.storage.json_memory_store import InMemoryEntryStore
+
+if TYPE_CHECKING:
+    from anchor.protocols.memory import MemoryConsolidator, MemoryExtractor
+    from anchor.protocols.storage import MemoryEntryStore
+
+_PROBE_K = 5
 
 
 class Probe(BaseModel):
@@ -65,23 +68,31 @@ class ConsolidationCase(BaseModel):
     @classmethod
     def _one_step_when_flat(cls, data: Any) -> Any:
         turns = data.get("turns") if isinstance(data, dict) else None
-        if turns and isinstance(turns[0], dict):
+        if turns and not isinstance(turns[0], list):
             data = {**data, "turns": [turns]}
         return data
 
+    @field_validator("turns")
+    @classmethod
+    def _no_empty_step(cls, steps: list[list[ConversationTurn]]) -> list[list[ConversationTurn]]:
+        if any(not step for step in steps):
+            msg = "a step must have at least one turn"
+            raise ValueError(msg)
+        return steps
+
 
 class ConsolidationMetrics(BaseModel):
-    """Per-case checks as 1.0/0.0, so a report mean is a pass rate."""
+    """Per-case checks; a report mean over them is a pass rate."""
 
     model_config = ConfigDict(frozen=True)
 
-    state_ok: float
-    size_ok: float
-    probes_ok: float
+    state_ok: bool
+    size_ok: bool
+    probes_ok: bool
 
     @property
-    def passed(self) -> float:
-        return float(self.state_ok and self.size_ok and self.probes_ok)
+    def passed(self) -> bool:
+        return self.state_ok and self.size_ok and self.probes_ok
 
 
 class ConsolidationCaseResult(BaseModel):
@@ -118,18 +129,7 @@ class ConsolidationReport(BaseModel):
 
 def load_consolidation_set(path: str | Path) -> list[ConsolidationCase]:
     """Load cases from a JSONL file, one ``ConsolidationCase`` per line."""
-    cases: list[ConsolidationCase] = []
-    text = Path(path).read_text(encoding="utf-8")
-    for line_num, line in enumerate(text.splitlines(), start=1):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            cases.append(ConsolidationCase.model_validate(json.loads(line)))
-        except (json.JSONDecodeError, ValueError) as e:
-            msg = f"Invalid consolidation case at {path}:{line_num}: {e}"
-            raise ValueError(msg) from e
-    return cases
+    return load_jsonl(path, ConsolidationCase, "consolidation case")
 
 
 def _contains(live: Sequence[str], needle: str) -> bool:
@@ -143,8 +143,8 @@ def _size_ok(count: int, expected: int | tuple[int, int]) -> bool:
     return low <= count <= high
 
 
-def _probe_ok(store: MemoryEntryStore, probe: Probe, k: int) -> bool:
-    hits = [e.content for e in store.search(probe.query, top_k=k)]
+def _probe_ok(store: MemoryEntryStore, probe: Probe) -> bool:
+    hits = [e.content for e in store.search(probe.query, top_k=_PROBE_K)]
     return all(_contains(hits, s) for s in probe.must_hit) and not any(
         _contains(hits, s) for s in probe.must_not_hit
     )
@@ -154,45 +154,50 @@ def evaluate_consolidator(
     extractor: MemoryExtractor,
     consolidator: MemoryConsolidator | None,
     cases: Sequence[ConsolidationCase],
-    *,
-    store_factory: Callable[[], MemoryEntryStore] = InMemoryEntryStore,
-    k: int = 5,
 ) -> ConsolidationReport:
     """Replay every case through ``MemoryManager.remember()`` and score the store.
 
-    Each case gets a fresh store from *store_factory* seeded with its
-    ``existing`` entries (ids ``e0``, ``e1``, ...); each step of its
-    conversation is added to a manager over that store and remembered.
-    *consolidator* ``None`` is the "add everything" baseline.
+    Each case gets a fresh in-memory store seeded with its ``existing``
+    entries (ids ``e0``, ``e1``, ...) and one manager over it; each step of
+    the conversation is added and remembered in turn. *consolidator*
+    ``None`` is the "add everything" baseline.
     """
+    # Lazy: anchor.protocols → anchor.evaluation → here → anchor.memory → anchor.protocols.
+    from anchor.memory.manager import MemoryManager
+
     results: list[ConsolidationCaseResult] = []
     for case in cases:
-        store = store_factory()
+        store = InMemoryEntryStore()
         for i, content in enumerate(case.existing):
             store.add(MemoryEntry(id=f"e{i}", content=content))
+        manager = MemoryManager(
+            conversation_tokens=1_000_000,  # never evict a step before it is remembered
+            persistent_store=store,
+            extractor=extractor,
+            consolidator=consolidator,
+            extract_window=max(len(step) for step in case.turns),
+        )
+        add = {
+            "user": manager.add_user_message,
+            "assistant": manager.add_assistant_message,
+            "system": manager.add_system_message,
+            "tool": manager.add_tool_message,
+        }
         operations: list[str] = []
         for step in case.turns:
-            manager = MemoryManager(
-                persistent_store=store,
-                extractor=extractor,
-                consolidator=consolidator,
-                extract_window=len(step),
-            )
             for turn in step:
-                manager._add_message(turn.role, turn.content)
+                add[str(turn.role)](turn.content)
             operations.extend(str(op) for op, _ in manager.remember())
         live = [e.content for e in store.list_all()]
         metrics = ConsolidationMetrics(
-            state_ok=float(
-                all(_contains(live, s) for s in case.live_contains)
-                and not any(_contains(live, s) for s in case.live_not_contains)
-            ),
-            size_ok=float(_size_ok(len(live), case.expected_live)),
-            probes_ok=float(all(_probe_ok(store, p, k) for p in case.probes)),
+            state_ok=all(_contains(live, s) for s in case.live_contains)
+            and not any(_contains(live, s) for s in case.live_not_contains),
+            size_ok=_size_ok(len(live), case.expected_live),
+            probes_ok=all(_probe_ok(store, p) for p in case.probes),
         )
         results.append(
             ConsolidationCaseResult(
                 case=case, metrics=metrics, live=tuple(live), operations=tuple(operations)
             )
         )
-    return ConsolidationReport(results=tuple(results), k=k)
+    return ConsolidationReport(results=tuple(results), k=_PROBE_K)

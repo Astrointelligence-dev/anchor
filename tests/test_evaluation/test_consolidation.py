@@ -75,6 +75,14 @@ class TestLoader:
         with pytest.raises(ValueError, match=r"bad\.jsonl:2"):
             load_consolidation_set(path)
 
+    def test_python_built_cases_and_empty_steps(self) -> None:
+        case = ConsolidationCase(
+            name="c", turns=[ConversationTurn(role="user", content="hi")], expected_live=1
+        )
+        assert [len(step) for step in case.turns] == [1]
+        with pytest.raises(ValueError, match="at least one turn"):
+            ConsolidationCase(name="c", turns=[[]], expected_live=1)
+
 
 class TestEvaluate:
     def test_state_size_and_probes_score_the_store_after_remember(self) -> None:

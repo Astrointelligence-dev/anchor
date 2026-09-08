@@ -17,7 +17,6 @@ and confidence — for text without links, memory above all.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Iterable, Sequence
@@ -25,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from anchor._text import strip_markdown_fences
+from anchor._text import ask_json
 from anchor.graph.knowledge_graph import KnowledgeGraph
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.graph import GraphEdge, GraphNode, normalize_key
@@ -255,22 +254,24 @@ class LLMGraphExtractor:
         self._relations = tuple(relations)
 
     def extract(self, item: ContextItem) -> Extraction:
-        from anchor.llm.models import Message, Role
-
         prompt = _EXTRACTION_PROMPT.format(
             relations=", ".join(self._relations), content=item.content
         )
+        data = ask_json(
+            self._llm,
+            prompt,
+            expect=dict,
+            log=logger,
+            what=f"LLM graph extraction failed for item {item.id}",
+        )
+        if data is None:
+            return Extraction()
         try:
-            response = self._llm.invoke([Message(role=Role.USER, content=prompt)])
-            data = json.loads(strip_markdown_fences(response.content or ""))
-            if not isinstance(data, dict):
-                msg = "response is not a JSON object"
-                raise TypeError(msg)
             return self._parse(data)
         except Exception as exc:
             # Fail-soft (the TierCompactor contract): a malformed answer costs
-            # this chunk its graph, never the index run. _parse is inside the
-            # try because the model can return any shape (`"entities": true`).
+            # this chunk its graph, never the index run. The model can return
+            # any shape (`"entities": true`), so parsing is guarded too.
             logger.warning("LLM graph extraction failed for item %s: %s", item.id, exc)
             return Extraction()
 
@@ -398,16 +399,17 @@ class GraphIndexingEntryStore:
         return self._indexer.graph
 
     def add(self, entry: MemoryEntry) -> None:
-        current = getattr(self._inner, "get", lambda _id: None)(entry.id)
-        self._inner.add(entry)
         if entry.is_expired:
             # A soft delete (or an entry arriving already expired): hidden from
             # list_all, so its evidence leaves the graph — same as delete.
+            self._inner.add(entry)
             self._indexer.graph.unlink_item(entry.id)
             return
-        if current is not None and current.content == entry.content:
-            return  # same text: the graph already has this evidence, no re-extraction
-        self._indexer.graph.unlink_item(entry.id)
+        current = getattr(self._inner, "get", lambda _id: None)(entry.id)
+        self._inner.add(entry)
+        if current is not None and not current.is_expired and current.content == entry.content:
+            return  # same live text: the graph already has this evidence, no re-extraction
+        self._indexer.graph.unlink_item(entry.id)  # a restored (un-expired) entry re-links here
         self._indexer.index_entries([entry])
 
     def delete(self, entry_id: str) -> bool:
@@ -430,6 +432,8 @@ class GraphIndexingEntryStore:
         return self._inner.list_all()
 
     def __getattr__(self, name: str) -> Any:  # get, list_all_unfiltered, search_filtered, ...
+        if name.startswith("_"):  # copy/pickle probe attributes before __init__ ran
+            raise AttributeError(name)
         return getattr(self._inner, name)
 
     def __repr__(self) -> str:

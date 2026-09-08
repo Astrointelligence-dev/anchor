@@ -94,7 +94,7 @@ class MemoryEntry(BaseModel):
         retention elapses. *by* records the id of the entry that superseded
         it in ``metadata["invalidated_by"]``.
         """
-        metadata = {**self.metadata, "invalidated_by": by} if by else self.metadata
+        metadata = {**self.metadata, "invalidated_by": by} if by else {**self.metadata}
         return self.model_copy(update={"expires_at": datetime.now(UTC), "metadata": metadata})
 
 

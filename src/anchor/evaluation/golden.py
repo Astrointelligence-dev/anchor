@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,6 +25,11 @@ from anchor.evaluation.retrieval import RetrievalMetricsCalculator
 from anchor.models.query import QueryBundle
 from anchor.models.scope import RetrievalScope, scope_kwargs
 from anchor.protocols.retriever import Retriever
+
+if TYPE_CHECKING:
+    from anchor.evaluation.consolidation import ConsolidationReport
+
+_M = TypeVar("_M", bound=BaseModel)
 
 
 class GoldenCase(BaseModel):
@@ -85,16 +90,21 @@ def load_golden_set(path: str | Path) -> list[GoldenCase]:
     Each line: ``{"query": "...", "relevant": ["id1", ...]}`` or
     ``{"query": "...", "relevant": {"id1": 2.0, ...}, "name": "..."}``.
     """
-    cases: list[GoldenCase] = []
+    return load_jsonl(path, GoldenCase, "golden-set entry")
+
+
+def load_jsonl(path: str | Path, model: type[_M], label: str) -> list[_M]:
+    """One *model* per non-empty line; a bad line names the file and line number."""
+    cases: list[_M] = []
     text = Path(path).read_text(encoding="utf-8")
     for line_num, line in enumerate(text.splitlines(), start=1):
         line = line.strip()
         if not line:
             continue
         try:
-            cases.append(GoldenCase.model_validate(json.loads(line)))
+            cases.append(model.model_validate(json.loads(line)))
         except (json.JSONDecodeError, ValueError) as e:
-            msg = f"Invalid golden-set entry at {path}:{line_num}: {e}"
+            msg = f"Invalid {label} at {path}:{line_num}: {e}"
             raise ValueError(msg) from e
     return cases
 
@@ -141,20 +151,9 @@ def evaluate_retriever(
     return GoldenSetReport(results=tuple(results), k=k)
 
 
-class MetricReport(Protocol):
-    """What ``assert_metric_floor`` needs: a mean per metric and per-case results.
-
-    ``GoldenSetReport`` and ``ConsolidationReport`` both fit; each result
-    carries ``case.name`` and a ``metrics`` object with the metric field.
-    """
-
-    k: int
-    results: Sequence[Any]
-
-    def mean(self, metric: str) -> float: ...
-
-
-def assert_metric_floor(report: MetricReport, metric: str, floor: float) -> None:
+def assert_metric_floor(
+    report: GoldenSetReport | ConsolidationReport, metric: str, floor: float
+) -> None:
     """Raise ``AssertionError`` when a mean metric falls below *floor*.
 
     The CI-gate primitive: call it from a test so any retrieval (or
@@ -163,9 +162,8 @@ def assert_metric_floor(report: MetricReport, metric: str, floor: float) -> None
     """
     value = report.mean(metric)
     if value < floor:
-        worst = sorted(
-            report.results, key=lambda r: getattr(r.metrics, metric)
-        )[:3]
+        results: Sequence[Any] = report.results
+        worst = sorted(results, key=lambda r: getattr(r.metrics, metric))[:3]
         detail = "; ".join(
             f"{r.case.name or getattr(r.case, 'query', '')[:40]!r}="
             f"{getattr(r.metrics, metric):.3f}"

@@ -130,3 +130,22 @@ def vector_store() -> InMemoryVectorStore:
     return InMemoryVectorStore()
 
 
+
+
+class FakeLLM:
+    """A provider whose ``invoke`` answers with *content* (a str, or a list of str in order).
+
+    Records every prompt in ``prompts``. Shared by the LLM-backed memory and
+    graph tests.
+    """
+
+    def __init__(self, content: str | list[str] | None) -> None:
+        self._answers = content if isinstance(content, list) else [content]
+        self.prompts: list[str] = []
+
+    def invoke(self, messages, **kwargs):
+        from types import SimpleNamespace
+
+        self.prompts.append(messages[0].content)
+        answer = self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
+        return SimpleNamespace(content=answer)

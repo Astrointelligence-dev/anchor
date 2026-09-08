@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +12,7 @@ from anchor.ingestion import GraphIndexer, LLMGraphExtractor
 from anchor.ingestion.graph_extractors import _EXTRACTION_PROMPT, DEFAULT_RELATIONS
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.memory import MemoryEntry
+from tests.conftest import FakeLLM
 
 PAYLOAD = {
     "entities": [
@@ -49,16 +49,6 @@ PAYLOAD = {
         },
     ],
 }
-
-
-class FakeLLM:
-    def __init__(self, content: str | None) -> None:
-        self.content = content
-        self.prompts: list[str] = []
-
-    def invoke(self, messages, **kwargs):
-        self.prompts.append(messages[0].content)
-        return SimpleNamespace(content=self.content)
 
 
 def _item(text: str = "Ana Lima leads Team Payments and is on call for Billing.") -> ContextItem:

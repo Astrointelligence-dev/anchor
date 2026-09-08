@@ -104,9 +104,9 @@ class TestGraphIndexingEntryStore:
         from datetime import UTC, datetime, timedelta
 
         from anchor.ingestion import GraphIndexingEntryStore
+        from anchor.memory.consolidator import apply_consolidation
         from anchor.memory.gc import MemoryGarbageCollector
         from anchor.models.memory import MemoryEntry
-        from anchor.pipeline.memory_steps import _store_with_consolidation
 
         graph = KnowledgeGraph()
         inner = InMemoryEntryStore()
@@ -114,7 +114,7 @@ class TestGraphIndexingEntryStore:
             inner, GraphIndexer(graph, extractors=[WordPairExtractor()])
         )
         # the consolidation step writes straight to the store
-        _store_with_consolidation([MemoryEntry(id="e1", content="alice bob")], store, None)
+        apply_consolidation([MemoryEntry(id="e1", content="alice bob")], store, None)
         assert graph.neighbors("alice") == ["bob"]
         # unchanged content: no re-extraction (version stays)
         version = graph.store.version
@@ -134,12 +134,20 @@ class TestGraphIndexingEntryStore:
         # an entry arriving already expired never evidences the graph
         store.add(MemoryEntry(id="e3", content="fay gus", expires_at=past))
         assert graph.items("fay") == []
+        # restoring a soft-deleted entry (same text, live again) re-links it
+        store.add(MemoryEntry(id="e2", content="dave erin"))
+        assert graph.items("dave") == ["e2"]
+        store.delete("e2")
         # the garbage collector deletes straight on the store
         MemoryGarbageCollector(store).collect_expired()
         assert {e.id for e in store.list_all_unfiltered()} == {"e1"}
-        # clear unlinks everything
+        # a TTL that lapsed behind the decorator's back still evidences the graph;
+        # clear() reads list_all_unfiltered so it unlinks that too
+        inner.add(MemoryEntry(id="e1", content="alice carol", expires_at=past))
+        assert graph.items("alice") == ["e1"]
         store.clear()
         assert graph.items("alice") == []
+        assert getattr(store, "_nope", None) is None  # copy/pickle probes do not recurse
         assert store.list_all() == []
         assert store.inner is inner
         assert store.search("x") == []

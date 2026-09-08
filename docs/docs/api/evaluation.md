@@ -388,8 +388,8 @@ from anchor.evaluation import (
 |---|---|
 | `ConsolidationCase(name, existing, turns, live_contains, live_not_contains, expected_live, probes)` | One case: the store before (`existing`, seeded as `e0`, `e1`, …), the conversation (`turns` — a flat list is one step; nested lists are steps remembered one at a time), what must / must not stay live, the live count (an `int` or an inclusive `[min, max]`), and `Probe(query, must_hit, must_not_hit)` searches. |
 | `load_consolidation_set(path)` | JSONL loader, one case per line. |
-| `evaluate_consolidator(extractor, consolidator, cases, *, store_factory=InMemoryEntryStore, k=5)` | Replays every case through `MemoryManager.remember()` and scores the store. `consolidator=None` is the "add everything" baseline. |
-| `ConsolidationMetrics` | Per case: `state_ok`, `size_ok`, `probes_ok` (1.0/0.0) and `passed` (all three). |
+| `evaluate_consolidator(extractor, consolidator, cases)` | Replays every case through one `MemoryManager` per case (in-memory store, `remember()` per step) and scores the store. `consolidator=None` is the "add everything" baseline. |
+| `ConsolidationMetrics` | Per case: `state_ok`, `size_ok`, `probes_ok` and `passed` (all three); report means over them are pass rates. |
 | `ConsolidationReport` | `mean(metric)`, `summary()`, `failures()`; results carry the live contents and the operations applied. Works with `assert_metric_floor`. |
 
 The repository ships `tests/fixtures/consolidation_golden.jsonl` — 48 cases

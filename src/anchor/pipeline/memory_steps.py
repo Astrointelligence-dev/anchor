@@ -10,10 +10,10 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
+from anchor.memory.consolidator import apply_consolidation
 from anchor.models.context import ContextItem, SourceType
 from anchor.models.scope import RetrievalScope, effective_scope
 from anchor.pipeline.step import PipelineStep
-from anchor.protocols.memory import MemoryOperation
 
 if TYPE_CHECKING:
     from anchor.graph.knowledge_graph import KnowledgeGraph
@@ -23,37 +23,6 @@ if TYPE_CHECKING:
     from anchor.protocols.storage import MemoryEntryStore
 
 logger = logging.getLogger(__name__)
-
-
-def _store_with_consolidation(
-    entries: list[MemoryEntry],
-    store: MemoryEntryStore,
-    consolidator: MemoryConsolidator | None,
-) -> list[tuple[MemoryOperation, MemoryEntry | None]]:
-    """Persist entries, optionally consolidating via a consolidator.
-
-    With a *consolidator*, each ``(operation, entry)`` it returns is applied
-    to the store: ``ADD`` and ``UPDATE`` write the entry, ``DELETE``
-    invalidates it (``MemoryEntry.invalidate`` — a soft delete hidden from
-    ``search``/``list_all`` and kept as history until the garbage
-    collector's retention elapses); ``NONE`` and a target-less ``DELETE``
-    do nothing. Without a consolidator every entry is added directly.
-    Returns the operations applied.
-    """
-    if consolidator is None:
-        for entry in entries:
-            store.add(entry)
-        return [(MemoryOperation.ADD, entry) for entry in entries]
-    applied: list[tuple[MemoryOperation, MemoryEntry | None]] = []
-    for action, target in consolidator.consolidate(entries, store.list_all()):
-        if target is not None and action in (MemoryOperation.ADD, MemoryOperation.UPDATE):
-            store.add(target)
-        elif target is not None and action == MemoryOperation.DELETE:
-            if not target.is_expired:
-                target = target.invalidate()
-            store.add(target)
-        applied.append((action, target))
-    return applied
 
 
 def graph_retrieval_step(
@@ -213,7 +182,7 @@ def auto_promotion_step(
         if not new_entries:
             return items
 
-        _store_with_consolidation(new_entries, store, consolidator)
+        apply_consolidation(new_entries, store, consolidator)
 
         return items
 
@@ -262,7 +231,7 @@ def create_eviction_promoter(
             if not new_entries:
                 return
 
-            _store_with_consolidation(new_entries, store, consolidator)
+            apply_consolidation(new_entries, store, consolidator)
         except Exception:
             logger.exception(
                 "eviction promoter failed — ignoring to protect pipeline"

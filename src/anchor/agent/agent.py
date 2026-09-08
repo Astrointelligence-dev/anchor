@@ -2195,6 +2195,11 @@ class Agent:
         if self._memory is not None:
             self._memory.after_turn()
 
+    async def _aremember_turn(self) -> None:
+        # A sync extractor/consolidator may call a model: keep it off the loop.
+        if self._memory is not None:
+            await asyncio.to_thread(self._memory.after_turn)
+
     @staticmethod
     def _stop_cause(stop_reason: StopReason | None) -> str:
         return "max_tokens" if stop_reason == StopReason.MAX_TOKENS else "stop"
@@ -2442,8 +2447,7 @@ class Agent:
             if round_open is not None:
                 self._fire("on_round_end", round_open)
             diagnostics = self._finish_turn(rounds, stopped_by, final_text)
-        # A sync extractor/consolidator may call a model: keep it off the loop.
-        await asyncio.to_thread(self._remember_turn)
+        await self._aremember_turn()
         yield TurnFinished(
             text=final_text, diagnostics=diagnostics, output=self._last_output,
         )

@@ -89,18 +89,21 @@ class MemoryGarbageCollector:
     The collector works in two phases:
 
     1. **Expiry phase** -- remove entries whose ``is_expired`` property
-       returns ``True``.
+       returns ``True`` (and, with *retention*, whose expiry is older than
+       the retention window).
     2. **Decay phase** -- if a ``MemoryDecay`` function is provided,
        compute the retention score of every remaining entry and remove
        those whose score falls below ``retention_threshold``.
 
     Both phases fire the appropriate ``MemoryCallback`` hooks.
 
-    *retention* keeps expired entries around for that long before the
-    expiry phase deletes them, so an invalidated memory (a consolidator's
-    ``DELETE``, see ``MemoryEntry.invalidate``) stays readable through
-    ``list_all_unfiltered`` as history. ``None`` (default) deletes on the
-    first collection.
+    *retention* keeps every expired entry around for that long before the
+    expiry phase deletes it — a TTL that lapsed as much as an invalidated
+    memory (a consolidator's ``DELETE``, see ``MemoryEntry.invalidate``) —
+    so it stays readable through ``list_all_unfiltered`` as history and
+    counts in ``GCStats.total_remaining`` meanwhile. ``None`` (default)
+    deletes on the first collection. A TTL entry indexed in a knowledge
+    graph keeps its evidence until it is actually deleted.
     """
 
     __slots__ = ("_callbacks", "_decay", "_retention", "_store")
@@ -169,7 +172,7 @@ class MemoryGarbageCollector:
         dry_run: bool = False,
         _entries: list[MemoryEntry] | None = None,
     ) -> list[MemoryEntry]:
-        """Remove only expired entries (simpler, no decay scoring).
+        """Remove only expired entries past retention (simpler, no decay scoring).
 
         Parameters:
             dry_run: If ``True``, identify but do not delete entries.

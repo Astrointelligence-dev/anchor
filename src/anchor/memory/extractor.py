@@ -7,13 +7,11 @@ extraction phase of the mem0 paper, one call to an injected provider.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
-from anchor._text import strip_markdown_fences
-from anchor.llm.models import Message, Role
+from anchor._text import ask_json
 from anchor.models.memory import MemoryEntry, MemoryType
 
 if TYPE_CHECKING:
@@ -144,28 +142,26 @@ class LLMExtractor(CallbackExtractor):
     def _ask(self, turns: list[ConversationTurn]) -> list[dict[str, Any]]:
         conversation = "\n".join(f"{t.role}: {t.content}" for t in turns)
         prompt = _EXTRACTION_PROMPT.format(conversation=conversation)
-        try:
-            response = self._llm.invoke([Message(role=Role.USER, content=prompt)])
-            data = json.loads(strip_markdown_fences(response.content or ""))
-            if not isinstance(data, list):
-                msg = "response is not a JSON array"
-                raise TypeError(msg)
-        except Exception as exc:
-            logger.warning("LLM memory extraction failed: %s", exc)
+        data = ask_json(self._llm, prompt, log=logger, what="LLM memory extraction failed")
+        if data is None:
             return []
         facts: list[dict[str, Any]] = []
         seen: set[str] = set()
         for raw in data:
             content = raw.get("content") if isinstance(raw, dict) else None
-            if not isinstance(content, str) or not content.strip() or content in seen:
+            if not isinstance(content, str):
+                continue
+            content = content.strip()
+            if not content or content in seen:
                 continue
             seen.add(content)
-            fact: dict[str, Any] = {"content": content.strip()}
+            fact: dict[str, Any] = {"content": content}
             tags = raw.get("tags")
             if isinstance(tags, list):
                 fact["tags"] = [t for t in tags if isinstance(t, str)]
-            if raw.get("memory_type") in _MEMORY_TYPES:
-                fact["memory_type"] = raw["memory_type"]
+            memory_type = raw.get("memory_type")
+            if isinstance(memory_type, str) and memory_type in _MEMORY_TYPES:
+                fact["memory_type"] = memory_type
             facts.append(fact)
         return facts
 
