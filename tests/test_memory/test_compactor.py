@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
-import pytest
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 from anchor.llm.models import LLMResponse, StopReason, Usage
 from anchor.memory.compactor import TierCompactor
+from anchor.models.memory import FactType
 from tests.conftest import FakeTokenizer
 
 
@@ -42,12 +42,12 @@ class TestTierCompactorSummarize:
         assert any("500" in str(m.content) for m in messages)
 
     def test_summarize_tier2(self) -> None:
-        compactor, mock_llm = _make_compactor("Compact summary")
+        compactor, _mock_llm = _make_compactor("Compact summary")
         result = compactor.summarize("Detailed summary text", target_tier=2, target_tokens=100)
         assert result == "Compact summary"
 
     def test_summarize_tier3(self) -> None:
-        compactor, mock_llm = _make_compactor("Headline")
+        compactor, _mock_llm = _make_compactor("Headline")
         result = compactor.summarize("Compact text", target_tier=3, target_tokens=20)
         assert result == "Headline"
 
@@ -74,16 +74,13 @@ class TestTierCompactorSummarize:
         assert "Some content here" in result
 
 
-import asyncio
-from unittest.mock import AsyncMock
-
-from anchor.models.memory import FactType, KeyFact
-
-
 class TestTierCompactorFactExtraction:
     def test_extract_valid_facts(self) -> None:
-        json_response = '[{"type": "decision", "content": "Use FastAPI"}, {"type": "number", "content": "Budget: $50k"}]'
-        compactor, mock_llm = _make_compactor(json_response)
+        json_response = (
+            '[{"type": "decision", "content": "Use FastAPI"},'
+            ' {"type": "number", "content": "Budget: $50k"}]'
+        )
+        compactor, _mock_llm = _make_compactor(json_response)
         facts = compactor.extract_facts("Some conversation", source_tier=0)
         assert len(facts) == 2
         assert facts[0].fact_type == FactType.DECISION
@@ -107,7 +104,9 @@ class TestTierCompactorFactExtraction:
         assert facts == []
 
     def test_extract_filters_invalid_fact_types(self) -> None:
-        json_response = '[{"type": "invalid_type", "content": "x"}, {"type": "decision", "content": "y"}]'
+        json_response = (
+            '[{"type": "invalid_type", "content": "x"}, {"type": "decision", "content": "y"}]'
+        )
         compactor, _ = _make_compactor(json_response)
         facts = compactor.extract_facts("text", source_tier=0)
         assert len(facts) == 1

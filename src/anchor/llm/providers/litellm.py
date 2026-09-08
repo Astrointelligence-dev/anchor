@@ -13,16 +13,17 @@ Self-registers via register_provider() at module import time.
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 from anchor.llm.base import BaseLLMProvider
 from anchor.llm.errors import (
     AuthenticationError,
+    LLMTimeoutError,
     ModelNotFoundError,
     ProviderError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
@@ -38,7 +39,6 @@ from anchor.llm.providers._openai_compat import (
     parse_stream_chunks,
 )
 from anchor.llm.registry import register_provider
-
 
 # ---------------------------------------------------------------------------
 # LiteLLMProvider
@@ -76,7 +76,7 @@ class LiteLLMProvider(BaseLLMProvider):
         tools: list[ToolSchema] | None,
         **kwargs: Any,
     ) -> LLMResponse:
-        import litellm  # noqa: PLC0415 — lazy import
+        import litellm
 
         call_kwargs = build_call_kwargs(
             self._model, convert_messages(messages), tools, **kwargs,
@@ -97,7 +97,7 @@ class LiteLLMProvider(BaseLLMProvider):
         tools: list[ToolSchema] | None,
         **kwargs: Any,
     ) -> Iterator[StreamChunk]:
-        import litellm  # noqa: PLC0415 — lazy import
+        import litellm
 
         call_kwargs = build_call_kwargs(
             self._model, convert_messages(messages), tools, stream=True, **kwargs,
@@ -118,7 +118,7 @@ class LiteLLMProvider(BaseLLMProvider):
         tools: list[ToolSchema] | None,
         **kwargs: Any,
     ) -> LLMResponse:
-        import litellm  # noqa: PLC0415 — lazy import
+        import litellm
 
         call_kwargs = build_call_kwargs(
             self._model, convert_messages(messages), tools, **kwargs,
@@ -139,7 +139,7 @@ class LiteLLMProvider(BaseLLMProvider):
         tools: list[ToolSchema] | None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamChunk]:
-        import litellm  # noqa: PLC0415 — lazy import
+        import litellm
 
         call_kwargs = build_call_kwargs(
             self._model, convert_messages(messages), tools, stream=True, **kwargs,

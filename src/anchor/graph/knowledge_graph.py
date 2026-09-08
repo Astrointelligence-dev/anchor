@@ -15,6 +15,7 @@ The visibility rule is stated in :mod:`anchor.models.graph`.
 from __future__ import annotations
 
 import inspect
+import itertools
 import re
 import unicodedata
 from collections.abc import Iterable
@@ -330,7 +331,7 @@ class KnowledgeGraph:
         by_pair: dict[frozenset[str], GraphEdge] = {}
         for edge in sub.edges:
             by_pair.setdefault(frozenset((edge.source, edge.target)), edge)
-        return [by_pair[frozenset(pair)] for pair in zip(trail, trail[1:], strict=False)]
+        return [by_pair[frozenset(pair)] for pair in itertools.pairwise(trail)]
 
     def mentions(
         self,

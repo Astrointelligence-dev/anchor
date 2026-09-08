@@ -16,16 +16,17 @@ This class is designed to be subclassed for OpenAI-compatible APIs:
 from __future__ import annotations
 
 import os
-from typing import Any, AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 from anchor.llm.base import BaseLLMProvider
 from anchor.llm.errors import (
     AuthenticationError,
+    LLMTimeoutError,
     ModelNotFoundError,
     ProviderError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
@@ -37,7 +38,6 @@ from anchor.llm.providers._openai_compat import (
     build_call_kwargs,
     convert_messages,
     convert_tool,
-    map_stop_reason,
     parse_response,
     parse_stream_chunks,
 )

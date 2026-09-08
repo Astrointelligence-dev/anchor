@@ -17,11 +17,11 @@ from typing import Any
 from anchor.llm.base import BaseLLMProvider
 from anchor.llm.errors import (
     AuthenticationError,
+    LLMTimeoutError,
     ModelNotFoundError,
     ProviderError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
@@ -320,7 +320,7 @@ class AnthropicProvider(BaseLLMProvider):
     # Message conversion helpers
     # ------------------------------------------------------------------
 
-    def _extract_system_and_convert(
+    def _extract_system_and_convert(  # noqa: C901
         self, messages: list[Message]
     ) -> tuple[str | None, list[dict[str, Any]]]:
         """Split system message out and convert remaining to Anthropic format."""
@@ -473,7 +473,7 @@ class AnthropicProvider(BaseLLMProvider):
     # Stream event parsing
     # ------------------------------------------------------------------
 
-    def _parse_stream_event(
+    def _parse_stream_event(  # noqa: C901
         self,
         event: Any,
         *,
@@ -540,10 +540,7 @@ class AnthropicProvider(BaseLLMProvider):
             event_usage = getattr(event, "usage", None)
             if event_usage is not None:
                 output_tokens = getattr(event_usage, "output_tokens", 0)
-                if state is not None:
-                    prompt = state.input_tokens
-                else:
-                    prompt = input_tokens or 0
+                prompt = state.input_tokens if state is not None else input_tokens or 0
                 usage = Usage(
                     prompt_tokens=prompt,
                     completion_tokens=output_tokens,

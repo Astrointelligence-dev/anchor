@@ -6,6 +6,7 @@ lazy imports, and provides the create_provider() factory function.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import threading
 from typing import Any
@@ -119,7 +120,5 @@ def _try_import_provider(name: str) -> None:
     """
     module_path = _PROVIDER_MODULES.get(name)
     if module_path:
-        try:
+        with contextlib.suppress(ImportError):
             importlib.import_module(module_path)
-        except ImportError:
-            pass

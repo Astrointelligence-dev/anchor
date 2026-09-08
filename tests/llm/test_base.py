@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import AsyncIterator, Iterator
-from unittest.mock import MagicMock, patch
+from collections.abc import AsyncIterator, Iterator
+from unittest.mock import patch
 
 import pytest
 
 from anchor.llm.base import BaseLLMProvider
-from anchor.llm.errors import ProviderError, RateLimitError, ServerError, AuthenticationError
+from anchor.llm.errors import AuthenticationError, RateLimitError, ServerError
 from anchor.llm.models import (
     LLMResponse,
     Message,
     Role,
     StopReason,
     StreamChunk,
-    ToolSchema,
     Usage,
 )
 

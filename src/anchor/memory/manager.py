@@ -167,9 +167,7 @@ class MemoryManager:
 
     def _add_message(self, role: Role, content: str) -> None:
         """Add a message to the conversation backend (works with both types)."""
-        if isinstance(self._conversation, ProgressiveSummarizationMemory) or isinstance(
-            self._conversation, SummaryBufferMemory
-        ):
+        if isinstance(self._conversation, (ProgressiveSummarizationMemory, SummaryBufferMemory)):
             self._conversation.add_message(role, content)
         elif isinstance(self._conversation, SlidingWindowMemory):
             self._conversation.add_turn(role, content)

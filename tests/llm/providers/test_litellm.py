@@ -21,25 +21,21 @@ import pytest
 
 from anchor.llm.errors import (
     AuthenticationError,
+    LLMTimeoutError,
     ModelNotFoundError,
     ProviderError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
     Message,
     Role,
     StopReason,
-    StreamChunk,
     ToolCall,
-    ToolCallDelta,
     ToolResult,
     ToolSchema,
-    Usage,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -66,7 +62,9 @@ def _make_tool_schema():
     )
 
 
-def _make_sdk_response(content=None, tool_calls=None, finish_reason="stop", usage=None, model="gpt-4o"):
+def _make_sdk_response(
+    content=None, tool_calls=None, finish_reason="stop", usage=None, model="gpt-4o"
+):
     """Build a mock LiteLLM SDK response (OpenAI-compatible format)."""
     msg = MagicMock()
     msg.content = content

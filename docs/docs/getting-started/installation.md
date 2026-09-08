@@ -81,7 +81,7 @@ editable mode with all extras:
 === "pip"
 
     ```bash
-    git clone https://github.com/artcgranja/anchor.git
+    git clone https://github.com/Astrointelligence-dev/anchor.git
     cd anchor
     pip install -e ".[all,dev]"
     ```
@@ -89,7 +89,7 @@ editable mode with all extras:
 === "uv"
 
     ```bash
-    git clone https://github.com/artcgranja/anchor.git
+    git clone https://github.com/Astrointelligence-dev/anchor.git
     cd anchor
     uv sync --all-extras
     ```

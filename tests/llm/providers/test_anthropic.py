@@ -13,17 +13,16 @@ Uses unittest.mock to avoid real API calls. Tests cover:
 from __future__ import annotations
 
 import os
-from typing import AsyncIterator, Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from anchor.llm.errors import (
     AuthenticationError,
+    LLMTimeoutError,
     ModelNotFoundError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 from anchor.llm.models import (
     ContentBlock,
@@ -31,14 +30,10 @@ from anchor.llm.models import (
     Message,
     Role,
     StopReason,
-    StreamChunk,
     ToolCall,
-    ToolCallDelta,
     ToolResult,
     ToolSchema,
-    Usage,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -436,7 +431,6 @@ class TestErrorMapping:
 
     @patch("anchor.llm.providers.anthropic.anthropic")
     def test_authentication_error_mapped(self, mock_anthropic):
-        auth_err = Exception("auth failed")
         mock_anthropic.AuthenticationError = type("AuthenticationError", (Exception,), {})
         actual_err = mock_anthropic.AuthenticationError("auth failed")
 

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextvars import ContextVar
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+if TYPE_CHECKING:
+    from anchor.llm.models import ToolSchema
 
 
 class AgentTool(BaseModel):

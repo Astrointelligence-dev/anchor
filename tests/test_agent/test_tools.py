@@ -35,7 +35,7 @@ def _fake_embed(text: str) -> list[float]:
 # -- AgentTool --
 
 
-def test_agent_tool_to_tool_schema():
+def test_agent_tool_to_tool_schema_minimal():
     tool = AgentTool(
         name="my_tool",
         description="A test tool",

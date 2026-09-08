@@ -8,7 +8,8 @@ Fallback rules:
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 from anchor.llm.base import LLMProvider
 from anchor.llm.errors import ProviderError
@@ -23,7 +24,7 @@ class FallbackProvider:
         primary: LLMProvider,
         fallbacks: list[LLMProvider],
     ):
-        self._providers = [primary] + fallbacks
+        self._providers = [primary, *fallbacks]
         self._primary = primary
 
     @property

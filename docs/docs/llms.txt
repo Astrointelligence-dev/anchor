@@ -8,8 +8,8 @@ memory management, token budgeting, formatting, query transformation, ingestion,
 evaluation, observability, and an agent framework -- all through a composable,
 protocol-driven architecture.
 
-- Repo: https://github.com/artcgranja/anchor
-- Docs: https://artcgranja.github.io/anchor
+- Repo: https://github.com/Astrointelligence-dev/anchor
+- Docs: https://astrointelligence-dev.github.io/anchor
 - License: MIT
 - Python: >=3.11
 - Core dependency: pydantic>=2.8

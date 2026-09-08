@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Iterator
-
 import pytest
 
 from anchor.llm.base import BaseLLMProvider
-from anchor.llm.errors import AuthenticationError, ProviderError, ServerError
+from anchor.llm.errors import AuthenticationError, ServerError
 from anchor.llm.fallback import FallbackProvider
 from anchor.llm.models import (
     LLMResponse,
@@ -15,7 +13,6 @@ from anchor.llm.models import (
     Role,
     StopReason,
     StreamChunk,
-    ToolSchema,
     Usage,
 )
 
@@ -129,7 +126,7 @@ class TestFallbackStream:
         """If primary fails before yielding, fallback kicks in."""
         def fail_stream():
             raise ServerError("500", provider="primary")
-            yield  # make it a generator  # noqa: E501
+            yield  # make it a generator
 
         fb = FallbackProvider(
             primary=StubProvider(stream_fn=fail_stream),
@@ -191,7 +188,7 @@ class TestFallbackAsyncStream:
         """If primary fails before yielding, fallback kicks in."""
         def fail_stream():
             raise ServerError("500", provider="primary")
-            yield  # make it a generator  # noqa: E501
+            yield  # make it a generator
 
         fb = FallbackProvider(
             primary=StubProvider(stream_fn=fail_stream),

@@ -9,7 +9,8 @@ from __future__ import annotations
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Iterator, Protocol, runtime_checkable
+from collections.abc import AsyncIterator, Iterator
+from typing import Any, Protocol, runtime_checkable
 
 from anchor.llm.errors import ProviderError, RateLimitError
 from anchor.llm.models import (

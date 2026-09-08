@@ -98,7 +98,7 @@ class _FakeLLMProvider:
 
     async def astream(self, messages, **kwargs):  # type: ignore[override]
         return
-        yield  # noqa: E501  # make it an async generator
+        yield  # make it an async generator
 
     def invoke(self, messages, **kwargs):  # type: ignore[override]
         raise NotImplementedError

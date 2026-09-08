@@ -106,7 +106,7 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM", "RUF", "C90", "PT", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "PT011"]
+"tests/**/*.py" = ["S101", "PT011", "N806"]
 "examples/**/*.py" = ["S101", "T201"]
 
 [tool.ruff.lint.isort]

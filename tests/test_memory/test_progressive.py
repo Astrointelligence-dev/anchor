@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 from pydantic import ValidationError
 
+from anchor.llm.models import LLMResponse, StopReason, Usage
+from anchor.memory.callbacks import ProgressiveSummarizationCallback
+from anchor.memory.progressive import ProgressiveSummarizationMemory
+from anchor.models.context import SourceType
 from anchor.models.memory import FactType, KeyFact, SummaryTier, TierConfig
+from anchor.protocols.memory import ConversationMemory
+from tests.conftest import FakeTokenizer
 
 
 class TestFactType:
@@ -59,9 +67,6 @@ class TestTierConfig:
             config.level = 1  # type: ignore[misc]
 
 
-from anchor.memory.callbacks import ProgressiveSummarizationCallback
-
-
 class TestProgressiveSummarizationCallback:
     def test_protocol_exists(self) -> None:
         assert hasattr(ProgressiveSummarizationCallback, 'on_tier_cascade')
@@ -78,15 +83,6 @@ class TestProgressiveSummarizationCallback:
                 pass
 
         assert isinstance(MyCallback(), ProgressiveSummarizationCallback)
-
-
-from unittest.mock import MagicMock
-
-from anchor.llm.models import LLMResponse, StopReason, Usage
-from anchor.memory.progressive import ProgressiveSummarizationMemory
-from anchor.models.memory import TierConfig
-from anchor.protocols.memory import ConversationMemory
-from tests.conftest import FakeTokenizer
 
 
 def _make_llm_response(content: str) -> LLMResponse:
@@ -155,9 +151,6 @@ class TestProgressiveConstruction:
         assert mem.turns == []
         assert mem.facts == []
         assert mem.summary is None
-
-
-from anchor.models.context import SourceType
 
 
 class TestProgressiveCascade:
@@ -270,7 +263,13 @@ class TestProgressiveContextOutput:
         items = mem.to_context_items(priority=7)
         # Should have tier 1 summary + verbatim turns
         summary_items = [i for i in items if i.metadata.get("summary")]
-        verbatim_items = [i for i in items if not i.metadata.get("summary") and i.source == SourceType.CONVERSATION]
+        verbatim_items = [
+            i
+            for i in items
+            if not i.metadata.get("summary") and i.source == SourceType.CONVERSATION
+        ]
+        assert verbatim_items
+        [i for i in items if not i.metadata.get("summary") and i.source == SourceType.CONVERSATION]
 
         # Tier 1 should be at priority 6
         if summary_items:

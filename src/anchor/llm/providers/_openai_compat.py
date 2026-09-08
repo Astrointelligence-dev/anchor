@@ -22,7 +22,6 @@ from anchor.llm.models import (
     Usage,
 )
 
-
 # ---------------------------------------------------------------------------
 # Stop reason mapping
 # ---------------------------------------------------------------------------
@@ -46,7 +45,7 @@ def map_stop_reason(finish_reason: str | None) -> StopReason:
 # ---------------------------------------------------------------------------
 
 
-def convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
+def convert_messages(messages: list[Message]) -> list[dict[str, Any]]:  # noqa: C901
     """Convert Anchor messages to OpenAI Chat Completions format.
 
     Key conventions:

@@ -1642,7 +1642,7 @@ class Agent:
             )
         return calls
 
-    def _formatted_to_messages(
+    def _formatted_to_messages(  # noqa: C901
         self, formatted: dict[str, Any],
     ) -> tuple[list[Message], str | None]:
         """Convert pipeline formatted output to list[Message].

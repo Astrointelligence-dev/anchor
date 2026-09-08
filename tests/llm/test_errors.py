@@ -7,12 +7,12 @@ import pytest
 from anchor.llm.errors import (
     AuthenticationError,
     ContentFilterError,
+    LLMTimeoutError,
     ModelNotFoundError,
     ProviderError,
     ProviderNotInstalledError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 
 

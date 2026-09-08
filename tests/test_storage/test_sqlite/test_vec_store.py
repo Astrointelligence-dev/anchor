@@ -6,10 +6,10 @@ import pytest
 
 pytest.importorskip("sqlite_vec")
 
-from anchor.storage.sqlite import SqliteVecVectorStore  # noqa: E402
+from anchor.storage.sqlite import SqliteVecVectorStore
 
 
-@pytest.fixture()
+@pytest.fixture
 def store() -> SqliteVecVectorStore:
     return SqliteVecVectorStore(":memory:", dimensions=3)
 

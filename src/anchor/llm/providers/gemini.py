@@ -21,16 +21,17 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from typing import Any, AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 from anchor.llm.base import BaseLLMProvider
 from anchor.llm.errors import (
     AuthenticationError,
+    LLMTimeoutError,
     ModelNotFoundError,
     ProviderError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
@@ -306,7 +307,7 @@ class GeminiProvider(BaseLLMProvider):
                         return tc.name
         return tool_call_id  # fallback to ID if not found
 
-    def _extract_system_and_convert(
+    def _extract_system_and_convert(  # noqa: C901
         self, messages: list[Message]
     ) -> tuple[str | None, list[dict[str, Any]]]:
         """Split system message out and convert remaining to Gemini Content format.
@@ -336,7 +337,9 @@ class GeminiProvider(BaseLLMProvider):
                             "parts": [
                                 {
                                     "function_response": {
-                                        "name": self._find_tool_name(messages, msg.tool_result.tool_call_id),
+                                        "name": self._find_tool_name(
+                                            messages, msg.tool_result.tool_call_id
+                                        ),
                                         "response": {"content": msg.tool_result.content},
                                     }
                                 }
@@ -432,10 +435,7 @@ class GeminiProvider(BaseLLMProvider):
 
         # Determine stop reason — tool calls always override
         stop_reason: StopReason
-        if tool_calls:
-            stop_reason = StopReason.TOOL_USE
-        else:
-            stop_reason = _map_stop_reason(finish_reason)
+        stop_reason = StopReason.TOOL_USE if tool_calls else _map_stop_reason(finish_reason)
 
         usage_meta = getattr(response, "usage_metadata", None)
         if usage_meta is not None:
@@ -533,7 +533,7 @@ class GeminiProvider(BaseLLMProvider):
     # Error mapping
     # ------------------------------------------------------------------
 
-    def _map_error(self, exc: Exception) -> ProviderError:
+    def _map_error(self, exc: Exception) -> ProviderError:  # noqa: C901
         """Map a google.genai SDK exception to our error hierarchy.
 
         Gemini SDK errors carry a status_code attribute. We map by status code

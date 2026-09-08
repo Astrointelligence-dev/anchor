@@ -15,32 +15,26 @@ from __future__ import annotations
 
 import json
 import os
-from typing import AsyncIterator, Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from anchor.llm.errors import (
     AuthenticationError,
+    LLMTimeoutError,
     ModelNotFoundError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 from anchor.llm.models import (
-    ContentBlock,
     LLMResponse,
     Message,
     Role,
     StopReason,
-    StreamChunk,
     ToolCall,
-    ToolCallDelta,
     ToolResult,
     ToolSchema,
-    Usage,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -651,7 +645,7 @@ class TestDoInvoke:
         mock_genai.Client.return_value.models.generate_content.side_effect = AuthErr("bad key")
 
         messages = [Message(role=Role.USER, content="Hi")]
-        with pytest.raises(Exception):
+        with pytest.raises(AuthenticationError):
             self.provider._do_invoke(messages, tools=None)
 
     @patch("anchor.llm.providers.gemini.genai")

@@ -149,7 +149,7 @@ class TestNewParsers:
             DocxParser().parse(raw)
 
     def test_docx_rejects_non_zip(self) -> None:
-        with pytest.raises(IngestionError, match="valid .docx"):
+        with pytest.raises(IngestionError, match=r"valid \.docx"):
             DocxParser().parse(b"not a zip file")
 
 

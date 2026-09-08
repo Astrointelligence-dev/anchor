@@ -21,25 +21,21 @@ import pytest
 
 from anchor.llm.errors import (
     AuthenticationError,
+    LLMTimeoutError,
     ModelNotFoundError,
     ProviderError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 from anchor.llm.models import (
     LLMResponse,
     Message,
     Role,
     StopReason,
-    StreamChunk,
     ToolCall,
-    ToolCallDelta,
     ToolResult,
     ToolSchema,
-    Usage,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

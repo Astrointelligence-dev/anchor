@@ -29,7 +29,9 @@ class TestRagSkill:
     def test_creates_valid_skill(self) -> None:
         ctx = InMemoryContextStore()
         vec = InMemoryVectorStore()
-        retriever = DenseRetriever(context_store=ctx, vector_store=vec, embed_fn=_fake_embed, tokenizer=_Tok())
+        retriever = DenseRetriever(
+            context_store=ctx, vector_store=vec, embed_fn=_fake_embed, tokenizer=_Tok()
+        )
         skill = rag_skill(retriever, _fake_embed)
         assert skill.name == "rag"
         assert skill.activation == "on_demand"
@@ -38,14 +40,18 @@ class TestRagSkill:
     def test_tool_name(self) -> None:
         ctx = InMemoryContextStore()
         vec = InMemoryVectorStore()
-        retriever = DenseRetriever(context_store=ctx, vector_store=vec, embed_fn=_fake_embed, tokenizer=_Tok())
+        retriever = DenseRetriever(
+            context_store=ctx, vector_store=vec, embed_fn=_fake_embed, tokenizer=_Tok()
+        )
         skill = rag_skill(retriever, _fake_embed)
         assert skill.tools[0].name == "search_docs"
 
     def test_has_instructions(self) -> None:
         ctx = InMemoryContextStore()
         vec = InMemoryVectorStore()
-        retriever = DenseRetriever(context_store=ctx, vector_store=vec, embed_fn=_fake_embed, tokenizer=_Tok())
+        retriever = DenseRetriever(
+            context_store=ctx, vector_store=vec, embed_fn=_fake_embed, tokenizer=_Tok()
+        )
         skill = rag_skill(retriever, _fake_embed)
         assert skill.instructions != ""
         assert "search_docs" in skill.instructions
@@ -53,7 +59,9 @@ class TestRagSkill:
     def test_has_tags(self) -> None:
         ctx = InMemoryContextStore()
         vec = InMemoryVectorStore()
-        retriever = DenseRetriever(context_store=ctx, vector_store=vec, embed_fn=_fake_embed, tokenizer=_Tok())
+        retriever = DenseRetriever(
+            context_store=ctx, vector_store=vec, embed_fn=_fake_embed, tokenizer=_Tok()
+        )
         skill = rag_skill(retriever, _fake_embed)
         assert "retrieval" in skill.tags
 

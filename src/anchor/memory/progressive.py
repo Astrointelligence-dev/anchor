@@ -55,7 +55,9 @@ def _derive_tier_config(max_tokens: int) -> list[TierConfig]:
         TierConfig(level=0, max_tokens=max_tokens // 2, target_tokens=0, priority=7),
         TierConfig(level=1, max_tokens=max_tokens // 4, target_tokens=max_tokens // 8, priority=6),
         TierConfig(level=2, max_tokens=max_tokens // 8, target_tokens=max_tokens // 16, priority=5),
-        TierConfig(level=3, max_tokens=max_tokens // 16, target_tokens=max_tokens // 32, priority=4),
+        TierConfig(
+            level=3, max_tokens=max_tokens // 16, target_tokens=max_tokens // 32, priority=4
+        ),
     ]
 
 
@@ -283,7 +285,9 @@ class ProgressiveSummarizationMemory:
         existing_summary = existing_t1.content if existing_t1 else None
         existing_count = existing_t1.source_turn_count if existing_t1 else 0
 
-        t1_config = self._tier_configs.get(1, TierConfig(level=1, max_tokens=1024, target_tokens=500))
+        t1_config = self._tier_configs.get(
+            1, TierConfig(level=1, max_tokens=1024, target_tokens=500)
+        )
 
         try:
             new_summary = self._compactor.summarize(
@@ -366,12 +370,16 @@ class ProgressiveSummarizationMemory:
         # Extract facts from the source tier content (not for tier 2→3)
         if from_level < 2:
             try:
-                new_facts = self._compactor.extract_facts(source_tier.content, source_tier=from_level)
+                new_facts = self._compactor.extract_facts(
+                    source_tier.content, source_tier=from_level
+                )
                 if new_facts:
                     self._add_facts(new_facts)
                     self._fire_callback("on_facts_extracted", new_facts, from_level)
             except Exception:
-                logger.warning("Fact extraction failed during tier %d→%d cascade", from_level, to_level)
+                logger.warning(
+                    "Fact extraction failed during tier %d→%d cascade", from_level, to_level
+                )
 
         # Clear the source tier after cascading
         self._tiers[from_level] = None
@@ -430,7 +438,9 @@ class ProgressiveSummarizationMemory:
             existing_t1 = self._tiers.get(1)
             existing_summary = existing_t1.content if existing_t1 else None
             existing_count = existing_t1.source_turn_count if existing_t1 else 0
-            t1_config = self._tier_configs.get(1, TierConfig(level=1, max_tokens=1024, target_tokens=500))
+            t1_config = self._tier_configs.get(
+                1, TierConfig(level=1, max_tokens=1024, target_tokens=500)
+            )
 
         try:
             new_summary = await self._compactor.asummarize(
@@ -451,7 +461,9 @@ class ProgressiveSummarizationMemory:
                 source_turn_count=existing_count + turn_count,
                 created_at=existing_t1.created_at if existing_t1 else now, updated_at=now,
             )
-        self._fire_callback("on_tier_cascade", 0, 1, self._tokenizer.count_tokens(serialized), summary_tokens)
+        self._fire_callback(
+            "on_tier_cascade", 0, 1, self._tokenizer.count_tokens(serialized), summary_tokens
+        )
 
         try:
             new_facts = await self._compactor.aextract_facts(serialized, source_tier=0)
@@ -472,7 +484,9 @@ class ProgressiveSummarizationMemory:
             if source_tier is None:
                 return
 
-            to_config = self._tier_configs.get(to_level, TierConfig(level=to_level, max_tokens=64, target_tokens=20))
+            to_config = self._tier_configs.get(
+                to_level, TierConfig(level=to_level, max_tokens=64, target_tokens=20)
+            )
             existing_target = self._tiers.get(to_level)
             existing_summary = existing_target.content if existing_target else None
             existing_count = existing_target.source_turn_count if existing_target else 0
@@ -499,17 +513,23 @@ class ProgressiveSummarizationMemory:
 
         if from_level < 2:
             try:
-                new_facts = await self._compactor.aextract_facts(source_tier.content, source_tier=from_level)
+                new_facts = await self._compactor.aextract_facts(
+                    source_tier.content, source_tier=from_level
+                )
                 if new_facts:
                     with self._lock:
                         self._add_facts(new_facts)
                     self._fire_callback("on_facts_extracted", new_facts, from_level)
             except Exception:
-                logger.warning("Async fact extraction failed during tier %d→%d cascade", from_level, to_level)
+                logger.warning(
+                    "Async fact extraction failed during tier %d→%d cascade", from_level, to_level
+                )
 
         with self._lock:
             self._tiers[from_level] = None
-        self._fire_callback("on_tier_cascade", from_level, to_level, source_tier.token_count, summary_tokens)
+        self._fire_callback(
+            "on_tier_cascade", from_level, to_level, source_tier.token_count, summary_tokens
+        )
 
         if to_level < 3 and summary_tokens > to_config.max_tokens:
             await self._cascade_tier_async(to_level, to_level + 1)

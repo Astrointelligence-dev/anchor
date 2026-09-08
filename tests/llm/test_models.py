@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from anchor.llm.models import (
     ContentBlock,
@@ -49,7 +50,7 @@ class TestContentBlock:
 
     def test_frozen(self):
         block = ContentBlock(type="text", text="hello")
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             block.text = "world"
 
 
@@ -62,7 +63,7 @@ class TestToolCall:
 
     def test_frozen(self):
         tc = ToolCall(id="call_1", name="get_weather", arguments={})
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             tc.name = "other"
 
 

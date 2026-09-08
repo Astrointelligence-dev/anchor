@@ -26,12 +26,12 @@ from anchor.llm.base import BaseLLMProvider, LLMProvider
 from anchor.llm.errors import (
     AuthenticationError,
     ContentFilterError,
+    LLMTimeoutError,
     ModelNotFoundError,
     ProviderError,
     ProviderNotInstalledError,
     RateLimitError,
     ServerError,
-    LLMTimeoutError,
 )
 from anchor.llm.fallback import FallbackProvider
 from anchor.llm.models import (
@@ -51,19 +51,22 @@ from anchor.llm.pricing import MODEL_PRICING, calculate_cost
 from anchor.llm.registry import create_provider, register_provider
 
 __all__ = [
-    # Base / Protocol
+    "MODEL_PRICING",
+    "AuthenticationError",
     "BaseLLMProvider",
-    "LLMProvider",
-    # Registry
-    "create_provider",
-    "register_provider",
-    # Fallback
-    "FallbackProvider",
-    # Models
     "ContentBlock",
+    "ContentFilterError",
+    "FallbackProvider",
+    "LLMProvider",
     "LLMResponse",
+    "LLMTimeoutError",
     "Message",
+    "ModelNotFoundError",
+    "ProviderError",
+    "ProviderNotInstalledError",
+    "RateLimitError",
     "Role",
+    "ServerError",
     "StopReason",
     "StreamChunk",
     "ToolCall",
@@ -71,16 +74,7 @@ __all__ = [
     "ToolResult",
     "ToolSchema",
     "Usage",
-    # Errors
-    "AuthenticationError",
-    "ContentFilterError",
-    "ModelNotFoundError",
-    "ProviderError",
-    "ProviderNotInstalledError",
-    "RateLimitError",
-    "ServerError",
-    "LLMTimeoutError",
-    # Pricing
-    "MODEL_PRICING",
     "calculate_cost",
+    "create_provider",
+    "register_provider",
 ]

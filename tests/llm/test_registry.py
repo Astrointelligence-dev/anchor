@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import threading
-from typing import AsyncIterator, Iterator
 
 import pytest
 
 from anchor.llm.base import BaseLLMProvider
 from anchor.llm.errors import ProviderNotInstalledError
-from anchor.llm.models import LLMResponse, Message, StreamChunk, StopReason, ToolSchema, Usage
+from anchor.llm.models import LLMResponse, Message, StopReason, StreamChunk, Usage
 from anchor.llm.registry import (
-    _parse_model_string,
     _PROVIDER_MODULES,
     _PROVIDERS,
+    _parse_model_string,
     create_provider,
     register_provider,
 )
