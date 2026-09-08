@@ -1,8 +1,8 @@
 site_name: anchor
 site_description: Context engineering toolkit for AI applications
-site_url: https://artcgranja.github.io/anchor/
-repo_url: https://github.com/artcgranja/anchor
-repo_name: artcgranja/anchor
+site_url: https://astrointelligence-dev.github.io/anchor/
+repo_url: https://github.com/Astrointelligence-dev/anchor
+repo_name: Astrointelligence-dev/anchor
 copyright: Copyright &copy; 2026 Astro — MIT License
 edit_uri: edit/main/docs/docs/
 
@@ -161,7 +161,7 @@ markdown_extensions:
   - pymdownx.magiclink:
       normalize_issue_symbols: true
       repo_url_shorthand: true
-      user: artcgranja
+      user: Astrointelligence-dev
       repo: anchor
   - pymdownx.mark
   - pymdownx.smartsymbols
@@ -185,7 +185,7 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/artcgranja/anchor
+      link: https://github.com/Astrointelligence-dev/anchor
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/astro-anchor/
   generator: false
